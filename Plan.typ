@@ -59,7 +59,7 @@ image
 (Tebe)
 *Context*: what is 3DGS, 4DGS, current techniques.
 
-4DGS is a popular technique, but limited by the fact that the model must train on the video. This makes it GPU intensive.
+Since 2023, 3D Gaussian Splatting (3DGS) has become an important model architecture for converting images into a 3D representation. This allows users to construct novel views and reconstruct scenes in space since the environment can be learnt with high visual quality. Scenes are encoded into models by performing training using a set of images, which produces a set of Gaussians distributions in space, with mean, covariance matrix representing spread, and encode color. During training, the Gaussians are projected into images, compared with observed frames, and iteratively updated, so views match the captured scene across space and time faithfully. At this point, rendering is immediate, by combining the color contributions of all distributions. Adding a time component, we obtain 4DGS, which is able to learn from a video to reconstruct the scene in 3D space, tracing how it evolves over time. Gaussian Splatting models can produce high-resolution results, but can be inefficient in the number and size of Gaussians, which is an issue.
 
 (Stefana)
 *Problem Formulation*: Clearly define the problem your project aims to address. Explain what gap, challenge, or opportunity you are focusing on.
@@ -67,9 +67,7 @@ image
 (Tebe)
 *Importance and Relevance of the Problem*: Justify why this problem matters. Discuss its practical, societal, or academic significance, and explain who would benefit from solving it.
 
-Many applications in the real world:
-- Scene Capture and Reconstruction
-- Democratizes the tool, so anyone can do it without an powerful computer.
+If one can make 4D Gaussian splatting models lightweight and efficient, it would move high-quality dynamic scene capture from specialized hardware to everyday devices. Real-world uses include mobile AR, telepresence, digital twins, gaming, filmmaking, e-commerce, robotics, and assistive technologies that need fast understanding of changing environments. Running such models on a phone would democratize 3D and 4D content creation, allowing users to scan, replay, and share immersive scenes anywhere without a powerful GPU. This would lower cost, improve accessibility, and expand adoption in education, healthcare, field inspection, tourism, and social media. We are talking about being able to take a video, and immediately obtain a 3D representation of the scene, over time, with spatial consistency.
 
 (Ali)
 *Data Sourcing Strategy*: Describe how you plan to obtain or generate the data required for your project.
