@@ -29,13 +29,13 @@ _They note that pruning ratio is a hyperparameter that may result in poor perfor
 
 = Important differences between the methods:
 -Focus:
-       Instant4D: fast reconstruction
-       1000fps: rendering speed and pruning
-       Usplat4D: stability and confidence
+  Instant4D: fast reconstruction
+  1000fps: rendering speed and pruning
+  Usplat4D: stability and confidence
 -Weaknesses:
-       Instant4D: no semantic awarness
-       1000fps: afressive pruning -> may lose detail
-       Usplat4D: complex pipeline, which is harder to modify
+  Instant4D: no semantic awarness
+  1000fps: afressive pruning -> may lose detail
+  Usplat4D: complex pipeline, which is harder to modify
 
 = What none of them is doing:
   1.Object level control
@@ -53,5 +53,42 @@ video
 
 image
 - #link("https://cs.nyu.edu/~fergus/datasets/nyu_depth_v2.html")[Image Depth]
-- #link("")[]
-- 
+
+= Project Plan
+
+(Tebe)
+*Context*: what is 3DGS, 4DGS, current techniques.
+
+4DGS is a popular technique, but limited by the fact that the model must train on the video. This makes it GPU intensive.
+
+(Stefana)
+*Problem Formulation*: Clearly define the problem your project aims to address. Explain what gap, challenge, or opportunity you are focusing on.
+
+(Tebe)
+*Importance and Relevance of the Problem*: Justify why this problem matters. Discuss its practical, societal, or academic significance, and explain who would benefit from solving it.
+
+Many applications in the real world:
+- Scene Capture and Reconstruction
+- Democratizes the tool, so anyone can do it without an powerful computer.
+
+(Ali)
+*Data Sourcing Strategy*: Describe how you plan to obtain or generate the data required for your project.
+
+Datasets already exists, we can use the same ones from the datasets.
+
+(Stefana)
+*Proposed Solution* (High-Level Overview): Provide a overview of your proposed approach or solution. Focus on the key idea and overall strategy rather than implementation details.
+
+Combine the techniques and evaluate achievable results. 
+
+We identified two papers that add inductive bias to make training faster and the final results smaller. 
+- 1000FPS:
+- Instant4D:
+We would like to close the gap by being able to run the model on a phone: this means reducing compute, model size and output size.
+
+We would use for compression the techniques in:
+- Mobile-GS:
+
+(Ali)
+*Performance Evaluation Approach*: Explain how you plan to assess your solution's effectiveness. Specify the metrics, benchmarks, or evaluation criteria you intend to use and why they are appropriate for your problem.
+
