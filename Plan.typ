@@ -15,8 +15,10 @@ _They note that pruning ratio is a hyperparameter that may result in poor perfor
 
 - Usplat4D:
   1. Gaussians that are observed in multiple frames should be used as anchors.
-  2. A graph is built, where nodes and edges are partitioned by confident / not.
-  3.
+  2. A graph is built, where nodes and edges are partitioned by confident / not. Edges are tempral/spatial consistency.
+  3. Gaussians are split into: high-confidence (stable) and low-confidence (noisy). The high-confidence onces act as anchors for motion consistency.
+  4. Not all Gaussians are equal -> treat the stable ones differently. This helps reduce unstable geometry and flickery.
+  5. Graph construction is expensive. Hard to scale
 
 = Metrics
 
@@ -24,6 +26,22 @@ _They note that pruning ratio is a hyperparameter that may result in poor perfor
 - Learned Perceptual Image Patch Similarity (LPIPS): using AlexNet [15] and VGGNet on the N3V dataset and the D-NeRF dataset,.
 
 = Datasets:
+
+= Important differences between the methods:
+-Focus:
+       Instant4D: fast reconstruction
+       1000fps: rendering speed and pruning
+       Usplat4D: stability and confidence
+-Weaknesses:
+       Instant4D: no semantic awarness
+       1000fps: afressive pruning -> may lose detail
+       Usplat4D: complex pipeline, which is harder to modify
+
+= What none of them is doing:
+  1.Object level control
+  2.Interactive editing
+  3.Segmentation integration
+  -All operate at Gaussian-level only!
 
 video
 - #link("https://github.com/KAIR-BAIR/dycheck/blob/main/docs/DATASETS.md")[dycheck - monocular clips]
