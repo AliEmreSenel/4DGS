@@ -64,6 +64,11 @@ Since 2023, 3D Gaussian Splatting (3DGS) has become an important model architect
 (Stefana)
 *Problem Formulation*: Clearly define the problem your project aims to address. Explain what gap, challenge, or opportunity you are focusing on.
 
+== Problem Formulation
+
+Current 4D Gaussian Splatting represents a breakthrough in the dynamic scene reconstruction, but its high computational and storage demands remain a critical limitation for mobile deployment. Standard models are GPU-intensive, requiring gigabytes of data for short videos and relying on a depth-sorting bottleneck that cripples mobile frame rates. Our project addresses these limitations by targeting the 'Gigabyte Problem' and the inefficiency of traditional alpha blending, which forces a per-frame depth-sorting process that consumes up to 50% of the GPU's rendering time. Without significant optimization, photorealistic 3D and 4D experiences will stay stuck on high-end computers. Our goal is to break that barrier so anyone with a phone can experience high-quality 4D rendering.
+
+
 (Tebe)
 *Importance and Relevance of the Problem*: Justify why this problem matters. Discuss its practical, societal, or academic significance, and explain who would benefit from solving it.
 
@@ -75,7 +80,7 @@ If one can make 4D Gaussian splatting models lightweight and efficient, it would
 Datasets already exists, we can use the same ones from the datasets.
 
 (Stefana)
-*Proposed Solution* (High-Level Overview): Provide a overview of your proposed approach or solution. Focus on the key idea and overall strategy rather than implementation details.
+*Proposed Solution* (High-Level Overview): Provide an overview of your proposed approach or solution. Focus on the key idea and overall strategy rather than implementation details.
 
 Combine the techniques and evaluate achievable results. 
 
@@ -86,6 +91,11 @@ We would like to close the gap by being able to run the model on a phone: this m
 
 We would use for compression the techniques in:
 - Mobile-GS:
+
+== Proposed solution
+Our idea is to combine efficiency-oriented techniques from Instant4D and 1000FPS to design a lightweight 4D Gaussian Splatting pipeline suitable for mobile devices. Instant4D provides a simplified representation through isotropic Gaussians and reduced color complexity, while 1000FPS introduces aggressive pruning based on spatio-temporal importance to minimize redundant Gaussians. To further reduce memory footprint and computation, we incorporate compression strategies that we have discovered in other research papers. Our overall strategy is to balance quality and efficiency by adapting these methods into a unified pipeline, enabling near real-time 4D scene rendering on resource-constrained devices such as smartphones.
+
+
 
 (Ali)
 *Performance Evaluation Approach*: Explain how you plan to assess your solution's effectiveness. Specify the metrics, benchmarks, or evaluation criteria you intend to use and why they are appropriate for your problem.
