@@ -59,20 +59,17 @@ image
 (Tebe)
 *Context*: what is 3DGS, 4DGS, current techniques.
 
-Since 2023, 3D Gaussian Splatting (3DGS) has become an important model architecture for converting images into a 3D representation. This allows users to construct novel views and reconstruct scenes in space since the environment can be learnt with high visual quality. Scenes are encoded into models by performing training using a set of images, which produces a set of Gaussians distributions in space, with mean, covariance matrix representing spread, and encode color. During training, the Gaussians are projected into images, compared with observed frames, and iteratively updated, so views match the captured scene across space and time faithfully. At this point, rendering is immediate, by combining the color contributions of all distributions. Adding a time component, we obtain 4DGS, which is able to learn from a video to reconstruct the scene in 3D space, tracing how it evolves over time. Gaussian Splatting models can produce high-resolution results, but can be inefficient in the number and size of Gaussians, which is an issue.
+3D Gaussian Splatting (3DGS) has become an important model architecture for converting images into a 3D representation. This allows users to construct novel views and reconstruct scenes in space since the environment can be learnt with high visual quality. Scenes are encoded into models by performing training using a set of images, which produces a set of Gaussians distributions in space, with mean, covariance matrix representing spread, and encode color. During training, the Gaussians are projected into images, compared with observed frames, and iteratively updated, so views match the captured scene across space and time faithfully. At this point, rendering is immediate, by combining the color contributions of all distributions. Adding a time component, we obtain 4DGS, which is able to learn from a video to reconstruct the scene in 3D space, tracing how it evolves over time. Gaussian Splatting models can produce high-resolution results, but can be inefficient in the number and size of Gaussians, which is an issue. Recent developments have produced more efficient architectures, and we identified a paper that was able to run 3DGS on a mobile device.
 
 (Stefana)
 *Problem Formulation*: Clearly define the problem your project aims to address. Explain what gap, challenge, or opportunity you are focusing on.
 
-== Problem Formulation
-
-Current 4D Gaussian Splatting represents a breakthrough in the dynamic scene reconstruction, but its high computational and storage demands remain a critical limitation for mobile deployment. Standard models are GPU-intensive, requiring gigabytes of data for short videos and relying on a depth-sorting bottleneck that cripples mobile frame rates. Our project addresses these limitations by targeting the 'Gigabyte Problem' and the inefficiency of traditional alpha blending, which forces a per-frame depth-sorting process that consumes up to 50% of the GPU's rendering time. Without significant optimization, photorealistic 3D and 4D experiences will stay stuck on high-end computers. Our goal is to break that barrier so anyone with a phone can experience high-quality 4D rendering.
-
+Standard models are GPU-intensive, requiring tens of gigabytes of VRAM (GPU ram) for short videos. Since the technique has to run on a mobile device, we need to reduce memory and processing during training, as well as the final size of the output. Recent state-of-the-art results show that 4D model size can be reduced from 2.1 GB to 50 MB, a 41x compression, while efficient pipelines cut GPU memory from about 21 GB to 8 GB, or even 1.1 GB in lightweight modes, and reduce training from roughly 1.2 hours to just 2-7 minutes. On-device Gaussian rendering has also compressed final scene representations from 121 MB to 4.6 MB while sustaining 74-127 FPS on phone-class hardware. Without significant optimization, photorealistic 3D and 4D experiences will stay stuck on high-end computers. Our goal is to break that barrier, so anyone with a phone can experience high-quality 4D rendering.
 
 (Tebe)
 *Importance and Relevance of the Problem*: Justify why this problem matters. Discuss its practical, societal, or academic significance, and explain who would benefit from solving it.
 
-If one can make 4D Gaussian splatting models lightweight and efficient, it would move high-quality dynamic scene capture from specialized hardware to everyday devices. Real-world uses include mobile AR, telepresence, digital twins, gaming, filmmaking, e-commerce, robotics, and assistive technologies that need fast understanding of changing environments. Running such models on a phone would democratize 3D and 4D content creation, allowing users to scan, replay, and share immersive scenes anywhere without a powerful GPU. This would lower cost, improve accessibility, and expand adoption in education, healthcare, field inspection, tourism, and social media. We are talking about being able to take a video, and immediately obtain a 3D representation of the scene, over time, with spatial consistency.
+Making 4D Gaussian splatting models lightweight and efficient would move high-quality dynamic scene capture from specialized hardware to everyday devices. Real-world uses include mobile AR, telepresence, digital twins, gaming, filmmaking, e-commerce, robotics, and assistive technologies that need fast understanding of changing environments. Running such models on a phone would democratize 3D and 4D content creation, allowing users to scan, replay, and share immersive scenes anywhere without a powerful GPU. This would lower cost, improve accessibility, and expand adoption in education, healthcare, field inspection, tourism, and social media. We are talking about being able to take a video, and immediately obtain a 3D representation of the scene, over time, with spatial consistency.
 
 (Ali)
 *Data Sourcing Strategy*: Describe how you plan to obtain or generate the data required for your project.
@@ -80,22 +77,8 @@ If one can make 4D Gaussian splatting models lightweight and efficient, it would
 Datasets already exists, we can use the same ones from the datasets.
 
 (Stefana)
-*Proposed Solution* (High-Level Overview): Provide an overview of your proposed approach or solution. Focus on the key idea and overall strategy rather than implementation details.
-
-Combine the techniques and evaluate achievable results. 
-
-We identified two papers that add inductive bias to make training faster and the final results smaller. 
-- 1000FPS:
-- Instant4D:
-We would like to close the gap by being able to run the model on a phone: this means reducing compute, model size and output size.
-
-We would use for compression the techniques in:
-- Mobile-GS:
-
-== Proposed solution
-Our idea is to combine efficiency-oriented techniques from Instant4D and 1000FPS to design a lightweight 4D Gaussian Splatting pipeline suitable for mobile devices. Instant4D provides a simplified representation through isotropic Gaussians and reduced color complexity, while 1000FPS introduces aggressive pruning based on spatio-temporal importance to minimize redundant Gaussians. To further reduce memory footprint and computation, we incorporate compression strategies that we have discovered in other research papers. Our overall strategy is to balance quality and efficiency by adapting these methods into a unified pipeline, enabling near real-time 4D scene rendering on resource-constrained devices such as smartphones.
-
-
+*Proposed Solution* (High-Level Overview): Provide an overview of your proposed approach or solution. Focus on the key idea and overall strategy rather than implementation details. 
+Our *proposed solution* is to combine efficiency-oriented techniques from Instant4D and 1000FPS and design a lightweight 4D Gaussian Splatting pipeline suitable for mobile devices. We use `Instant4D paper` for a faster pipeline, based on isotropic Gaussians and a reduced color complexity, and `1000FPS` to introduce aggressive pruning based on spatio-temporal importance to minimize redundant Gaussians, which speeds up rendering. To further reduce memory footprint and computation, we incorporate compression strategies from the Mobile-GS paper such as quantization and k-means codebook compression, but we extend their results to a 4D architecture. Our overall strategy is to balance quality and efficiency by adapting these methods into a unified pipeline, enabling near real-time 4D scene rendering on resource-constrained devices like smartphones.  
 
 (Ali)
 *Performance Evaluation Approach*: Explain how you plan to assess your solution's effectiveness. Specify the metrics, benchmarks, or evaluation criteria you intend to use and why they are appropriate for your problem.
