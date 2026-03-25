@@ -76,6 +76,10 @@ Making 4D Gaussian splatting models lightweight and efficient would move high-qu
 
 - *Neural 3D Video (N3V)* contains real dynamic scenes captured from multiple viewpoints and is commonly used to evaluate novel-view synthesis methods on realistic motion, appearance changes, and temporal consistency.
 - *D-NeRF* is a synthetic dynamic-scene benchmark with monocular videos and known camera trajectories, making it useful for testing view synthesis quality under controlled motion and geometry.
+- *NSFF* contains real dynamic scenes captured with forward-facing monocular videos, and is commonly used to evaluate methods for jointly modeling scene geometry, motion, and novel-view synthesis in casually captured dynamic videos.
+- *Nerfies* is a real-world dynamic-scene benchmark focused on non-rigid deformations such as facial expressions and body motion, making it useful for testing view synthesis and deformation modeling under complex non-rigid motion.
+- *Hyper-NeRF* extends the Nerfies setting with scenes that exhibit more complex topological changes and non-rigid motion, and is widely used to evaluate methods that need to model deformations beyond simple continuous warps.
+- *Ego4DGS* contains egocentric dynamic scenes captured from wearable first-person cameras, and is useful for evaluating dynamic rendering and reconstruction methods under strong camera motion, frequent occlusions, and everyday real-world interactions.
 - *NVIDIA Dynamic Scene* contains multi-view dynamic scenes and is widely used to evaluate 4D reconstruction and rendering methods on jointly modeling space, time, and viewpoint changes.
 - *DyCheck iPhone* is a monocular dynamic-scene benchmark captured with handheld phones, and is useful for assessing robustness on real-world videos with challenging motion, parallax, and capture noise.
 
