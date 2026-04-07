@@ -1,48 +1,145 @@
+ == Papers
 
-= Papers
-- Instant4D:: 
-  1. MegaSAM for camera intrisic estimation
-  2. Gaussian Splatting, but isotropic, in order to make training more stable by reducing the degrees of freedom (orientation matrix is fixed so R = I)
-  3. Color uses a single RGB instead of superimposition of spherical harmonics. 
-  4. Grid Pruning: voxel-based compression, which reduces the size of the model activations. 
+- *4DGS* (*4D Gaussian Splatting for Real-Time Dynamic Scene Rendering*) uses a *hybrid explicit representation* built from one *canonical set of 3D Gaussians* together with a *4D neural voxel field*, instead of storing separate Gaussians for each frame. This is the main compactness choice. A *Gaussian deformation field network* then maps the canonical Gaussians at time *t* into their deformed state for that timestamp.
 
-- 1000fps:
-  1. Penalisation of Short-Lived Gaussians: by not having the temporal effect, gaussians normally get added at each frame, which is problematic and wasteful. The smallest gaussians happen the most at the edge of moving objects. This is because 4DGS treats space and distance directions the same.
-  2. Inactive Gaussians: they use `active ratio` to quantify how many gaussians are actually rendered, since a lot of them are small, near and inactive. They also use `Activation-Intersection-Over-Union` to quantify role.
-  3. Solution is to prune globally gaussians with low `Spatio-Temporal Variation Score`: Spatial Score (refers to contribution to the pixels of the video), Temporal Score (higher for longer-lasting - 2nd derivative of temporal opacity -> tanh). Scores are combined so Gaussians have to last and be visible at the same time. Then optimise the remaining gaussians.
-  4. Nearby Gaussians are made to share their temporal mask, so they get treated as a larger objects.
-_They note that pruning ratio is a hyperparameter that may result in poor performance_
+  The encoder is a *spatial-temporal structure encoder* built from *6 decomposed multi-resolution planes*: *(x,y)*, *(x,z)*, *(y,z)*, *(x,t)*, *(y,t)*, and *(z,t)*. This is inspired by *HexPlane / K-Planes*, and the queried features are fused with a tiny *MLP*. The decoder is a *tiny multi-head network* with separate *MLP heads* for *position*, *rotation*, and *scale* deformation of each Gaussian.
 
-- Usplat4D:
-  1. Gaussians that are observed in multiple frames should be used as anchors.
-  2. A graph is built, where nodes and edges are partitioned by confident / not. Edges are tempral/spatial consistency.
-  3. Gaussians are split into: high-confidence (stable) and low-confidence (noisy). The high-confidence onces act as anchors for motion consistency.
-  4. Not all Gaussians are equal -> treat the stable ones differently. This helps reduce unstable geometry and flickery.
-  5. Graph construction is expensive. Hard to scale
+  After deformation, the model uses standard *differentiable Gaussian splatting* for rendering. The pipeline is: *canonical 3D Gaussians + time -> plane features -> fused feature -> per-Gaussian deformation -> deformed 3D Gaussians -> splatting*. During training, the method first *warms up with static 3D Gaussian optimization* for about *3000 iterations*, then switches on the *4D deformation model*. In one line: *4D-GS = canonical 3D Gaussians + compact space-time feature planes + tiny deformation heads + Gaussian splatting renderer*.
 
-= Metrics
+- *Instant4D* uses a compact dynamic-scene design built around a *canonical set of 3D Gaussians* together with a *4D neural voxel field*, instead of storing separate Gaussians for each frame. For camera intrinsics it uses *MegaSAM*. Its Gaussian representation is made *isotropic* to improve training stability by reducing degrees of freedom, with the orientation fixed so *R = I*. It also simplifies appearance by using a single *RGB color* rather than spherical harmonics, and applies *grid pruning* as a voxel-based compression method to reduce activation size.
 
-- Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index Measure (SSIM), and
-- Learned Perceptual Image Patch Similarity (LPIPS): using AlexNet [15] and VGGNet on the N3V dataset and the D-NeRF dataset,.
+  The deformation model maps canonical Gaussians at time *t* into their deformed state for that timestamp. The encoder is a *spatial-temporal structure encoder* built from *six decomposed multi-resolution planes*: *(x,y)*, *(x,z)*, *(y,z)*, *(x,t)*, *(y,t)*, and *(z,t)*, inspired by *HexPlane / K-Planes*, followed by a tiny *MLP* for feature fusion. A small multi-head decoder then predicts *position*, *rotation*, and *scale* deformations per Gaussian. After deformation, rendering is done with standard *differentiable Gaussian splatting*.
 
-= Datasets:
+  The training procedure first warms up with *static 3D Gaussian optimization* for about *3000 iterations*, then activates the 4D deformation model. In one line: *Instant4D / 4D-GS = canonical 3D Gaussians + compact space-time feature planes + tiny deformation heads + Gaussian splatting renderer*.
 
-= Important differences between the methods:
--Focus:
-  Instant4D: fast reconstruction
-  1000fps: rendering speed and pruning
-  Usplat4D: stability and confidence
--Weaknesses:
-  Instant4D: no semantic awarness
-  1000fps: afressive pruning -> may lose detail
-  Usplat4D: complex pipeline, which is harder to modify
+- *4DGS-1K* (*1000+ FPS 4D Gaussian Splatting for Dynamic Scene Rendering*) starts from standard *4D Gaussian Splatting*, where the scene is represented by *4D Gaussians* over *(x,y,z,t)* with a *4D covariance*. At each timestamp, every 4D Gaussian is conditioned into a *3D spatial Gaussian* and a *1D temporal Gaussian*. The temporal component controls visibility and opacity, and the visible 3D Gaussians are then alpha-composited.
 
-= What none of them is doing:
-  1.Object level control
-  2.Interactive editing
-  3.Segmentation integration
-  -All operate at Gaussian-level only!
+  The main issue the paper targets is the accumulation of many *short-lived Gaussians*, especially around moving object boundaries. These are wasteful and unstable, partly because vanilla 4DGS does not distinguish well enough between spatial and temporal behavior. The paper measures how many Gaussians are actually useful through quantities such as *active ratio* and *Activation-Intersection-Over-Union*, then introduces a *Spatio-Temporal Variation Score* to rank Gaussians globally. This score combines a *spatial score*, reflecting contribution to rendered pixels, with a *temporal score*, reflecting persistence over time. Low-score, flickering Gaussians are pruned.
 
+  To accelerate inference further, the method stores *active-Gaussian masks* on sparse *keyframes*, and at test time reuses the *union of the two nearest keyframe masks* so inactive Gaussians can be skipped. Nearby Gaussians can also share a temporal mask, making them behave more like larger coherent objects. The overall pipeline is: *train vanilla 4DGS -> prune globally -> precompute active masks -> fine-tune the remaining Gaussians*. One caveat is that the *pruning ratio* is a sensitive hyperparameter and can hurt quality if chosen poorly.
+
+- *USplat4D* is best understood as an *uncertainty-aware refinement layer* on top of a pretrained *dynamic Gaussian Splatting* model, rather than a completely new renderer. The key idea is that not all Gaussians should be treated equally: Gaussians that are consistently observed across time are more reliable and should act as *anchors*, while noisier Gaussians should be guided by them.
+
+  The method assigns each Gaussian a *time-varying uncertainty score* based on rendering evidence, with uncertainty made *depth-aware and anisotropic* in 3D so that poorly constrained directions, especially depth, are handled more carefully. It then divides Gaussians into *key nodes* and *non-key nodes*. Key nodes are the stable, low-uncertainty anchors, selected through *voxelized spatial sampling* and *temporal stability filtering*.
+
+  From there, USplat4D builds an *uncertainty-aware spatio-temporal graph*. Reliable key nodes connect to each other through uncertainty-aware *kNN*, while non-key nodes attach to nearby key nodes over time. Motion is handled in two stages: *key nodes* are optimized directly with uncertainty-weighted motion losses that keep them close to pretrained trajectories, while *non-key nodes* are moved through *dual-quaternion blending (DQB)* from neighboring key nodes and then softly regularized. The final objective combines *RGB reconstruction loss*, *key-node loss*, and *non-key-node loss*.
+
+  In compact form, the pipeline is: *initialize with vanilla dynamic GS, estimate per-Gaussian uncertainty, select confident anchors, build an uncertainty-weighted graph, optimize anchors directly, propagate motion to uncertain Gaussians, and render the refined scene*. Its main downside is that graph construction is expensive and does not scale easily.
+
+- *Mobile-GS* keeps *3D Gaussians* as the underlying scene representation, but redesigns the pipeline so it can run efficiently on mobile hardware. The central change is a *sort-free renderer*: instead of standard sorted alpha blending, it uses *depth-aware order-independent rendering*, where Gaussians are blended in parallel using learned depth- and scale-based weights. This removes the expensive depth-sorting step that usually makes 3DGS hard to deploy on mobile devices.
+
+  Because sort-free blending can introduce transparency and overlap artifacts, the method adds a small *view-dependent correction MLP*. This network takes the *camera-to-Gaussian direction*, along with *scale*, *rotation*, and *spherical-harmonic appearance features*, and predicts corrections to opacity or blending weights. Appearance is compressed further through *SH distillation*, which reduces higher-order spherical harmonics down to *first-order SH* using a teacher model and a *scale-invariant depth distillation loss*.
+
+  The model is also compressed through *neural vector quantization*. Gaussian attributes are split into subvectors, quantized with *multiple codebooks*, and entropy-compressed. Instead of storing SH features densely for every Gaussian, small *MLP decoders* reconstruct them when needed. Finally, *contribution-based pruning* removes Gaussians that consistently have low importance according to a joint *low-opacity + low-scale* criterion.
+
+  Overall, *compressed 3D Gaussians + pruning* produce a small model, *decoded SH features + the correction MLP* restore appearance quality, and the final image is rendered with a *parallel sort-free depth-aware renderer* instead of standard sorted blending.
+
+#pagebreak()
+#let speed(body) = text(fill: red, weight: "bold")[#body]
+#let memory(body) = text(fill: orange, weight: "bold")[#body]
+#let quality(body) = text(fill: green, weight: "bold")[#body]
+#let both(body) = text(fill: blue, weight: "bold")[#body]
+
+#set text(size: 8pt)
+
+#table(
+  columns: (1.1fr, 1.5fr, 3.6fr, 1.3fr, 1.5fr),
+  inset: 5pt,
+  align: left + horizon,
+  table.header(
+    [*Paper*],
+    [*Main focus*],
+    [*(Problem -> solution)*],
+    [*Datasets*],
+    [*Metrics*],
+  ),
+
+  [4DGS],
+  [Real-time dynamic scene rendering with compact canonical representation],
+  [
+    per-frame cost -> #both[canonical 3D Gaussians + 4D voxel field + deformation field]
+    #linebreak()
+    weak local ST coherence -> #quality[6 decomposed ST planes + tiny fusion MLP]
+    #linebreak()
+    heavy full 4D voxel -> #memory[plane decomposition]
+    #linebreak()
+    slow deformation decode -> #speed[tiny multi-head decoder (pos/rot/scale)]
+    #linebreak()
+    unstable joint training -> #quality[3DGS warm-up (~3000 iters)]
+  ],
+  [D-NeRF; HyperNeRF; Neu3D],
+  [PSNR, SSIM / MS-SSIM / D-SSIM, LPIPS, FPS, train time, MB],
+
+  [Instant4D],
+  [Compact dynamic GS with simpler/stabler Gaussian parameterization],
+  [
+    per-frame cost -> #both[canonical 3D Gaussians + 4D voxel field + deformation field]
+    #linebreak()
+    unstable / heavy Gaussians -> #speed[isotropic Gaussians, fixed rotation]
+    #linebreak()
+    heavy appearance -> #both[RGB only (no SH)]
+    #linebreak()
+    large activation volume -> #memory[grid pruning]
+  ],
+  [same 4DGS-style dynamic benchmarks],
+  [quality metrics + FPS / train time / storage],
+
+  [4DGS-1K],
+  [Compress and speed up 4DGS by removing temporal redundancy],
+  [
+    many short-lived / flickering Gaussians -> #both[ST variation score pruning]
+    #linebreak()
+    many inactive Gaussians still processed -> #speed[keyframe active-mask reuse]
+    #linebreak()
+    large remaining model -> #memory[VQ + bit-compressed masks (Ours-PP)]
+    #linebreak()
+    pruning hurts detail -> #quality[fine-tuning after pruning/filtering]
+  ],
+  [N3V; D-NeRF],
+  [PSNR, SSIM, LPIPS, MB, FPS, Raster FPS, Gaussians],
+
+  [USplat4D],
+  [Improve monocular dynamic GS under occlusion / hard views via uncertainty],
+  [
+    all Gaussians treated equally -> #quality[per-Gaussian time-varying uncertainty]
+    #linebreak()
+    depth ambiguity -> #quality[anisotropic depth-aware uncertainty]
+    #linebreak()
+    weak global consistency -> #quality[uncertainty-aware ST graph]
+    #linebreak()
+    unstable motion in uncertain regions -> #quality[key nodes + UA-kNN + DQB propagation]
+  ],
+  [DyCheck; DAVIS; Objaverse; NVIDIA Dynamic Scenes; HyperNeRF],
+  [mPSNR / PSNR, mSSIM / SSIM, mLPIPS / LPIPS; tracking: PCK, EPE],
+
+  [Mobile-GS],
+  [Real-time 3DGS on mobile with small storage and fast rendering],
+  [
+    depth sorting bottleneck -> #speed[depth-aware order-independent renderer]
+    #linebreak()
+    sort-free artifacts -> #quality[view-dependent correction MLP]
+    #linebreak()
+    heavy SH appearance -> #both[1st-order SH distillation]
+    #linebreak()
+    large attribute memory -> #memory[neural vector quantization + feature decoders]
+    #linebreak()
+    redundant Gaussians -> #both[contribution-based pruning]
+  ],
+  [Mip-NeRF 360; Tanks&Temples; Deep Blending; mobile eval on Snapdragon 8 Gen 3],
+  [PSNR, SSIM, LPIPS, FPS, MB, train time; user study, power],
+)
+
+#set text(size: 9pt)
+
+#text(size: 9pt)[
+  Legend:
+  #speed[speed],
+  #memory[memory],
+  #quality[render quality],
+  #both[both].
+]
+
+= Links
 video
 - #link("https://github.com/KAIR-BAIR/dycheck/blob/main/docs/DATASETS.md")[dycheck - monocular clips]
 - #link("https://drive.google.com/drive/folders/1qRLBwb5qU5yCS1gb06TQieC4_sMHNeTN?usp=drive_link")[Youtube VOS - monocular video for object segmentation]
@@ -53,53 +150,3 @@ video
 
 image
 - #link("https://cs.nyu.edu/~fergus/datasets/nyu_depth_v2.html")[Image Depth]
-
-= Project Plan
-
-(Tebe)
-*Context*: what is 3DGS, 4DGS, current techniques.
-
-3D Gaussian Splatting (3DGS) has become an important model architecture for converting images into a 3D representation. Scenes are encoded into models by performing training using a set of images, which produces a set of Gaussians distributions in space, with mean, covariance matrix representing spread, and encode color. During training, the Gaussians are projected into images, compared with observed frames, and iteratively updated, so views match the captured scene across space and time faithfully. Rendering occurs by combining the color contributions of all distributions. Adding a time component, we obtain 4DGS, which is able to learn from a video to reconstruct the scene in 3D space, tracing how it evolves over time. Gaussian Splatting models can produce high-resolution results, but can be inefficient in the number and size of Gaussians. Recent developments have produced more efficient architectures, and we even identified a paper that was able to run 3DGS on a mobile device.
-
-(Stefana)
-*Problem Formulation*: Clearly define the problem your project aims to address. Explain what gap, challenge, or opportunity you are focusing on.
-
-Standard models are GPU-intensive, requiring tens of gigabytes of VRAM (GPU ram) for short videos. Since the technique has to run on a mobile device, we need to reduce memory and processing during training, as well as the final size of the output. Recent state-of-the-art results show that 4D model size can be reduced from 2.1 GB to 50 MB, a 41x compression, while efficient pipelines cut GPU memory from about 21 GB to 8 or even 1.1 GB in lightweight modes, and reduce training from roughly 1.2 hours to just 2-7 minutes. On-device Gaussian rendering has also compressed final scene representations from 121 MB to 4.6 MB while sustaining 74-127 frames per second on phone-class hardware. Without significant optimization, photorealistic 3D and 4D experiences will stay stuck on high-end computers. Our goal is to break that barrier, so anyone with a phone can benefit from high-quality 4D rendering.
-
-
-(Tebe)
-*Importance and Relevance of the Problem*: Justify why this problem matters. Discuss its practical, societal, or academic significance, and explain who would benefit from solving it.
-
-Making 4D Gaussian splatting models lightweight and efficient would move high-quality dynamic scene capture from specialized hardware to everyday devices. Real-world uses include mobile AR, telepresence, digital twins, gaming, filmmaking, e-commerce, robotics, and assistive technologies that need fast understanding of changing environments. Running such models on a phone would democratize 3D and 4D content creation, allowing users to scan, replay, and share immersive scenes anywhere without a powerful GPU. This would lower cost, improve accessibility, and expand adoption in education, healthcare, field inspection, tourism, and social media. We are talking about being able to take a video, and immediately obtain a 3D representation of the scene, over time, with spatial consistency.
-
-(Ali)
-*Data Sourcing Strategy*: Describe how you plan to obtain or generate the data required for your project.
-
-- *Neural 3D Video (N3V)* contains real dynamic scenes captured from multiple viewpoints and is commonly used to evaluate novel-view synthesis methods on realistic motion, appearance changes, and temporal consistency.
-- *D-NeRF* is a synthetic dynamic-scene benchmark with monocular videos and known camera trajectories, making it useful for testing view synthesis quality under controlled motion and geometry.
-- *NSFF* contains real dynamic scenes captured with forward-facing monocular videos, and is commonly used to evaluate methods for jointly modeling scene geometry, motion, and novel-view synthesis in casually captured dynamic videos.
-- *Nerfies* is a real-world dynamic-scene benchmark focused on non-rigid deformations such as facial expressions and body motion, making it useful for testing view synthesis and deformation modeling under complex non-rigid motion.
-- *Hyper-NeRF* extends the Nerfies setting with scenes that exhibit more complex topological changes and non-rigid motion, and is widely used to evaluate methods that need to model deformations beyond simple continuous warps.
-- *Ego4DGS* contains egocentric dynamic scenes captured from wearable first-person cameras, and is useful for evaluating dynamic rendering and reconstruction methods under strong camera motion, frequent occlusions, and everyday real-world interactions.
-- *NVIDIA Dynamic Scene* contains multi-view dynamic scenes and is widely used to evaluate 4D reconstruction and rendering methods on jointly modeling space, time, and viewpoint changes.
-- *DyCheck iPhone* is a monocular dynamic-scene benchmark captured with handheld phones, and is useful for assessing robustness on real-world videos with challenging motion, parallax, and capture noise.
-
-(Stefana)
-*Proposed Solution* (High-Level Overview): Provide an overview of your proposed approach or solution. Focus on the key idea and overall strategy rather than implementation details. 
-Our *proposed solution* is to combine efficiency-oriented techniques from Instant4D and 1000FPS and design a lightweight 4D Gaussian Splatting pipeline suitable for mobile devices. We use the first paper for a faster pipeline, based on isotropic Gaussians and a reduced color complexity, and the second one to introduce aggressive pruning based on spatio-temporal importance to minimize redundant Gaussians, which speeds up rendering. To further reduce memory footprint and computation, we incorporate compression strategies from the Mobile-GS paper such as quantization and k-means codebook compression, but we extend their results to a 4D architecture. Our overall strategy is to balance quality and efficiency by adapting these methods into a unified pipeline, enabling near real-time 4D scene rendering on resource-constrained devices like smartphones.  
-
-(Ali)
-*Performance Evaluation Approach*: Explain how you plan to assess your solution's effectiveness. Specify the metrics, benchmarks, or evaluation criteria you intend to use and why they are appropriate for your problem.
-
-We will evaluate the effectiveness of our solution using a combination of visual quality, compactness, and efficiency metrics, following the evaluation approach used across the uploaded papers. *Storage* measures the compressed model size or footprint, *training cost/time* reflects the optimization effort required to fit a scene, and *memory* measures GPU memory usage during training or inference. For image quality, we will use the following:
-
-- Peak signal-to-noise ratio *PSNR*: measures pixel-level reconstruction accuracy
-- Structural similarity index measure *SSIM*: measures structural similarity to the ground-truth image
-- Learned Perceptual Image Patch Similarity *LPIPS*: measures perceptual similarity using deep features
-
-We will also assess efficiency and practical usability using other minor metrics:
-- *FPS*: frames per second during rendering, measuring runtime speed
-- *\# Gaussians*: number of Gaussian primitives, reflecting scene representation complexity
-- *Memory*: peak GPU memory usage, indicating hardware efficiency
-- *Storage*: final model size, indicating compactness for deployment
-- *Training cost/time*: total optimization time, indicating how quickly a scene can be learned
