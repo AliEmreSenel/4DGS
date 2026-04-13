@@ -202,6 +202,7 @@
 
 #table(
   columns: 6,
+  fill: (x, y) => if x == 0 or y == 0 { luma(230) },
 
   [], [#h1], [#h2], [#h3], [#h4], [#h5],
 
