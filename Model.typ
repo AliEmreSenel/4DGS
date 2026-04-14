@@ -1,3 +1,12 @@
+#set page(
+  paper: "a4",
+  margin: (
+    left: 2cm,
+    right: 2cm,
+    top: 2cm,
+    bottom: 2cm,
+  ),
+)
 
 = Reflections
 Ablations are going to be very important in evaluating the performance of the model, since each architecture layer introduces errors.
@@ -13,12 +22,6 @@ There is a tradeoff between _reconstruction accuracy_ and _speed of training_ wi
 Fewer parameters reduces train time and memory, at the cost of accuracy.
 
 For sure the model will not train on a phone, but it needs to be able to render comfortably on a phone.
-
-= Ongoing Questions
-
-- How to upgrade Mobile-3GS pipeline to 4DGS?
-- How does implementation differ between quaternions for rotation and a rotation matrix?
-- What is the effect of evaluation of MegaSAM vs Other Initialization
 
 #pagebreak()
 
@@ -188,17 +191,17 @@ For sure the model will not train on a phone, but it needs to be able to render 
   inset: 6pt,
   fill: (x, y) => if y == 0 { luma(230) } else { none },
 
-  [], [*Specialisation*], [*Structure \ Hyperparam.*], [*Compatibility*], [*Implementation*],
+  [], [*Specialisation*], [*Structure*], [*Compatibility*], [*Implementation*],
 
-  table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[**]],
-  [Schedule], [High Iterations], [Much Testing], [Hyperparam],
+  table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[]],
+  [*Schedule*], [High Iterations], [Much Testing], [Hyperparam],
 
   table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. Gaussians*]],
 
   table.cell(
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
-  )[Rotation],
+  )[*Rotation*: can be skipped but would need more gauss.],
   table.cell(stroke: (top: thick))[Quaternion],
   table.cell(stroke: (top: thick))[No problem, common choice],
   table.cell(stroke: (top: thick))[Fewer params, faster training],
@@ -210,8 +213,8 @@ For sure the model will not train on a phone, but it needs to be able to render 
   table.cell(
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
-  )[Shape],
-  table.cell(stroke: (top: thick))[Isotropic],
+  )[*Shape*: remain in the computational graph and it's fine],
+  table.cell(stroke: (top: thick))[Isotropic (but then no rotation either)],
   table.cell(stroke: (top: thick))[Simplification],
   table.cell(stroke: (top: thick))[Fewer Params, faster training],
 
@@ -222,7 +225,7 @@ For sure the model will not train on a phone, but it needs to be able to render 
   table.cell(
     rowspan: 3,
     stroke: (left: thick, top: thick, bottom: thick),
-  )[Color Basis],
+  )[*Color Basis*: initialize from early point cloud ],
   table.cell(stroke: (top: thick))[RGB],
   table.cell(stroke: (top: thick))[Simplest],
   table.cell(stroke: (top: thick))[Fewest Params],
@@ -237,41 +240,58 @@ For sure the model will not train on a phone, but it needs to be able to render 
   table.hline(y: 9, start: 3, end: 5, stroke: thick),
 
   table.cell(rowspan: 3)[#rotate(-90deg, reflow: true)[*2. Init*]],
-  [Segmentation], [MegaSAM initialization], [Initialization (color + position)], [Recent models might be better],
-  [Grid], [Voxel Size], [Needs testing], [Hyperparam],
-  [Confidence], [Uncertainty], [Initialization from model information], [Use Voxel Size initialization],
+  [*Segmentation*:  use model to init gaussians],
+  [MegaSAM initialization],
+  [Initialization (color + position)],
+  [Recent models might be better],
+  [*Grid*: decide the size of grid], [Voxel Size], [Needs testing], [Hyperparam],
+  [*Size*: usually isotropic], [Uncertainty], [Initialization from model information], [Use Voxel Size initialization],
 
   table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*3. Compress*]],
-  [SH], [Spherical Harmonic Distillation], [Pipeline Restructure], [Additional loss component],
-  [Quantization],
+  [*Spherical Harmonics*: compression],
+  [Spherical Harmonic Distillation],
+  [Pipeline Restructure],
+  [Additional loss component],
+  [*Quantization*: at rest compression to run faster],
   [Neural Vector Quantization],
   [Pipeline Restructure],
   [After training, for compression as Huffman Encoding],
 
-  table.cell(rowspan: 3)[#rotate(-90deg, reflow: true)[*4. Train*]],
-  [Pruning], [Contribution-based pruning], [Threshold tuning at render], [Hyperparam],
-  [Weighting], [Uncertainty weighing], [High: Loss reweighting], [Write algorithm from scratch],
-  [Sampling], [Batch Sampling in Time], [Easy], [Batch training],
+  table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*4. Train*: \ No Densify, out \ of performance]],
+  [*Uncertainty weighing*], [Usplat Algorithm], [High: Loss reweighting], [Many added loss terms],
+  [*Strategies*: Adam + Batch + slow increase of \#SH],
+  [Batch Sampling in Time],
+  [Easy],
+  [Batch training, general choice of optimizer],
 
-  table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*5. Prune*]],
-  [Deduplication],
-  [Voxel Dedup\
+  table.cell(rowspan: 3)[#rotate(-90deg, reflow: true)[*5. Prune*]],
+
+  table.cell(
+    rowspan: 2,
+    stroke: (left: thick + black, top: thick + black, bottom: thick + black),
+  )[*Criterion*: many possibilities.],
+  table.cell(stroke: (top: thick + black))[Contribution-based pruning],
+  table.cell(stroke: (top: thick + black))[Threshold tuning at render],
+  table.cell(stroke: (top: thick + black, right: thick + black))[Hyperparam],
+
+  table.cell(stroke: (bottom: thick + black))[Voxel Dedup\
     Spatio-Temporal],
-  [One-shot Pruning],
-  [Write formula from clear instructions],
-  [Strategy], [One-shot], [Faster train, but more finetune], [Easy],
+  table.cell(stroke: (bottom: thick + black))[One-shot Pruning],
+  table.cell(stroke: (bottom: thick + black, right: thick + black))[Write formula from clear instructions],
+
+  [Strategy], [One-shot], [Faster train, but more finetune], [Very straightforward],
 
   table.cell(rowspan: 4)[#rotate(-90deg, reflow: true)[*6. Render*]],
 
   table.cell(
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
-  )[Rasterisation],
-  table.cell(stroke: (top: thick))[Sort],
-  table.cell(stroke: (top: thick))[Standard],
+  )[*Rasterisation*: project 3D to 2D],
+  table.cell(stroke: (top: thick))[*Sort*: aggregate color back to front],
+  table.cell(stroke: (top: thick))[Standard technique],
   table.cell(stroke: (top: thick))[Runtime Bottleneck],
 
-  table.cell(stroke: (bottom: thick))[Sort-free],
+  table.cell(stroke: (bottom: thick))[*Sort-free*: weighted sum biased by MLP],
   table.cell(stroke: (bottom: thick))[Pipeline Restructure],
   table.cell(stroke: (bottom: thick))[Altro train tiny MLPs],
 
@@ -280,35 +300,3 @@ For sure the model will not train on a phone, but it needs to be able to render 
   [Thresholding], [Opacity Threshold], [Highly], [Hyperparam],
   [Loading], [Visibility Mask Loading], [Highly], [Additional Layer],
 )
-
-== Ideal Combination
-
-Pick the memory optimizations (fewer variables + codebook). One-pass is better, so do not use multiple
-
-1. Gaussian Representation:
-  - Quaternions
-  - Isotropic
-  - RGB
-
-2. Initialization:
-  - MegaSAM-like initialization
-  - Voxel Size
-  - Uncertainty
-
-3. Compression
-  - Spherical Harmonic Distillation
-  - Neural Vector Quantization
-
-4. Training:
-  - Contribution-based pruning
-  - Uncertainty weighing
-  - Batch Sampling in Time
-
-5. Pruning Phase before Finetuning
-  - Voxel Deduplication, Spatio-Temporal Score: they address different things, so they should be able to
-  - One-shot: less loops make training faster.
-
-6. Rendering
-  - Sort-free
-  - Opacity Threshold
-  - Visibility Mask Loading
