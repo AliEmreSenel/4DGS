@@ -9,19 +9,17 @@
 )
 
 = Reflections
-Ablations are going to be very important in evaluating the performance of the model, since each architecture layer introduces errors.
+Ablations are going to be very important in evaluating the performance of the model, since each architecture layer introduces errors. As a result, the architecture should be modular and exchangeable, so we can compare the effects of each technique.
 
+- *Important Metrics*: measure performance in each architecture. This cannot be plain loss, since it varies between architectures.
+  - Color Reconstruction Error
+  - Memory Footprint
+  - Training Time
+  - Other SOTA?
 
-Ideally, architecture steps should be modular and exchangeable, so we can compare the effects of each combination of tools
-
-- Important Metrics: we need stable metrics to measure performance in each architecture.
-  - Loss evolution
-
-There is a tradeoff between _reconstruction accuracy_ and _speed of training_ with _memory footprint_.
+There is a tradeoff between _reconstruction accuracy_ and _speed of training_ with _memory footprint_. If we don't care about training time, we can distill more to have renders that can run on phones.
 
 Fewer parameters reduces train time and memory, at the cost of accuracy.
-
-For sure the model will not train on a phone, but it needs to be able to render comfortably on a phone.
 
 #pagebreak()
 
@@ -186,7 +184,7 @@ For sure the model will not train on a phone, but it needs to be able to render 
 #pagebreak()
 
 #table(
-  columns: (0.5fr, 1fr, 1fr, 1fr, 1fr),
+  columns: (0.5fr, 1fr, 1fr, 0.9fr, 1.1fr),
   stroke: base,
   inset: 6pt,
   fill: (x, y) => if y == 0 { luma(230) } else { none },
@@ -194,7 +192,7 @@ For sure the model will not train on a phone, but it needs to be able to render 
   [], [*Specialisation*], [*Structure*], [*Compatibility*], [*Implementation*],
 
   table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[]],
-  [*Schedule*], [High Iterations], [Much Testing], [Hyperparam],
+  [*Schedule*], [High Iterations], [Much Testing], [Hyperparameters],
 
   table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. Gaussians*]],
 
@@ -244,7 +242,7 @@ For sure the model will not train on a phone, but it needs to be able to render 
   [MegaSAM initialization],
   [Initialization (color + position)],
   [Recent models might be better],
-  [*Grid*: decide the size of grid], [Voxel Size], [Needs testing], [Hyperparam],
+  [*Grid*: decide the size of grid], [Voxel Size], [Needs testing], [Hyperparameters],
   [*Size*: usually isotropic], [Uncertainty], [Initialization from model information], [Use Voxel Size initialization],
 
   table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*3. Compress*]],
@@ -258,7 +256,7 @@ For sure the model will not train on a phone, but it needs to be able to render 
   [After training, for compression as Huffman Encoding],
 
   table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*4. Train*: \ No Densify, out \ of performance]],
-  [*Uncertainty weighing*], [Usplat Algorithm], [High: Loss reweighting], [Many added loss terms],
+  [*Uncertainty weighing*], [USPLAT Algorithm], [High: Loss reweighting], [Many added loss terms, algorithm steps],
   [*Strategies*: Adam + Batch + slow increase of \#SH],
   [Batch Sampling in Time],
   [Easy],
@@ -269,10 +267,10 @@ For sure the model will not train on a phone, but it needs to be able to render 
   table.cell(
     rowspan: 2,
     stroke: (left: thick + black, top: thick + black, bottom: thick + black),
-  )[*Criterion*: many possibilities.],
+  )[*Criterion*: many possibilities. Does not have to be one alone.],
   table.cell(stroke: (top: thick + black))[Contribution-based pruning],
   table.cell(stroke: (top: thick + black))[Threshold tuning at render],
-  table.cell(stroke: (top: thick + black, right: thick + black))[Hyperparam],
+  table.cell(stroke: (top: thick + black, right: thick + black))[Hyperparameters],
 
   table.cell(stroke: (bottom: thick + black))[Voxel Dedup\
     Spatio-Temporal],
@@ -292,11 +290,11 @@ For sure the model will not train on a phone, but it needs to be able to render 
   table.cell(stroke: (top: thick))[Runtime Bottleneck],
 
   table.cell(stroke: (bottom: thick))[*Sort-free*: weighted sum biased by MLP],
-  table.cell(stroke: (bottom: thick))[Pipeline Restructure],
+  table.cell(stroke: (bottom: thick))[Pipeline Change + time feature],
   table.cell(stroke: (bottom: thick))[Altro train tiny MLPs],
 
   table.hline(y: 21, start: 3, end: 5, stroke: thick),
 
-  [Thresholding], [Opacity Threshold], [Highly], [Hyperparam],
+  [Thresholding], [Opacity Threshold], [Highly], [Hyperparameters],
   [Loading], [Visibility Mask Loading], [Highly], [Additional Layer],
 )
