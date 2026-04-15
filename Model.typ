@@ -30,6 +30,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 
 #let g = rgb("#78f082")
 #let r = rgb("#fb8686")
+#let y = rgb("#fff4bf")
 
 #let M(body, fill: none, top: false, bottom: false) = table.cell(
   fill: fill,
@@ -44,6 +45,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 #let N(body, top: false, bottom: false) = M(body, top: top, bottom: bottom)
 #let G(body, top: false, bottom: false) = M(body, fill: g, top: top, bottom: bottom)
 #let R(body, top: false, bottom: false) = M(body, fill: r, top: top, bottom: bottom)
+#let Y(body, top: false, bottom: false) = M(body, fill: y, top: top, bottom: bottom)
 
 #table(
   columns: (0.5fr, 2fr, 2fr, 1fr, 1fr, 1.2fr, 1fr, 1fr),
@@ -183,6 +185,17 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 
 #pagebreak()
 
+#let g = rgb("#78f082")
+#let r = rgb("#fb8686")
+#let y = rgb("#fff4bf")
+
+#let G(body) = table.cell(fill: g)[#body]
+#let Y(body) = table.cell(fill: y)[#body]
+#let R(body) = table.cell(fill: r)[#body]
+#let GS(body, stroke) = table.cell(fill: g, stroke: stroke)[#body]
+#let YS(body, stroke) = table.cell(fill: y, stroke: stroke)[#body]
+#let RS(body, stroke) = table.cell(fill: r, stroke: stroke)[#body]
+
 #table(
   columns: (0.5fr, 1fr, 1fr, 0.9fr, 1.1fr),
   stroke: base,
@@ -192,7 +205,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   [], [*Specialisation*], [*Structure*], [*Compatibility*], [*Implementation*],
 
   table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[]],
-  [*Schedule*], [High Iterations], [Much Testing], [Hyperparameters],
+  [*Schedule*], G([High Iterations]), G([Much Testing]), G([Hyperparameters]),
 
   table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. Gaussians*]],
 
@@ -200,9 +213,9 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
   )[*Rotation*: can be skipped but would need more gauss.],
-  table.cell(stroke: (top: thick))[Quaternion],
-  table.cell(stroke: (top: thick))[No problem, common choice],
-  table.cell(stroke: (top: thick))[Fewer params, faster training],
+  GS([Quaternion], (top: thick)),
+  GS([No problem, common choice], (top: thick)),
+  GS([Fewer params, faster training], (top: thick)),
 
   [Rotation Matrix],
   table.cell(stroke: (bottom: thick))[No problem],
@@ -212,55 +225,58 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
   )[*Shape*: remain in the computational graph and it's fine],
-  table.cell(stroke: (top: thick))[Isotropic (but then no rotation either)],
-  table.cell(stroke: (top: thick))[Simplification],
-  table.cell(stroke: (top: thick))[Fewer Params, faster training],
+  YS([Isotropic (but then no rotation either)], (top: thick)),
+  YS([Simplification], (top: thick)),
+  YS([Fewer Params, faster training], (top: thick)),
 
-  [Anisotropic],
-  table.cell(stroke: (bottom: thick))[Default Choice],
-  table.cell(stroke: (bottom: thick))[Slower training],
+  G([Anisotropic]),
+  GS([Default Choice], (bottom: thick)),
+  GS([Slower training], (bottom: thick)),
 
   table.cell(
     rowspan: 3,
     stroke: (left: thick, top: thick, bottom: thick),
   )[*Color Basis*: initialize from early point cloud ],
-  table.cell(stroke: (top: thick))[RGB],
-  table.cell(stroke: (top: thick))[Simplest],
-  table.cell(stroke: (top: thick))[Fewest Params],
+  YS([RGB], (top: thick)),
+  YS([Simplest], (top: thick)),
+  YS([Fewest Params], (top: thick)),
 
-  [SH(1)],
-  [Simple], [Intermediate],
+  Y([SH(1)]),
+  Y([Simple]), Y([Intermediate]),
 
-  table.cell(stroke: (bottom: thick))[SH(3)],
-  table.cell(stroke: (bottom: thick))[More Precise],
-  table.cell(stroke: (bottom: thick))[More params],
+  GS([SH(3)], (bottom: thick)),
+  GS([More Precise], (bottom: thick)),
+  GS([More params], (bottom: thick)),
 
   table.hline(y: 9, start: 3, end: 5, stroke: thick),
 
-  table.cell(rowspan: 3)[#rotate(-90deg, reflow: true)[*2. Init*]],
+  table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[*2. Init*]],
   [*Segmentation*:  use model to init gaussians],
-  [MegaSAM initialization],
-  [Initialization (color + position)],
-  [Recent models might be better],
-  [*Grid*: decide the size of grid], [Voxel Size], [Needs testing], [Hyperparameters],
-  [*Size*: usually isotropic], [Uncertainty], [Initialization from model information], [Use Voxel Size initialization],
+  G([MegaSAM initialization]),
+  G([Initialization (color + position)]),
+  G([Recent models might be better]),
 
   table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*3. Compress*]],
   [*Spherical Harmonics*: compression],
-  [Spherical Harmonic Distillation],
-  [Pipeline Restructure],
-  [Additional loss component],
+  Y([Spherical Harmonic Distillation]),
+  Y([Pipeline Restructure]),
+  Y([Additional loss component in the dictionary compression+]),
   [*Quantization*: at rest compression to run faster],
-  [Neural Vector Quantization],
-  [Pipeline Restructure],
-  [After training, for compression as Huffman Encoding],
+  R([Neural Vector Quantization]),
+  R([Pipeline Restructure]),
+  R([Train latent features + Time vector, use Huffman Encoding]),
 
-  table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*4. Train*: \ No Densify, out \ of performance]],
-  [*Uncertainty weighing*], [USPLAT Algorithm], [High: Loss reweighting], [Many added loss terms, algorithm steps],
+  table.cell(rowspan: 2)[#rotate(-90deg, reflow: true)[*4. Train*: \
+    No Densify, out \
+    of performance]],
+  [*Uncertainty weighing*],
+  R([USPLAT Algorithm]),
+  R([High: Loss reweighting]),
+  R([Many added loss terms, algorithm steps]),
   [*Strategies*: Adam + Batch + slow increase of \#SH],
-  [Batch Sampling in Time],
-  [Easy],
-  [Batch training, general choice of optimizer],
+  G([Batch Sampling in Time]),
+  G([Easy]),
+  G([Batch training, general choice of optimizer]),
 
   table.cell(rowspan: 3)[#rotate(-90deg, reflow: true)[*5. Prune*]],
 
@@ -268,16 +284,19 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
     rowspan: 2,
     stroke: (left: thick + black, top: thick + black, bottom: thick + black),
   )[*Criterion*: many possibilities. Does not have to be one alone.],
-  table.cell(stroke: (top: thick + black))[Contribution-based pruning],
-  table.cell(stroke: (top: thick + black))[Threshold tuning at render],
-  table.cell(stroke: (top: thick + black, right: thick + black))[Hyperparameters],
+  YS([Contribution-based pruning], (top: thick + black)),
+  YS([Threshold tuning at render], (top: thick + black)),
+  YS([Hyperparameters], (top: thick + black, right: thick + black)),
 
-  table.cell(stroke: (bottom: thick + black))[Voxel Dedup\
-    Spatio-Temporal],
-  table.cell(stroke: (bottom: thick + black))[One-shot Pruning],
-  table.cell(stroke: (bottom: thick + black, right: thick + black))[Write formula from clear instructions],
+  GS(
+    [Voxel Dedup\
+      Spatio-Temporal],
+    (bottom: thick + black),
+  ),
+  GS([One-shot Pruning], (bottom: thick + black)),
+  GS([Write formula from clear instructions], (bottom: thick + black, right: thick + black)),
 
-  [Strategy], [One-shot], [Faster train, but more finetune], [Very straightforward],
+  [Strategy], G([One-shot]), G([Faster train, but more finetune]), G([Very straightforward]),
 
   table.cell(rowspan: 4)[#rotate(-90deg, reflow: true)[*6. Render*]],
 
@@ -285,16 +304,23 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
   )[*Rasterisation*: project 3D to 2D],
-  table.cell(stroke: (top: thick))[*Sort*: aggregate color back to front],
-  table.cell(stroke: (top: thick))[Standard technique],
-  table.cell(stroke: (top: thick))[Runtime Bottleneck],
+  YS([*Sort*: aggregate color back to front], (top: thick)),
+  YS([Standard technique], (top: thick)),
+  YS([Runtime Bottleneck], (top: thick)),
 
-  table.cell(stroke: (bottom: thick))[*Sort-free*: weighted sum biased by MLP],
-  table.cell(stroke: (bottom: thick))[Pipeline Change + time feature],
-  table.cell(stroke: (bottom: thick))[Altro train tiny MLPs],
+  GS([*Sort-free*: weighted sum biased by MLP], (bottom: thick)),
+  GS([Pipeline Change + time feature], (bottom: thick)),
+  GS([Altro train tiny MLPs], (bottom: thick)),
 
   table.hline(y: 21, start: 3, end: 5, stroke: thick),
 
-  [Thresholding], [Opacity Threshold], [Highly], [Hyperparameters],
-  [Loading], [Visibility Mask Loading], [Highly], [Additional Layer],
+  [Thresholding],
+  G([Opacity Threshold]),
+  G([Highly]),
+  G([Hyperparameters]),
+
+  [Loading],
+  R([Visibility Mask Loading]),
+  R([Highly]),
+  R([Additional Layer]),
 )
