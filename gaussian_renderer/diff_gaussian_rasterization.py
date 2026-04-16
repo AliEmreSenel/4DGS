@@ -12,25 +12,7 @@
 from typing import NamedTuple
 import torch.nn as nn
 import torch
-import os
-
-try:
-    from diff_gaussian_rasterization import _C
-except Exception:
-    from torch.utils.cpp_extension import load
-
-    parent_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "diff-gaussian-rasterization")
-    _C = load(
-        name='diff_gaussian_rasterization_backend',
-        extra_cflags=["-g"],
-        extra_cuda_cflags=["-g", "-G", "-I" + os.path.join(parent_dir, "third_party/glm")],
-        sources=[
-            os.path.join(parent_dir, "cuda_rasterizer/rasterizer_impl.cu"),
-            os.path.join(parent_dir, "cuda_rasterizer/forward.cu"),
-            os.path.join(parent_dir, "cuda_rasterizer/backward.cu"),
-            os.path.join(parent_dir, "rasterize_points.cu"),
-            os.path.join(parent_dir, "ext.cpp")],
-        verbose=os.environ.get("VERBOSE_CUDA_BUILD", "0") == "1" or os.environ.get("DIFF_GS_VERBOSE_BUILD", "0") == "1")
+from externals.diff_gaussian_rasterization import _C
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
@@ -284,25 +266,26 @@ class GaussianRasterizer(nn.Module):
             raise Exception(
                 'Please provide exactly rotations_r and scales_t and ts if rot_4d and cov3D_precomp is None!')
 
+        empty = means3D.new_empty((0,))
         if shs is None:
-            shs = torch.Tensor([])
+            shs = empty
         if colors_precomp is None:
-            colors_precomp = torch.Tensor([])
+            colors_precomp = empty
         if flow_2d is None:
-            flow_2d = torch.Tensor([])
+            flow_2d = empty
 
         if ts is None:
-            ts = torch.Tensor([])
+            ts = empty
         if scales is None:
-            scales = torch.Tensor([])
+            scales = empty
         if scales_t is None:
-            scales_t = torch.Tensor([])
+            scales_t = empty
         if rotations is None:
-            rotations = torch.Tensor([])
+            rotations = empty
         if rotations_r is None:
-            rotations_r = torch.Tensor([])
+            rotations_r = empty
         if cov3D_precomp is None:
-            cov3D_precomp = torch.Tensor([])
+            cov3D_precomp = empty
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(

@@ -13,7 +13,7 @@ import os
 import random
 import torch
 from torch import nn
-from utils.loss_utils import l1_loss, ssim, msssim
+from utils.loss_utils import l1_loss, ssim, msssim, lpips as lpips_metric
 from gaussian_renderer import render
 import sys
 from scene import Scene, GaussianModel
@@ -58,12 +58,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_end = torch.cuda.Event(enable_timing = True)
     
     best_psnr = 0.0
-    ema_loss_for_log = 0.0
-    ema_l1loss_for_log = 0.0
-    ema_ssimloss_for_log = 0.0
+    ema_loss_for_log = torch.tensor(0.0, device="cuda")
+    ema_l1loss_for_log = torch.tensor(0.0, device="cuda")
+    ema_ssimloss_for_log = torch.tensor(0.0, device="cuda")
     lambda_all = [key for key in opt.__dict__.keys() if key.startswith('lambda') and key!='lambda_dssim']
-    for lambda_name in lambda_all:
-        vars()[f"ema_{lambda_name.replace('lambda_','')}_for_log"] = 0.0
+    lambda_ema_for_log = {name: torch.tensor(0.0, device="cuda") for name in lambda_all}
     
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -77,7 +76,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.env_map = env_map
         
     training_dataset = scene.getTrainCameras()
-    training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True)
+    num_workers = 12 if dataset.dataloader else 0
+    dataloader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": True,
+        "num_workers": num_workers,
+        "collate_fn": lambda x: x,
+        "drop_last": True,
+        "pin_memory": dataset.dataloader,
+    }
+    if num_workers > 0:
+        dataloader_kwargs["persistent_workers"] = True
+        dataloader_kwargs["prefetch_factor"] = 2
+    training_dataloader = DataLoader(training_dataset, **dataloader_kwargs)
      
     iteration = first_iter
     while iteration < opt.iterations + 1:
@@ -96,15 +107,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Render
             if (iteration - 1) == debug_from:
                 pipe.debug = True
+
+            should_densify = iteration < opt.densify_until_iter and (
+                opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points
+            )
             
-            batch_point_grad = []
-            batch_visibility_filter = []
-            batch_radii = []
+            if should_densify:
+                batch_point_grad = []
+                batch_visibility_filter = []
+                batch_radii = []
             
             for batch_idx in range(batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
-                gt_image = gt_image.cuda()
-                viewpoint_cam = viewpoint_cam.cuda()
+                gt_image = gt_image.to(background.device, non_blocking=True)
+                viewpoint_cam = viewpoint_cam.cuda(non_blocking=True, copy=False)
 
                 render_pkg = render(viewpoint_cam, gaussians, pipe, background)
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -161,54 +177,55 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 loss = loss / batch_size
                 loss.backward()
-                batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
-                batch_radii.append(radii)
-                batch_visibility_filter.append(visibility_filter)
+                if should_densify:
+                    batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
+                    batch_radii.append(radii)
+                    batch_visibility_filter.append(visibility_filter)
 
-            if batch_size > 1:
-                visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
-                visibility_filter = visibility_count > 0
-                radii = torch.stack(batch_radii,1).max(1)[0]
-                
-                batch_viewspace_point_grad = torch.stack(batch_point_grad,1).sum(1)
-                batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
-                batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
-                
-                if gaussians.gaussian_dim == 4:
-                    batch_t_grad = gaussians._t.grad.clone()[:,0].detach()
-                    batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
-                    batch_t_grad = batch_t_grad.unsqueeze(1)
-            else:
-                if gaussians.gaussian_dim == 4:
-                    batch_t_grad = gaussians._t.grad.clone().detach()
+            if should_densify:
+                if batch_size > 1:
+                    visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
+                    visibility_filter = visibility_count > 0
+                    radii = torch.stack(batch_radii,1).max(1)[0]
+                    
+                    batch_viewspace_point_grad = torch.stack(batch_point_grad,1).sum(1)
+                    batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                    batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
+                    
+                    if gaussians.gaussian_dim == 4:
+                        batch_t_grad = gaussians._t.grad.clone()[:,0].detach()
+                        batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                        batch_t_grad = batch_t_grad.unsqueeze(1)
+                else:
+                    if gaussians.gaussian_dim == 4:
+                        batch_t_grad = gaussians._t.grad.clone().detach()
             
             iter_end.record()
             loss_dict = {"Ll1": Ll1,
                         "Lssim": Lssim}
 
             with torch.no_grad():
-                psnr_for_log = psnr(image, gt_image).mean().double()
                 # Progress bar
-                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-                ema_l1loss_for_log = 0.4 * Ll1.item() + 0.6 * ema_l1loss_for_log
-                ema_ssimloss_for_log = 0.4 * Lssim.item() + 0.6 * ema_ssimloss_for_log
+                ema_loss_for_log = 0.4 * loss.detach() + 0.6 * ema_loss_for_log
+                ema_l1loss_for_log = 0.4 * Ll1.detach() + 0.6 * ema_l1loss_for_log
+                ema_ssimloss_for_log = 0.4 * Lssim.detach() + 0.6 * ema_ssimloss_for_log
                 
                 for lambda_name in lambda_all:
                     if opt.__dict__[lambda_name] > 0:
-                        ema = vars()[f"ema_{lambda_name.replace('lambda_', '')}_for_log"]
-                        vars()[f"ema_{lambda_name.replace('lambda_', '')}_for_log"] = 0.4 * vars()[f"L{lambda_name.replace('lambda_', '')}"].item() + 0.6*ema
+                        loss_name = f"L{lambda_name.replace('lambda_', '')}"
+                        lambda_ema_for_log[lambda_name] = 0.4 * vars()[loss_name].detach() + 0.6 * lambda_ema_for_log[lambda_name]
                         loss_dict[lambda_name.replace("lambda_", "L")] = vars()[lambda_name.replace("lambda_", "L")]
                         
                 if iteration % 10 == 0:
-                    postfix = {"Loss": f"{ema_loss_for_log:.{7}f}",
+                    psnr_for_log = psnr(image, gt_image).mean().item()
+                    postfix = {"Loss": f"{ema_loss_for_log.item():.{7}f}",
                                             "PSNR": f"{psnr_for_log:.{2}f}",
-                                            "Ll1": f"{ema_l1loss_for_log:.{4}f}",
-                                            "Lssim": f"{ema_ssimloss_for_log:.{4}f}",}
+                                            "Ll1": f"{ema_l1loss_for_log.item():.{4}f}",
+                                            "Lssim": f"{ema_ssimloss_for_log.item():.{4}f}",}
                     
                     for lambda_name in lambda_all:
                         if opt.__dict__[lambda_name] > 0:
-                            ema_loss = vars()[f"ema_{lambda_name.replace('lambda_', '')}_for_log"]
-                            postfix[lambda_name.replace("lambda_", "L")] = f"{ema_loss:.{4}f}"
+                            postfix[lambda_name.replace("lambda_", "L")] = f"{lambda_ema_for_log[lambda_name].item():.{4}f}"
                             
                     progress_bar.set_postfix(postfix)
                     progress_bar.update(10)
@@ -228,7 +245,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     scene.save(iteration)
 
                 # Densification
-                if iteration < opt.densify_until_iter and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
+                if should_densify:
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if batch_size == 1:
@@ -274,13 +291,15 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_dict=None):
-    if tb_writer:
+    should_log_train = (iteration % 10 == 0) or (iteration in testing_iterations)
+    if tb_writer and should_log_train:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/ssim_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
         tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-        tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+        if iteration % 500 == 0:
+            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
         if loss_dict is not None:
             if "Lrigid" in loss_dict:
                 tb_writer.add_scalar('train_loss_patches/rigid_loss', loss_dict['Lrigid'].item(), iteration)
@@ -300,8 +319,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     psnr_test_iter = 0.0
     # Report test and samples of training set
     if iteration in testing_iterations:
-        validation_configs = ({'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]},
-                              {'name': 'test', 'cameras' : [scene.getTestCameras()[idx] for idx in range(len(scene.getTestCameras()))]})
+        train_cameras = scene.getTrainCameras()
+        test_cameras = scene.getTestCameras()
+        validation_configs = ({'name': 'train', 'cameras' : [train_cameras[idx % len(train_cameras)] for idx in range(5, 30, 5)]},
+                              {'name': 'test', 'cameras' : [test_cameras[idx] for idx in range(len(test_cameras))]})
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
@@ -309,10 +330,11 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 psnr_test = 0.0
                 ssim_test = 0.0
                 msssim_test = 0.0
+                lpips_test = 0.0
                 for idx, batch_data in enumerate(tqdm(config['cameras'])):
                     gt_image, viewpoint = batch_data
-                    gt_image = gt_image.cuda()
-                    viewpoint = viewpoint.cuda()
+                    gt_image = gt_image.to("cuda", non_blocking=True)
+                    viewpoint = viewpoint.cuda(non_blocking=True, copy=False)
                     
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)
@@ -328,28 +350,34 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     psnr_test += psnr(image, gt_image).mean().double()
                     ssim_test += ssim(image, gt_image).mean().double()
                     msssim_test += msssim(image[None].cpu(), gt_image[None].cpu())
+                    lpips_test += lpips_metric(image[None].cpu(), gt_image[None].cpu())
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras']) 
                 ssim_test /= len(config['cameras'])     
-                msssim_test /= len(config['cameras'])        
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                msssim_test /= len(config['cameras'])
+                lpips_test /= len(config['cameras'])
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} LPIPS {}".format(iteration, config['name'], l1_test, psnr_test, lpips_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - msssim', msssim_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - lpips', lpips_test, iteration)
                 if config['name'] == 'test':
                     psnr_test_iter = psnr_test.item()
-                    
-    torch.cuda.empty_cache()
+
+        torch.cuda.empty_cache()
     return psnr_test_iter
 
-def setup_seed(seed):
+def setup_seed(seed, deterministic=False):
      torch.manual_seed(seed)
      torch.cuda.manual_seed_all(seed)
      np.random.seed(seed)
      random.seed(seed)
-     torch.backends.cudnn.deterministic = True
+     torch.backends.cudnn.deterministic = deterministic
+     torch.backends.cudnn.benchmark = not deterministic
+     torch.backends.cuda.matmul.allow_tf32 = True
+     torch.backends.cudnn.allow_tf32 = True
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -373,6 +401,7 @@ if __name__ == "__main__":
     parser.add_argument("--force_sh_3d", action="store_true")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=6666)
+    parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--exhaust_test", action="store_true")
     
     args = parser.parse_args(sys.argv[1:])
@@ -392,7 +421,7 @@ if __name__ == "__main__":
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,op.iterations,500)]
     
-    setup_seed(args.seed)
+    setup_seed(args.seed, deterministic=args.deterministic)
     
     print("Optimizing " + args.model_path)
 

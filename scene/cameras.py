@@ -81,12 +81,21 @@ class Camera:
         directions = pts_world[...,:3] - self.camera_center[None,None,:]
         return self.camera_center[None,None], directions / torch.norm(directions, dim=-1, keepdim=True)
     
-    def cuda(self):
-        cuda_copy = deepcopy(self)
-        for k, v in cuda_copy.__dict__.items():
-            if isinstance(v, torch.Tensor):
-                cuda_copy.__dict__[k] = v.to(cuda_copy.data_device)
-        return cuda_copy
+    def to(self, device=None, non_blocking=False, copy=True):
+        target_device = self.data_device if device is None else torch.device(device)
+        cam = deepcopy(self) if copy else self
+        if not copy:
+            tensor_values = [value for value in cam.__dict__.values() if isinstance(value, torch.Tensor)]
+            if tensor_values and all(value.device == target_device for value in tensor_values):
+                return cam
+        for key, value in cam.__dict__.items():
+            if isinstance(value, torch.Tensor):
+                cam.__dict__[key] = value.to(target_device, non_blocking=non_blocking)
+        cam.data_device = target_device
+        return cam
+
+    def cuda(self, non_blocking=False, copy=True):
+        return self.to(device=self.data_device, non_blocking=non_blocking, copy=copy)
     
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):

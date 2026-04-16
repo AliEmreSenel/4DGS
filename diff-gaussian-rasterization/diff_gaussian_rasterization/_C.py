@@ -13,6 +13,21 @@ def _is_verbose() -> bool:
     return os.environ.get("VERBOSE_CUDA_BUILD", "0") == "1" or os.environ.get("DIFF_GS_VERBOSE_BUILD", "0") == "1"
 
 
+def _is_debug_build() -> bool:
+    return os.environ.get("DIFF_GS_DEBUG_BUILD", "0") == "1"
+
+
+def _extra_cflags() -> list[str]:
+    return ["-g"] if _is_debug_build() else ["-O3"]
+
+
+def _extra_cuda_cflags() -> list[str]:
+    include_glm = "-I" + str(_ROOT / "third_party" / "glm")
+    if _is_debug_build():
+        return ["-g", "-G", include_glm]
+    return ["-O3", "--use_fast_math", include_glm]
+
+
 @lru_cache(maxsize=1)
 def _load_extension():
     return load(
@@ -24,8 +39,8 @@ def _load_extension():
             str(_ROOT / "rasterize_points.cu"),
             str(_ROOT / "ext.cpp"),
         ],
-        extra_cflags=["-g"],
-        extra_cuda_cflags=["-g", "-G", "-I" + str(_ROOT / "third_party" / "glm")],
+        extra_cflags=_extra_cflags(),
+        extra_cuda_cflags=_extra_cuda_cflags(),
         verbose=_is_verbose(),
     )
 

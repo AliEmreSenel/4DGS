@@ -13,22 +13,31 @@ dependencies = [
   "torchvision",
   "plyfile==0.8.1",
   "tqdm==4.66.1",
-  "torchmetrics==0.11.4",
+  "torchmetrics==1.9.0",
   "imagesize==1.4.1",
   "kornia==0.6.12",
   "omegaconf==2.3.0",
-  "simple-knn",
-  "pointops2",
   "diff-gaussian-rasterization",
   "tensorboard>=2.20.0",
   "imageio[ffmpeg]>=2.37.3",
+  "pointops2",
+  "simple-knn",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["arguments*", "gaussian_renderer*", "lpipsPyTorch*", "scene*", "utils*"]
+include = ["arguments*", "externals*", "gaussian_renderer*", "scene*", "utils*"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
 
 [tool.uv.sources]
-simple-knn = { path = "simple-knn", editable = true }
-pointops2 = { path = "pointops2", editable = true }
 diff-gaussian-rasterization = { path = "diff-gaussian-rasterization", editable = true }
+pointops2 = { workspace = true }
+simple-knn = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "pointops2",
+    "simple-knn",
+]

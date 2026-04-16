@@ -13,7 +13,10 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
-from torchmetrics import MultiScaleStructuralSimilarityIndexMeasure
+from torchmetrics.image import (
+    LearnedPerceptualImagePatchSimilarity,
+    MultiScaleStructuralSimilarityIndexMeasure,
+)
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -64,8 +67,18 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 ms_ssim = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0)
+lpips_metrics = {}
 
 def msssim(rgb, gts):
     # assert (rgb.max() <= 1.05 and rgb.min() >= -0.05)
     # assert (gts.max() <= 1.05 and gts.min() >= -0.05)
     return ms_ssim(rgb, gts).item()
+
+def lpips(rgb, gts, net_type="alex"):
+    key = (net_type, str(rgb.device))
+    if key not in lpips_metrics:
+        metric = LearnedPerceptualImagePatchSimilarity(net_type=net_type, normalize=True)
+        lpips_metrics[key] = metric.to(rgb.device).eval()
+
+    with torch.no_grad():
+        return lpips_metrics[key](rgb, gts).item()
