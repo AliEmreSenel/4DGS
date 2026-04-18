@@ -57,9 +57,9 @@ $
 
 Rendering 4DGS-Native gaussian splats is conducted by first conditioning the gaussians in time, to obtain a 3DGS, which gets projected to a 2D plane to be compared with a reference from the training dataset.
 
-Sort 
+[Sort Operation is Bottleneck, consuming up to half of render time]
 
-Sort-free
+[Sort-free has a commutative sum, so computation is parallel]
 
 
 == Training Procedure
@@ -69,6 +69,18 @@ Standard backpropagation is used to learn the best parameters for scene fidelity
 [SSIM metrics]
 
 [Image Reconstruction L1 or L2 loss]
+
+Specific Loss for 4DGS + Loss variations (see USPLAT)
+
+Mention Custom CUDA kernel, difficulty in compatibility (relevant to later saying we did not implement all options)
+
+== Compression
+
+Pruning
+
+Render-time MLPs
+
+K-means
 
 == Points of Improvement
 
@@ -90,6 +102,8 @@ We compare reconstruction loss, training time, storage size, and render speed, t
 
 = Ablations
 
+We use ablations extensively to evaluate the performance of the model, since each architecture layer introduces errors which may affect the other components negatively. Consequently, the architecture is developed to be modular and exchangeable, for better awareness of each part.
+
 = Discussion
 
 = Conclusion
@@ -101,8 +115,6 @@ We compare reconstruction loss, training time, storage size, and render speed, t
 
 #show: arkheion-appendices
 = Notes
-
-We use ablations extensively to evaluate the performance of the model, since each architecture layer introduces errors which may affect the other components negatively. Consequently, the architecture is developed to be modular and exchangeable, for better awareness of each part.
 
 - *Important Metrics*: measure performance in each architecture. This cannot be plain loss, since it varies between architectures.
   - Color Reconstruction Error
