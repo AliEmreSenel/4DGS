@@ -1,7 +1,7 @@
 #import "template.typ": arkheion, arkheion-appendices
 
 #let abstract = [
-  3DGS represents scenes as learnable Gaussians, and 4DGS extends this to dynamic scenes over time. While these models enable high-quality rendering, they are still too heavy for mobile use. Recent work addresses this from different angles: native 4DGS defines the baseline dynamic formulation, 1000FPS speeds up rendering through pruning and visibility masks, Instant4D cuts training cost with a simpler representation and better initialization, MobileGS makes 3D Gaussian rendering compact enough for phones, and Usplat4D improves dynamic modeling with uncertainty-aware motion weighting. We build on these contributions to design a lightweight 4DGS pipeline for mobile devices. We validate our results through extensive ablations, and we describe the best architecture.
+  3DGS represents scenes as learnable gaussians, and 4DGS extends this to dynamic scenes over time. While these models enable high-quality rendering, they are still too heavy for mobile use. Recent work addresses existing limitations from different angles: from the native 4DGS baseline formulation for dynamic reconstruction, 1000FPS speeds up rendering through pruning and visibility masks, Instant4D cuts training cost with a simpler representation and better initialization, MobileGS makes 3D gaussian rendering compact enough for phones, and Usplat4D improves dynamic modeling with uncertainty-aware motion weighting. We build on these contributions to design a lightweight 4DGS pipeline for mobile devices. We validate our results through extensive ablations, and we describe and evaluate the best architecture.
 ]
 
 #show: arkheion.with(
@@ -20,7 +20,79 @@
 #show link: underline
 
 = Introduction
-#lorem(60)
+
+The task of scene reconstruction from videos has been studied extensively in the last years, due to its far-reaching applications in computer vision. As a technique, Gaussian Splatting was originally developed in the late 90' [], but due to its computational demands, it only resurfaced more recently through the 3DGS Architecture. In this static setting, multiple images are used to train a machine learning model to "learn" a scene, obtaining a function that can be used to sample a pixel color from position and orientation of the camera in space. This is functionally similar to previous paradigms such as NERF [], which trained MLPs to reproduce a scene. Gaussian Splatting follows a different paradigm, in that the latent structure of a model is composed of numerous Gaussian Distributions placed 3D space. The Gaussians are projected to a 2D plane and rasterized to obtain a camera representation of the colors corresponding to each pixels of a reconstructed image. Learning is comparing the reconstructed image with the baseline truth from the dataset, but inference allows the syntesis of new camera angles with impressive accuracy. In the formulation, Gaussian Splats serve as building blocks for complex scenes, and are being parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing for diagonal deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of the gaussian, encoded from a fixed number of Spherical Harmonic (SH) coefficients, which can approximate uniformly any color distribution. Compared to having a constant color, SH coefficients allow smooth coloring over the surface, where expressiveness depends on the number of coefficients. Both the use of Covariance+Rotation and SH reduce the number of gaussians needed, since they allow for greater range of behavior, at the cost of a higher number of variables.
+
+During inference, camera position is fixed, and a pixel color is obtained by integrating the scene through the view-pixel ray: each gaussian color contribution is added, while accounting for opacity, distance, and leftover un-occluded light, crossing the gaussians in the correct order.
+
+[3DGS Splatting Image]
+
+Gaussian Splatting allows for novel view synthesis, while offering major improvements in terms of speed and accuracy, compared to previous methods such as NERF, _reaching ..._ []. In moving the task from static scenes to videos, that is, building a model that can learn an evolving scene and reproduce it from novel angles, two major directions have been identified: Wu et al [] used a static 3DGS model with an added decoder-encoder architecture for representing time bias through a latent self-consistent embedding; while 2024, Yang et al [] developed native 4D Gaussian Splatting, which learns the distribution directly using native 4D Gaussian primitives, as opposed to 3D Gaussians with an added time embedding. In this paper, all mentions of 4D Gussian Splatting refer to the native representation.
+
+Although the field of dynamic scene reconstruction has attracted a lot of interest and produced impressive results, many problems persist with the current models. Particularly, they are affected by a high number of low-importance Gaussians, describing the scene inefficiently. Rendering techniques are often limited by costly sorting algorithms, and non-obvious training strategies. In this paper, we combine several 4DGS-Native improvements into a unified architecture, verifying their performance through ablations.
+
+== Gaussian Representation
+
+The parametrization of the gaussians in a Native 4DGS tries to be as compact as possible, while ensuring a high degree of freedom, so individual Guassians are expressive and their contribution to the scene is as high as possible, to effectively reduce their number. In 4DGS-Native, each gaussian is characterized by a position vector $mu in RR^4$ representing the center of the gaussian, that is the mean of the distribution, a covariance matrix $Sigma in RR^(4 times 4)$, which distorts the gaussian in time and space, a rotation, represented using two quaternions $r_1, r_2 in HH$. For color, the gaussians are equipped with an opacity scalar $o$, and a series of SH coefficients: SH(m) uses $2*"m" + 1$ coefficients for color channels, so SH(3) requires 21 scalars in total, per Gaussian, to encode its color. It should be noted that SH(0) corresponds to having plain RGB colors.
+
+$ 
+  G_i = (mu_i, Sigma_i, o_i, (r_1, r_2), arrow("SH")(3)))
+  
+$
+
+Variations of the representation have been developed to reduce the number of variables, which reduces training time and storage size. Specifically, the Isotropic is rotationally invariant in space, while changing in time. This is encoded in a matrix with a $3 times 3$ constant-values submatrix, and a time-varying time vector. Here, $bold(1)$ represents the matrix with $1$ in each entry.
+
+$
+  Sigma =
+  mat(
+    Sigma_"xyz", 0;
+    0, sigma_t,
+  )
+  && "with"
+  Sigma_"xyz" = S_"xyz" bold(1)_(3 x 3)
+  \
+ Sigma = Sigma^T &&=> Sigma_(x y z,t) = Sigma_(t, x y z)^T $
+
+== Projection and Rendering
+
+Rendering 4DGS-Native gaussian splats is conducted by first conditioning the gaussians in time, to obtain a 3DGS, which gets projected to a 2D plane to be compared with a reference from the training dataset.
+
+Sort 
+
+Sort-free
+
+
+== Training Procedure
+
+Standard backpropagation is used to learn the best parameters for scene fidelity, while loss can be measured using common image similarity metrics.
+
+[SSIM metrics]
+
+[Image Reconstruction L1 or L2 loss]
+
+== Points of Improvement
+
+Several techniques have been developed to improve the known limitations of GS: poor initialization, slow training, high-memory usage, inconsistent reconstruction, unstable training, expensive rendering.
+
+[Explain each of them, citing the paper for each]
+
+These architectural changes have produces incredible improvements, but they have not been tested individually in a unified system.
+
+We compare reconstruction loss, training time, storage size, and render speed, to identify the best combination of techniques.
+
+[Examples of orders of magnitude of each term]
+
+[Mention difficulty with one thing giving an improvement at the cost of another aspect, which is why we do ablations]
+
+= Model Parametrization
+
+
+
+= Ablations
+
+= Discussion
+
+= Conclusion
 
 
 #pagebreak()
@@ -49,6 +121,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 #set math.equation(numbering: none)
 
 #set text(10pt)
+#set par(justify: false)
 
 #let thick = 1.8pt
 #let base = 0.6pt
@@ -90,7 +163,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[]],
   [Schedule], [High Number \ of Iterations], N([]), G([]), N([]), R([]), N([]),
 
-  table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. Gaussians*]],
+  table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. gaussians*]],
 
   table.cell(
     rowspan: 2,
@@ -232,7 +305,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   table.cell(rowspan: 1)[#rotate(-90deg, reflow: true)[]],
   [*Schedule*], G([High Iterations]), G([Much Testing]), G([Hyperparameters]),
 
-  table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. Gaussians*]],
+  table.cell(rowspan: 7)[#rotate(-90deg, reflow: true)[*1. gaussians*]],
 
   table.cell(
     rowspan: 2,
@@ -329,13 +402,13 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
     rowspan: 2,
     stroke: (left: thick, top: thick, bottom: thick),
   )[*Rasterisation*: project 3D to 2D],
-  YS([*Sort*: aggregate color back to front], (top: thick)),
-  YS([Standard technique], (top: thick)),
-  YS([Runtime Bottleneck], (top: thick)),
+  GS([*Sort*: aggregate color back to front], (top: thick)),
+  GS([Standard technique], (top: thick)),
+  GS([Runtime Bottleneck], (top: thick)),
 
-  GS([*Sort-free*: weighted sum biased by MLP], (bottom: thick)),
-  GS([Pipeline Change + time feature], (bottom: thick)),
-  GS([Altro train tiny MLPs], (bottom: thick)),
+  YS([*Sort-free*: weighted sum biased by MLP], (bottom: thick)),
+  YS([Pipeline Change + time feature], (bottom: thick)),
+  YS([Also train tiny MLPs], (bottom: thick)),
 
   table.hline(y: 21, start: 3, end: 5),
 
@@ -372,12 +445,12 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 #let h5 = [*Usplat4D*]
 
 #let row-summary = [*Summary*]
-#let row-encoding = [*Per-Gaussian \ Variables*]
+#let row-encoding = [*Per-gaussian \ Variables*]
 #let row-training = [*Initialization, \ Training*]
 #let row-changes = [*Changes  \ to the number \ of gaussians*]
 #let row-rendering = [*Rendering*]
 
-#let summary-4dgs = [Train 4D Gaussians directly]
+#let summary-4dgs = [Train 4D gaussians directly]
 #let summary-1000 = [Faster rendering through one-time prune at train, and visibility masks at render.]
 #let summary-instant = [Fast train from having fewer vars and a better initialization.]
 #let summary-mobile = [End-to-End training of 3DGS using no-sorting for render, and tiny MLP for fast render and small memory.]
@@ -408,7 +481,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 #let encoding-instant = [
   $mu_i in RR^4$
 
-  *Isotropic Gaussians* (in space).
+  *Isotropic gaussians* (in space).
 
   $Sigma =
   mat(
@@ -484,7 +557,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   *SH distillation* turns 3rd-order SH to 1st-order with a teacher-student setup for pixel color distillation, plus a scale-invariant depth distillation loss.
   Diffuse and view-dependent 3D components, then decoded by lightweight MLPs.
 
-  *Neural vector quantization* of Gaussian attributes with multiple codebooks.
+  *Neural vector quantization* of gaussian attributes with multiple codebooks.
   Huffman coding is applied to the discrete codes at the end of training.
 ]
 #let training-usplat = [
@@ -546,7 +619,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   with $T = product_j (1 - alpha_j)$ global transmittance.
 
   $w_i$ is depth-aware and depends on the
-  view-dependent $phi_i$ depth, and Gaussian scale.
+  view-dependent $phi_i$ depth, and gaussian scale.
 ]
 #let rendering-usplat = [
   Assumes pixel color at t: $C_t^p = sum T_(i,t)^P alpha_i c_i$, with L2 loss over image, to $sigma^2_(i,t)$ formula.

@@ -18,7 +18,7 @@
         #set text(9pt)
         #line(length: 100%, stroke: 1pt)
         #align(left)[
-          \* \@studbocconi.it, #h(5pt) Università Commerciale Luigi Bocconi - Biblioteca
+          \* \@studbocconi.it, #h(5pt) Università Commerciale Luigi Bocconi
         ]
       ]
     },
@@ -27,7 +27,7 @@
   show math.equation: set text(weight: 400)
   show math.equation: set block(spacing: 0.65em)
   set math.equation(numbering: "(1)")
-  set heading(numbering: "1.1")
+  set heading(numbering: "1.")
 
   // Set run-in subheadings, starting at level 4.
   show heading: it => {
