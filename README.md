@@ -61,6 +61,12 @@ After the installation and data preparation, you can train the model by running:
 python train.py --config $config_path
 ```
 
+For the isotropic Gaussian ablation (single spatial scale per Gaussian and fixed identity rotations), add:
+
+```shell
+python train.py --config $config_path --isotropic_gaussians
+```
+
 ## 🎥 Videos
 
 ### 🎞️ Demo

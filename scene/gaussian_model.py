@@ -61,7 +61,7 @@ class GaussianModel:
 
 
     def __init__(self, sh_degree : int, gaussian_dim : int = 3, time_duration: list = [-0.5, 0.5], rot_4d: bool = False, force_sh_3d: bool = False, sh_degree_t : int = 0,
-                 prefilter_var: float = -1.0):
+                 prefilter_var: float = -1.0, isotropic_gaussians: bool = False):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
@@ -82,6 +82,7 @@ class GaussianModel:
         self._scaling_t = torch.empty(0)
         self.time_duration = time_duration
         self.rot_4d = rot_4d
+        self.isotropic_gaussians = isotropic_gaussians
         self._rotation_r = torch.empty(0)
         self.force_sh_3d = force_sh_3d
         self.t_gradient_accum = torch.empty(0)
@@ -136,6 +137,7 @@ class GaussianModel:
             )
     
     def restore(self, model_args, training_args):
+        t_gradient_accum = None
         if self.gaussian_dim == 3:
             (self.active_sh_degree, 
             self._xyz, 
@@ -169,16 +171,24 @@ class GaussianModel:
             self.rot_4d,
             self.env_map,
             self.active_sh_degree_t) = model_args
+
         if training_args is not None:
             self.training_setup(training_args)
             self.xyz_gradient_accum = xyz_gradient_accum
-            self.t_gradient_accum = t_gradient_accum
+            if self.gaussian_dim == 4:
+                self.t_gradient_accum = t_gradient_accum
             self.denom = denom
-            self.optimizer.load_state_dict(opt_dict)
+            try:
+                self.optimizer.load_state_dict(opt_dict)
+            except ValueError as exc:
+                print(f"Warning: optimizer state is incompatible with current Gaussian parameterization, continuing with fresh optimizer state. Details: {exc}")
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        scaling = self.scaling_activation(self._scaling)
+        if self.isotropic_gaussians and scaling.shape[0] > 0 and scaling.shape[1] == 1:
+            return scaling.repeat(1, 3)
+        return scaling
     
     @property
     def get_scaling_t(self):
@@ -186,15 +196,39 @@ class GaussianModel:
     
     @property
     def get_scaling_xyzt(self):
-        return self.scaling_activation(torch.cat([self._scaling, self._scaling_t], dim = 1))
+        return torch.cat([self.get_scaling, self.get_scaling_t], dim = 1)
     
     @property
     def get_rotation(self):
+        if self.isotropic_gaussians:
+            return self._identity_rotation(self.get_xyz.shape[0], self.get_xyz.device, self.get_xyz.dtype)
         return self.rotation_activation(self._rotation)
     
     @property
     def get_rotation_r(self):
+        if self.isotropic_gaussians:
+            return self._identity_rotation(self.get_xyz.shape[0], self.get_xyz.device, self.get_xyz.dtype)
         return self.rotation_activation(self._rotation_r)
+
+    def _identity_rotation(self, n_pts, device, dtype):
+        rots = torch.zeros((n_pts, 4), device=device, dtype=dtype)
+        rots[:, 0] = 1
+        return rots
+
+    def _to_isotropic_scaling(self, scaling_param):
+        if scaling_param.numel() == 0:
+            return scaling_param
+        if scaling_param.shape[1] == 1:
+            return scaling_param
+        return torch.log(torch.exp(scaling_param).mean(dim=1, keepdim=True))
+
+    def _apply_isotropic_parameterization(self):
+        if not self.isotropic_gaussians:
+            return
+        self._scaling = nn.Parameter(self._to_isotropic_scaling(self._scaling).requires_grad_(True))
+        self._rotation = torch.empty((0, 4), device=self._scaling.device, dtype=self._scaling.dtype)
+        if self.gaussian_dim == 4 and self.rot_4d:
+            self._rotation_r = torch.empty((0, 4), device=self._scaling.device, dtype=self._scaling.dtype)
     
     @property
     def get_xyz(self):
@@ -229,7 +263,7 @@ class GaussianModel:
     
     def get_cov_t(self, scaling_modifier = 1):
         if self.rot_4d:
-            L = build_scaling_rotation_4d(scaling_modifier * self.get_scaling_xyzt, self._rotation, self._rotation_r)
+            L = build_scaling_rotation_4d(scaling_modifier * self.get_scaling_xyzt, self.get_rotation, self.get_rotation_r)
             actual_covariance = L @ L.transpose(1, 2)
             return actual_covariance[:,3,3].unsqueeze(1)
         else:
@@ -242,12 +276,12 @@ class GaussianModel:
         return torch.exp(-0.5*(self.get_t-timestamp)**2/sigma) # / torch.sqrt(2*torch.pi*sigma)
     
     def get_covariance(self, scaling_modifier = 1):
-        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+        return self.covariance_activation(self.get_scaling, scaling_modifier, self.get_rotation)
     
     def get_current_covariance_and_mean_offset(self, scaling_modifier = 1, timestamp = 0.0):
         return self.covariance_activation(self.get_scaling_xyzt, scaling_modifier, 
-                                                              self._rotation, 
-                                                              self._rotation_r,
+                                                              self.get_rotation, 
+                                                              self.get_rotation_r,
                                                               dt = timestamp - self.get_t)
 
     def oneupSHdegree(self):
@@ -272,7 +306,9 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        scales = torch.log(torch.sqrt(dist2))[...,None]
+        if not self.isotropic_gaussians:
+            scales = scales.repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
         if self.gaussian_dim == 4:
@@ -289,7 +325,10 @@ class GaussianModel:
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        if self.isotropic_gaussians:
+            self._rotation = torch.empty((0, 4), device="cuda")
+        else:
+            self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         
@@ -297,7 +336,10 @@ class GaussianModel:
             self._t = nn.Parameter(fused_times.requires_grad_(True))
             self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
             if self.rot_4d:
-                self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
+                if self.isotropic_gaussians:
+                    self._rotation_r = torch.empty((0, 4), device="cuda")
+                else:
+                    self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
 
     def create_from_pth(self, path, spatial_lr_scale):
         assert self.gaussian_dim == 4 and self.rot_4d
@@ -310,6 +352,8 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         scales = init_4d_gaussian['scaling'].cuda()
+        if self.isotropic_gaussians:
+            scales = self._to_isotropic_scaling(scales)
         rots = init_4d_gaussian['rotation'].cuda()
         scales_t = init_4d_gaussian['scaling_t'].cuda()
         rots_r = init_4d_gaussian['rotation_r'].cuda()
@@ -320,13 +364,19 @@ class GaussianModel:
         self._features_dc = nn.Parameter(features_dc.transpose(1, 2).requires_grad_(True))
         self._features_rest = nn.Parameter(features_rest.transpose(1, 2).requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        if self.isotropic_gaussians:
+            self._rotation = torch.empty((0, 4), device="cuda")
+        else:
+            self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         
         self._t = nn.Parameter(fused_times.requires_grad_(True))
         self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
-        self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
+        if self.isotropic_gaussians:
+            self._rotation_r = torch.empty((0, 4), device="cuda")
+        else:
+            self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -339,15 +389,16 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
+        if not self.isotropic_gaussians:
+            l.append({'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"})
         if self.gaussian_dim == 4: # TODO: tune time_lr_scale
             if training_args.position_t_lr_init < 0:
                 training_args.position_t_lr_init = training_args.position_lr_init
             self.t_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
             l.append({'params': [self._t], 'lr': training_args.position_t_lr_init * self.spatial_lr_scale, "name": "t"})
             l.append({'params': [self._scaling_t], 'lr': training_args.scaling_lr, "name": "scaling_t"})
-            if self.rot_4d:
+            if self.rot_4d and not self.isotropic_gaussians:
                 l.append({'params': [self._rotation_r], 'lr': training_args.rotation_lr, "name": "rotation_r"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -415,7 +466,8 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        if not self.isotropic_gaussians:
+            self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -425,7 +477,7 @@ class GaussianModel:
         if self.gaussian_dim == 4:
             self._t = optimizable_tensors['t']
             self._scaling_t = optimizable_tensors['scaling_t']
-            if self.rot_4d:
+            if self.rot_4d and not self.isotropic_gaussians:
                 self._rotation_r = optimizable_tensors['rotation_r']
             self.t_gradient_accum = self.t_gradient_accum[valid_points_mask]
 
@@ -457,12 +509,13 @@ class GaussianModel:
         "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
-        "rotation" : new_rotation,
         }
+        if not self.isotropic_gaussians:
+            d["rotation"] = new_rotation
         if self.gaussian_dim == 4:
             d["t"] = new_t
             d["scaling_t"] = new_scaling_t
-            if self.rot_4d:
+            if self.rot_4d and not self.isotropic_gaussians:
                 d["rotation_r"] = new_rotation_r
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
@@ -471,11 +524,12 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        if not self.isotropic_gaussians:
+            self._rotation = optimizable_tensors["rotation"]
         if self.gaussian_dim == 4:
             self._t = optimizable_tensors['t']
             self._scaling_t = optimizable_tensors['scaling_t']
-            if self.rot_4d:
+            if self.rot_4d and not self.isotropic_gaussians:
                 self._rotation_r = optimizable_tensors['rotation_r']
             self.t_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
@@ -493,8 +547,8 @@ class GaussianModel:
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
         # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
         
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
-        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_scaling = self.scaling_inverse_activation(self.scaling_activation(self._scaling[selected_pts_mask]).repeat(N,1) / (0.8*N))
+        new_rotation = None if self.isotropic_gaussians else self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
@@ -503,8 +557,11 @@ class GaussianModel:
             stds = self.get_scaling[selected_pts_mask].repeat(N,1)
             means = torch.zeros((stds.size(0), 3),device="cuda")
             samples = torch.normal(mean=means, std=stds)
-            rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
-            new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+            if self.isotropic_gaussians:
+                new_xyz = samples + self.get_xyz[selected_pts_mask].repeat(N, 1)
+            else:
+                rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+                new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
             new_t = None
             new_scaling_t = None
             new_rotation_r = None
@@ -518,12 +575,15 @@ class GaussianModel:
             stds = self.get_scaling_xyzt[selected_pts_mask].repeat(N,1)
             means = torch.zeros((stds.size(0), 4),device="cuda")
             samples = torch.normal(mean=means, std=stds)
-            rots = build_rotation_4d(self._rotation[selected_pts_mask], self._rotation_r[selected_pts_mask]).repeat(N,1,1)
-            new_xyzt = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyzt[selected_pts_mask].repeat(N, 1)
+            if self.isotropic_gaussians:
+                new_xyzt = samples + self.get_xyzt[selected_pts_mask].repeat(N, 1)
+            else:
+                rots = build_rotation_4d(self._rotation[selected_pts_mask], self._rotation_r[selected_pts_mask]).repeat(N,1,1)
+                new_xyzt = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyzt[selected_pts_mask].repeat(N, 1)
             new_xyz = new_xyzt[...,0:3]
             new_t = new_xyzt[...,3:4]
             new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1) / (0.8*N))
-            new_rotation_r = self._rotation_r[selected_pts_mask].repeat(N,1)
+            new_rotation_r = None if self.isotropic_gaussians else self._rotation_r[selected_pts_mask].repeat(N,1)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r)
 
@@ -542,14 +602,14 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
+        new_rotation = None if self.isotropic_gaussians else self._rotation[selected_pts_mask]
         new_t = None
         new_scaling_t = None
         new_rotation_r = None
         if self.gaussian_dim == 4:
             new_t = self._t[selected_pts_mask]
             new_scaling_t = self._scaling_t[selected_pts_mask]
-            if self.rot_4d:
+            if self.rot_4d and not self.isotropic_gaussians:
                 new_rotation_r = self._rotation_r[selected_pts_mask]
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_rotation_r)

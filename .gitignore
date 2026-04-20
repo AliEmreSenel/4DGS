@@ -15,6 +15,7 @@ pointops2/pointops2.egg-info
 simple-knn/simple_knn.egg-info
 __pycache__/
 *.so
+*.egg-info
 .Python
 .vscode/
 build/
@@ -24,3 +25,4 @@ eggs/
 .eggs/
 *.egg
 *.sh
+*.zip

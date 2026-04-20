@@ -103,6 +103,7 @@ def infer_checkpoint_layout(model_params):
         "rot_4d": None,
         "active_sh_degree_t": 0,
         "time_duration": None,
+        "isotropic_gaussians": None,
     }
     if not isinstance(model_params, (tuple, list)):
         return info
@@ -110,6 +111,21 @@ def infer_checkpoint_layout(model_params):
     if len(model_params) == 19:
         info["gaussian_dim"] = 4
         info["rot_4d"] = bool(model_params[16])
+        try:
+            scales = model_params[4]
+            rot_l = model_params[5]
+            rot_r = model_params[15]
+            info["isotropic_gaussians"] = (
+                hasattr(scales, "shape")
+                and scales.ndim == 2
+                and scales.shape[1] == 1
+                and hasattr(rot_l, "numel")
+                and rot_l.numel() == 0
+                and hasattr(rot_r, "numel")
+                and rot_r.numel() == 0
+            )
+        except Exception:
+            pass
         try:
             info["active_sh_degree_t"] = int(model_params[18])
         except Exception:
@@ -128,6 +144,18 @@ def infer_checkpoint_layout(model_params):
     elif len(model_params) == 12:
         info["gaussian_dim"] = 3
         info["rot_4d"] = False
+        try:
+            scales = model_params[4]
+            rot_l = model_params[5]
+            info["isotropic_gaussians"] = (
+                hasattr(scales, "shape")
+                and scales.ndim == 2
+                and scales.shape[1] == 1
+                and hasattr(rot_l, "numel")
+                and rot_l.numel() == 0
+            )
+        except Exception:
+            pass
     return info
 
 
@@ -160,6 +188,7 @@ def main():
     parser.add_argument("--orbit_end_deg", type=float, default=360.0)
     parser.add_argument("--split", type=str, choices=["train", "test"], default="test")
     parser.add_argument("--out_dir", type=str, default=None)
+    parser.add_argument("--isotropic_gaussians", action="store_true")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -212,11 +241,16 @@ def main():
         resolved.gaussian_dim = inferred["gaussian_dim"]
     if inferred["rot_4d"] is not None:
         resolved.rot_4d = inferred["rot_4d"]
+    if inferred["isotropic_gaussians"] is True:
+        resolved.isotropic_gaussians = True
     if getattr(resolved, "time_duration", None) is None or list(
         getattr(resolved, "time_duration", [-0.5, 0.5])
     ) == [-0.5, 0.5]:
         if inferred["time_duration"] is not None:
             resolved.time_duration = inferred["time_duration"]
+
+    if args.isotropic_gaussians:
+        resolved.isotropic_gaussians = True
 
     dataset = lp.extract(resolved)
     pipe = pp.extract(resolved)
@@ -225,6 +259,7 @@ def main():
     time_duration = getattr(resolved, "time_duration", [-0.5, 0.5])
     rot_4d = getattr(resolved, "rot_4d", False)
     force_sh_3d = getattr(resolved, "force_sh_3d", False)
+    isotropic_gaussians = getattr(resolved, "isotropic_gaussians", False)
     num_pts = getattr(resolved, "num_pts", 100000)
     num_pts_ratio = getattr(resolved, "num_pts_ratio", 1.0)
     sh_degree_t = max(
@@ -245,6 +280,7 @@ def main():
         force_sh_3d=force_sh_3d,
         sh_degree_t=sh_degree_t,
         prefilter_var=dataset.prefilter_var,
+        isotropic_gaussians=isotropic_gaussians,
     )
 
     scene = Scene(
