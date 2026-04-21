@@ -70,9 +70,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
-    
     best_psnr = 0.0
     ema_loss_for_log = torch.tensor(0.0, device="cuda")
     ema_l1loss_for_log = torch.tensor(0.0, device="cuda")
@@ -113,7 +110,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration > opt.iterations:
                 break
 
-            iter_start.record()
             gaussians.update_learning_rate(iteration)
             
             # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -272,7 +268,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if gaussians.gaussian_dim == 4:
                         batch_t_grad = gaussians._t.grad.clone().detach()
             
-            iter_end.record()
             loss_dict = {"Ll1": Ll1,
                         "Lssim": Lssim}
             if opt.lambda_depth > 0:
@@ -318,7 +313,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     progress_bar.close()
 
                 # Log and save
-                test_psnr = training_report(tb_writer, iteration, Ll1, Lssim, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), loss_dict)
+                test_psnr = training_report(tb_writer, iteration, Ll1, Lssim, loss, l1_loss, testing_iterations, scene, render, (pipe, background), loss_dict)
                 if (iteration in testing_iterations):
                     if test_psnr >= best_psnr:
                         best_psnr = test_psnr
@@ -375,13 +370,12 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, Lssim, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_dict=None):
+def training_report(tb_writer, iteration, Ll1, Lssim, loss, l1_loss, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_dict=None):
     should_log_train = (iteration % 10 == 0) or (iteration in testing_iterations)
     if tb_writer and should_log_train:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/ssim_loss', Lssim.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
         tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         if iteration % 500 == 0:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
