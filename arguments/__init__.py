@@ -72,6 +72,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
+        self.sort_free_render = False
         self.env_map_res = 0
         self.env_optimize_until = 1000000000
         self.env_optimize_from = 0
@@ -105,6 +106,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
+        self.mobilegs_opacity_phi_lr = 1e-3
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

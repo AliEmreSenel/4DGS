@@ -108,7 +108,7 @@ def infer_checkpoint_layout(model_params):
     if not isinstance(model_params, (tuple, list)):
         return info
 
-    if len(model_params) == 19:
+    if len(model_params) in (19, 20):
         info["gaussian_dim"] = 4
         info["rot_4d"] = bool(model_params[16])
         try:
@@ -141,7 +141,7 @@ def infer_checkpoint_layout(model_params):
                 info["time_duration"] = [tmin - pad, tmax + pad]
         except Exception:
             pass
-    elif len(model_params) == 12:
+    elif len(model_params) in (12, 13):
         info["gaussian_dim"] = 3
         info["rot_4d"] = False
         try:
@@ -230,9 +230,10 @@ def main():
         resolved.source_path = os.path.abspath(args.source_path)
 
     ckpt_path = find_checkpoint(model_path, args.checkpoint)
+    map_location = "cuda" if torch.cuda.is_available() else "cpu"
     model_params, loaded_iter = torch.load(
         ckpt_path,
-        map_location="cpu",
+        map_location=map_location,
         weights_only=False,
     )
 

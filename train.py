@@ -344,6 +344,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration < opt.iterations:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                    if gaussians.mobilegs_opacity_phi_optimizer is not None:
+                        gaussians.mobilegs_opacity_phi_optimizer.step()
+                        gaussians.mobilegs_opacity_phi_optimizer.zero_grad(set_to_none=True)
                     if pipe.env_map_res and iteration < pipe.env_optimize_until:
                         env_map_optimizer.step()
                         env_map_optimizer.zero_grad(set_to_none = True)

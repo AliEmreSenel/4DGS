@@ -12,7 +12,8 @@
 import torch
 from torch.nn import functional as F
 import math
-from .diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from .diff_gaussian_rasterization import GaussianRasterizationSettings as SortedGaussianRasterizationSettings
+from .diff_gaussian_rasterization import GaussianRasterizer as SortedGaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 
@@ -34,28 +35,59 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    raster_settings = GaussianRasterizationSettings(
-        image_height=int(viewpoint_camera.image_height),
-        image_width=int(viewpoint_camera.image_width),
-        tanfovx=tanfovx,
-        tanfovy=tanfovy,
-        bg=bg_color if not pipe.env_map_res else torch.zeros(3, device="cuda"),
-        scale_modifier=scaling_modifier,
-        viewmatrix=viewpoint_camera.world_view_transform,
-        projmatrix=viewpoint_camera.full_proj_transform,
-        sh_degree=pc.active_sh_degree,
-        sh_degree_t=pc.active_sh_degree_t,
-        campos=viewpoint_camera.camera_center,
-        timestamp=viewpoint_camera.timestamp,
-        time_duration=pc.time_duration[1]-pc.time_duration[0],
-        rot_4d=pc.rot_4d,
-        gaussian_dim=pc.gaussian_dim,
-        force_sh_3d=pc.force_sh_3d,
-        prefiltered=False,
-        debug=pipe.debug
-    )
+    use_mobilegs_sort_free = bool(getattr(pipe, "sort_free_render", False))
 
-    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+    if use_mobilegs_sort_free:
+        if (not torch.is_grad_enabled()) and pc.mobilegs_opacity_phi_nn is None:
+            raise RuntimeError(
+                "MobileGS sort-free rendering requires a trained opacity/phi MLP in the checkpoint. "
+                "Re-train with --sort_free_render enabled and render from that checkpoint."
+            )
+
+        from .diff_gaussian_rasterization_ms_nosorting import (
+            GaussianRasterizationSettings as MobileGSRasterizationSettings,
+            GaussianRasterizer as MobileGSRasterizer,
+        )
+
+    if use_mobilegs_sort_free:
+        raster_settings = MobileGSRasterizationSettings(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree=pc.active_sh_degree,
+            campos=viewpoint_camera.camera_center,
+            prefiltered=False,
+            debug=pipe.debug,
+        )
+        rasterizer = MobileGSRasterizer(raster_settings=raster_settings)
+    else:
+        raster_settings = SortedGaussianRasterizationSettings(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=bg_color if not pipe.env_map_res else torch.zeros(3, device="cuda"),
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree=pc.active_sh_degree,
+            sh_degree_t=pc.active_sh_degree_t,
+            campos=viewpoint_camera.camera_center,
+            timestamp=viewpoint_camera.timestamp,
+            time_duration=pc.time_duration[1]-pc.time_duration[0],
+            rot_4d=pc.rot_4d,
+            gaussian_dim=pc.gaussian_dim,
+            force_sh_3d=pc.force_sh_3d,
+            prefiltered=False,
+            debug=pipe.debug
+        )
+
+        rasterizer = SortedGaussianRasterizer(raster_settings=raster_settings)
 
     means3D = pc.get_xyz
     means2D = screenspace_points
@@ -69,8 +101,20 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rotations_r = None
     ts = None
     cov3D_precomp = None
+    marginal_t = None
     prefilter_var = -1.0
-    if pipe.compute_cov3D_python:
+    if use_mobilegs_sort_free:
+        scales = pc.get_scaling
+        rotations = pc.get_rotation
+
+    if use_mobilegs_sort_free and pc.gaussian_dim == 4:
+        if not pc.rot_4d:
+            raise ValueError("MobileGS sort-free ablation requires rot_4d=True for 4D Gaussians")
+        cov3D_precomp, delta_mean = pc.get_current_covariance_and_mean_offset(scaling_modifier, viewpoint_camera.timestamp)
+        means3D = means3D + delta_mean
+        marginal_t = pc.get_marginal_t(viewpoint_camera.timestamp)
+        opacity = opacity * marginal_t
+    elif pipe.compute_cov3D_python:
         if pc.rot_4d:
             cov3D_precomp, delta_mean = pc.get_current_covariance_and_mean_offset(scaling_modifier, viewpoint_camera.timestamp)
             means3D = means3D + delta_mean
@@ -97,7 +141,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     if override_color is None:
         if pipe.convert_SHs_python:
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, pc.get_max_sh_channels)
-            if pipe.compute_cov3D_python:
+            if pipe.compute_cov3D_python or (use_mobilegs_sort_free and pc.gaussian_dim == 4):
                 dir_pp = (means3D - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)).detach()
             else:
                 _, delta_mean = pc.get_current_covariance_and_mean_offset(scaling_modifier, viewpoint_camera.timestamp)
@@ -115,12 +159,35 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 ts = pc.get_t
     else:
         colors_precomp = override_color
+
+    if use_mobilegs_sort_free and colors_precomp is None:
+        shs_view = pc.get_features.transpose(1, 2).view(-1, 3, pc.get_max_sh_channels)
+        if pc.gaussian_dim == 4:
+            dir_pp = (means3D - viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)).detach()
+        else:
+            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)).detach()
+        dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
+
+        if pc.gaussian_dim == 3 or pc.force_sh_3d:
+            sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+        else:
+            dir_t = (pc.get_t - viewpoint_camera.timestamp).detach()
+            sh2rgb = eval_shfs_4d(
+                pc.active_sh_degree,
+                pc.active_sh_degree_t,
+                shs_view,
+                dir_pp_normalized,
+                dir_t,
+                pc.time_duration[1] - pc.time_duration[0],
+            )
+        colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+        shs = None
     
     # The CUDA rasterizer expects a dense per-Gaussian flow buffer.
     flow_2d = torch.zeros_like(pc.get_xyz[:, :2])
     
     # Prefilter
-    if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
+    if pc.gaussian_dim == 4 and marginal_t is not None:
         mask = marginal_t[:,0] > 0.05
         if means2D is not None:
             means2D = means2D[mask]
@@ -147,21 +214,54 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         if flow_2d is not None:
             flow_2d = flow_2d[mask]
     
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii, depth, alpha, flow, covs_com = rasterizer(
-        means3D = means3D,
-        means2D = means2D,
-        shs = shs,
-        colors_precomp = colors_precomp,
-        flow_2d = flow_2d,
-        opacities = opacity,
-        ts = ts,
-        scales = scales,
-        scales_t = scales_t,
-        rotations = rotations,
-        rotations_r = rotations_r,
-        cov3D_precomp = cov3D_precomp,
-        prefilter_var = prefilter_var)
+    if use_mobilegs_sort_free:
+        cam_center = viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
+        dir_pp = (means3D - cam_center).detach()
+        dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
+        shs_mlp = pc.get_features
+        if pc.gaussian_dim == 4 and marginal_t is not None:
+            shs_mlp = shs_mlp[mask]
+
+        scales_mlp = pc.get_scaling
+        rotations_mlp = pc.get_rotation
+        if pc.gaussian_dim == 4 and marginal_t is not None:
+            scales_mlp = scales_mlp[mask]
+            rotations_mlp = rotations_mlp[mask]
+
+        phi, opacity = pc.get_mobilegs_opacity_phi(shs_mlp, scales_mlp, dir_pp_normalized, rotations_mlp)
+
+        rendered_image, radii, _kernel_time = rasterizer(
+            means3D=means3D,
+            means2D=means2D,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacities=opacity,
+            theta=torch.zeros_like(phi),
+            phi=phi,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+        )
+        depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
+        alpha = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
+        flow = rendered_image.new_zeros((2, rendered_image.shape[1], rendered_image.shape[2]))
+        covs_com = means3D.new_zeros((means3D.shape[0], 6))
+    else:
+        # Rasterize visible Gaussians to image, obtain their radii (on screen).
+        rendered_image, radii, depth, alpha, flow, covs_com = rasterizer(
+            means3D = means3D,
+            means2D = means2D,
+            shs = shs,
+            colors_precomp = colors_precomp,
+            flow_2d = flow_2d,
+            opacities = opacity,
+            ts = ts,
+            scales = scales,
+            scales_t = scales_t,
+            rotations = rotations,
+            rotations_r = rotations_r,
+            cov3D_precomp = cov3D_precomp,
+            prefilter_var = prefilter_var)
     
     if pipe.env_map_res:
         assert pc.env_map is not None
@@ -178,7 +278,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         # mask2 = (0 < xyz_inter[...,0]) & (xyz_inter[...,1] > 0) # & (xyz_inter[...,2] > -19)
         rendered_image = rendered_image + (1 - alpha) * bg_color_from_envmap # * mask2[None]
     
-    if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
+    if pc.gaussian_dim == 4 and marginal_t is not None:
         radii_all = radii.new_zeros(mask.shape)
         radii_all[mask] = radii
     else:

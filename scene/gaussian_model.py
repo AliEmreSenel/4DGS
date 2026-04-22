@@ -13,6 +13,7 @@ import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, build_rotation_4d, build_scaling_rotation_4d
 from torch import nn
+import torch.nn.functional as F
 import os
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
@@ -24,6 +25,43 @@ from utils.sh_utils import sh_channels_4d
 from utils.gpcc_utils import compress_gpcc, decompress_gpcc, calculate_morton_order
 from utils.compress_utils import huffman_encode, huffman_decode
 import copy
+
+
+class MobileOpacityPhiNN(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        mid_dim = hidden_dim // 2
+        self.backbone = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim * 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, mid_dim),
+            nn.ReLU(),
+        )
+        self.phi_head = nn.Linear(mid_dim, 1)
+        self.opacity_head = nn.Linear(mid_dim, 1)
+        self._init_heads()
+
+    def _init_heads(self):
+        nn.init.constant_(self.phi_head.weight, 0.0)
+        nn.init.constant_(self.phi_head.bias, 1.0)
+
+        nn.init.constant_(self.opacity_head.weight, 0.0)
+        nn.init.constant_(self.opacity_head.bias, inverse_sigmoid(torch.tensor(0.1)).item())
+
+    def forward(self, shs, scales, viewdirs, rotations):
+        shs = shs.view(shs.shape[0], -1)
+        shs = F.normalize(shs, dim=1)
+        scales = F.normalize(scales, dim=1)
+        rotations = F.normalize(rotations, dim=1)
+
+        feat = torch.cat([shs, viewdirs, scales, rotations], dim=1)
+        feat = self.backbone(feat)
+
+        phi = F.relu(self.phi_head(feat))
+        opacity = torch.sigmoid(self.opacity_head(feat))
+        return phi, opacity
 
 class GaussianModel:
 
@@ -97,10 +135,30 @@ class GaussianModel:
         self.max_sh_degree_t = sh_degree_t
 
         self.prefilter_var = prefilter_var
+        self.mobilegs_opacity_phi_nn = None
+        self.mobilegs_opacity_phi_optimizer = None
         
         self.setup_functions()
 
+    def _build_mobilegs_opacity_phi_nn(self):
+        input_dim = 3 * self.get_max_sh_channels + 3 + 3 + 4
+        return MobileOpacityPhiNN(input_dim).cuda()
+
+    def get_mobilegs_opacity_phi(self, shs, scales, viewdirs, rotations):
+        if self.mobilegs_opacity_phi_nn is None:
+            self.mobilegs_opacity_phi_nn = self._build_mobilegs_opacity_phi_nn()
+        return self.mobilegs_opacity_phi_nn(shs, scales, viewdirs, rotations)
+
     def capture(self):
+        mobilegs_state = None
+        if self.mobilegs_opacity_phi_nn is not None:
+            mobilegs_state = {
+                "model": self.mobilegs_opacity_phi_nn.state_dict(),
+                "optimizer": self.mobilegs_opacity_phi_optimizer.state_dict()
+                if self.mobilegs_opacity_phi_optimizer is not None
+                else None,
+            }
+
         if self.gaussian_dim == 3:
             return (
                 self.active_sh_degree,
@@ -115,6 +173,7 @@ class GaussianModel:
                 self.denom,
                 self.optimizer.state_dict(),
                 self.spatial_lr_scale,
+                mobilegs_state,
             )
         elif self.gaussian_dim == 4:
             return (
@@ -136,44 +195,88 @@ class GaussianModel:
                 self._rotation_r,
                 self.rot_4d,
                 self.env_map,
-                self.active_sh_degree_t
+                self.active_sh_degree_t,
+                mobilegs_state,
             )
     
     def restore(self, model_args, training_args):
         t_gradient_accum = None
+        mobilegs_state = None
         if self.gaussian_dim == 3:
-            (self.active_sh_degree, 
-            self._xyz, 
-            self._features_dc, 
-            self._features_rest,
-            self._scaling, 
-            self._rotation, 
-            self._opacity,
-            self.max_radii2D, 
-            xyz_gradient_accum, 
-            denom,
-            opt_dict, 
-            self.spatial_lr_scale) = model_args
+            if len(model_args) >= 13:
+                (self.active_sh_degree,
+                self._xyz,
+                self._features_dc,
+                self._features_rest,
+                self._scaling,
+                self._rotation,
+                self._opacity,
+                self.max_radii2D,
+                xyz_gradient_accum,
+                denom,
+                opt_dict,
+                self.spatial_lr_scale,
+                mobilegs_state) = model_args[:13]
+            else:
+                (self.active_sh_degree,
+                self._xyz,
+                self._features_dc,
+                self._features_rest,
+                self._scaling,
+                self._rotation,
+                self._opacity,
+                self.max_radii2D,
+                xyz_gradient_accum,
+                denom,
+                opt_dict,
+                self.spatial_lr_scale) = model_args
         elif self.gaussian_dim == 4:
-            (self.active_sh_degree, 
-            self._xyz, 
-            self._features_dc, 
-            self._features_rest,
-            self._scaling, 
-            self._rotation, 
-            self._opacity,
-            self.max_radii2D, 
-            xyz_gradient_accum, 
-            t_gradient_accum,
-            denom,
-            opt_dict, 
-            self.spatial_lr_scale,
-            self._t,
-            self._scaling_t,
-            self._rotation_r,
-            self.rot_4d,
-            self.env_map,
-            self.active_sh_degree_t) = model_args
+            if len(model_args) >= 20:
+                (self.active_sh_degree,
+                self._xyz,
+                self._features_dc,
+                self._features_rest,
+                self._scaling,
+                self._rotation,
+                self._opacity,
+                self.max_radii2D,
+                xyz_gradient_accum,
+                t_gradient_accum,
+                denom,
+                opt_dict,
+                self.spatial_lr_scale,
+                self._t,
+                self._scaling_t,
+                self._rotation_r,
+                self.rot_4d,
+                self.env_map,
+                self.active_sh_degree_t,
+                mobilegs_state) = model_args[:20]
+            else:
+                (self.active_sh_degree,
+                self._xyz,
+                self._features_dc,
+                self._features_rest,
+                self._scaling,
+                self._rotation,
+                self._opacity,
+                self.max_radii2D,
+                xyz_gradient_accum,
+                t_gradient_accum,
+                denom,
+                opt_dict,
+                self.spatial_lr_scale,
+                self._t,
+                self._scaling_t,
+                self._rotation_r,
+                self.rot_4d,
+                self.env_map,
+                self.active_sh_degree_t) = model_args
+
+        if mobilegs_state is not None and mobilegs_state.get("model") is not None:
+            if self.mobilegs_opacity_phi_nn is None:
+                self.mobilegs_opacity_phi_nn = self._build_mobilegs_opacity_phi_nn()
+            self.mobilegs_opacity_phi_nn.load_state_dict(mobilegs_state["model"])
 
         if training_args is not None:
             self.training_setup(training_args)
@@ -185,6 +288,16 @@ class GaussianModel:
                 self.optimizer.load_state_dict(opt_dict)
             except ValueError as exc:
                 print(f"Warning: optimizer state is incompatible with current Gaussian parameterization, continuing with fresh optimizer state. Details: {exc}")
+
+            if (
+                mobilegs_state is not None
+                and mobilegs_state.get("optimizer") is not None
+                and self.mobilegs_opacity_phi_optimizer is not None
+            ):
+                try:
+                    self.mobilegs_opacity_phi_optimizer.load_state_dict(mobilegs_state["optimizer"])
+                except ValueError as exc:
+                    print(f"Warning: MobileGS MLP optimizer state is incompatible, continuing with fresh state. Details: {exc}")
 
     @property
     def get_scaling(self):
@@ -405,6 +518,20 @@ class GaussianModel:
                 l.append({'params': [self._rotation_r], 'lr': training_args.rotation_lr, "name": "rotation_r"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+
+        mobilegs_lr = getattr(training_args, "mobilegs_opacity_phi_lr", 0.0)
+        if mobilegs_lr > 0.0:
+            if self.mobilegs_opacity_phi_nn is None:
+                self.mobilegs_opacity_phi_nn = self._build_mobilegs_opacity_phi_nn()
+            self.mobilegs_opacity_phi_nn.train()
+            self.mobilegs_opacity_phi_optimizer = torch.optim.Adam(
+                self.mobilegs_opacity_phi_nn.parameters(),
+                lr=mobilegs_lr,
+                eps=1e-15,
+            )
+        else:
+            self.mobilegs_opacity_phi_optimizer = None
+
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
@@ -432,12 +559,15 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if group["name"] == name:
                 stored_state = self.optimizer.state.get(group['params'][0], None)
-                stored_state["exp_avg"] = torch.zeros_like(tensor)
-                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+                if stored_state is not None:
+                    stored_state["exp_avg"] = torch.zeros_like(tensor)
+                    stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
 
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                    del self.optimizer.state[group['params'][0]]
+                    group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                    self.optimizer.state[group['params'][0]] = stored_state
+                else:
+                    group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
