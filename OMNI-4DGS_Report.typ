@@ -534,17 +534,22 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 
   $q$ quaternion for rotation,
 
-  $alpha$ opacity, $c in RR^(N_k)$ colors.
+  $alpha$ opacity (how solid or transparent the Gaussian is, between 0 and 1), $c in RR^(N_k)$ color coefficients
 
-  $mu_(x y z,t) in RR^3$
+  $mu_(x y z,t) in RR^3$ - This is what changes over time as the Gaussian moves - it's the output of the base model's motion parameterization at each frame
+
 
   Uncertainty at t: \ $sigma_(i,t)^2 = 1 / (sum_(p in P_t)(T_(i,t)alpha_i)^2)$
+  The more pixels strongly observe this Gaussian, the bigger the denominator, the smaller the uncertainty. A Gaussian buried behind others or nearly transparent has a tiny denominator → huge uncertainty.
+
 
   Convergence at t: $II("all pixels converged to color")$.
 
   Scalar Uncertainty: $u_(i,t) = sigma_(i,t)^2 "if" II_i "else" K >> 1$
 
-  Directional Uncertainty: $U_(i,t) = R_(w,c) U_c R_(w,c)^T$ from world-camera rotation and $U_c = u_(i,t)"diag"(r_x, r_y, r_z)$.
+  Directional Anisotropic Uncertainty: $U_(i,t) = R_(w,c) U_c R_(w,c)^T$ from world-camera rotation and $U_c = u_(i,t)"diag"(r_x, r_y, r_z)$.
+
+  This upgrades the single scalar uᵢ,ₜ into a full 3D matrix. The idea is that uncertainty is not equal in all directions - monocular depth (z axis) is far less reliable than the image plane (x, y). So you scale the uncertainty differently per axis using [rx, ry, rz] = [1, 1, 0.01], meaning depth uncertainty is treated as 100 times larger. Then rotate this axis-aligned ellipsoid into world coordinates using the camera-to-world rotation Rwc, so it's expressed in the same space as the Gaussians.
 ]
 
 #let training-4dgs = [*Batch sampling in time* to reduce jitter]
@@ -575,6 +580,15 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
 #let training-usplat = [
   $L=L_"RGB" + lambda_"key"L_"key" + lambda_"not-key"L_"not-key"$
   $L_"motion" = "dist." + "rigid SE(3)" + "smooth SO(3)" + "low acceleration"$
+
+  dist =  isometry: keep distances between neighboring Gaussians constant over time (they shouldn't stretch apart)
+  
+  rigid SE(3) — rigidity: neighboring Gaussians should move together as a rigid body
+
+  smooth SO(3) — rotation smoothness: rotations should change gradually, no sudden flips
+
+  low acceleration — velocity should change slowly
+
 
   Graph is partitioned into {key, non-key}: deduplicate by voxel
   1. *Deduplicate by voxels*.
