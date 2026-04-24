@@ -116,6 +116,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_point_grad = []
                 batch_visibility_filter = []
                 batch_radii = []
+            batch_Ll1 = torch.tensor(0.0, device="cuda")
+            batch_Lssim = torch.tensor(0.0, device="cuda")
+            batch_loss = torch.tensor(0.0, device="cuda")
             
             for batch_idx in range(batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
@@ -128,9 +131,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 alpha = render_pkg["alpha"]
 
                 # Loss
-                Ll1 = l1_loss(image, gt_image)
-                Lssim = 1.0 - ssim(image, gt_image)
-                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim
+                Ll1_i = l1_loss(image, gt_image)
+                Lssim_i = 1.0 - ssim(image, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1_i + opt.lambda_dssim * Lssim_i
                 
                 ###### opa mask Loss ######
                 if opt.lambda_opa_mask > 0:
@@ -174,14 +177,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     Lmotion = velocity.norm(p=2, dim=1).mean()
                     loss = loss + opt.lambda_motion * Lmotion
                 ########################
+                batch_Ll1 += Ll1_i.detach()
+                batch_Lssim += Lssim_i.detach()
 
                 loss = loss / batch_size
+                batch_loss += loss.detach()
                 loss.backward()
                 if should_densify:
                     batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
                     batch_radii.append(radii)
                     batch_visibility_filter.append(visibility_filter)
 
+            Ll1 = batch_Ll1 / batch_size
+            Lssim = batch_Lssim / batch_size
+            loss = batch_loss
             if should_densify:
                 if batch_size > 1:
                     visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
@@ -233,7 +242,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     progress_bar.close()
 
                 # Log and save
-                test_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), loss_dict)
+                test_psnr = training_report(tb_writer, iteration, Ll1, Lssim, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), loss_dict)
                 if (iteration in testing_iterations):
                     if test_psnr >= best_psnr:
                         best_psnr = test_psnr
@@ -290,11 +299,11 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_dict=None):
+def training_report(tb_writer, iteration, Ll1, Lssim, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, loss_dict=None):
     should_log_train = (iteration % 10 == 0) or (iteration in testing_iterations)
     if tb_writer and should_log_train:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/ssim_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/ssim_loss', Lssim.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
         tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
