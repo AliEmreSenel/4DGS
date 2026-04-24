@@ -119,6 +119,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             batch_Ll1 = torch.tensor(0.0, device="cuda")
             batch_Lssim = torch.tensor(0.0, device="cuda")
             batch_loss = torch.tensor(0.0, device="cuda")
+            batch_Ldepth = torch.tensor(0.0, device="cuda")
+            batch_Lopa_mask = torch.tensor(0.0, device="cuda")
             
             for batch_idx in range(batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
@@ -140,13 +142,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     o = alpha.clamp(1e-6, 1-1e-6)
                     sky = 1 - viewpoint_cam.gt_alpha_mask
 
-                    Lopa_mask = (- sky * torch.log(1 - o)).mean()
+                    Lopa_mask_i = (- sky * torch.log(1 - o)).mean()
 
                     # lambda_opa_mask = opt.lambda_opa_mask * (1 - 0.99 * min(1, iteration/opt.iterations))
                     lambda_opa_mask = opt.lambda_opa_mask
-                    loss = loss + lambda_opa_mask * Lopa_mask
-                ###### opa mask Loss ######
+                    loss = loss + lambda_opa_mask * Lopa_mask_i
+                    batch_Lopa_mask += Lopa_mask_i.detach()
+                ########################
                 
+                ###### depth loss ######
+                if opt.lambda_depth > 0:
+                    Ldepth_i = l1_loss(depth, viewpoint_cam.gt_depth)
+                    loss = loss + opt.lambda_depth * Ldepth_i
+                    batch_Ldepth += Ldepth_i.detach()
+                ########################
+                                
                 ###### rigid loss ######
                 if opt.lambda_rigid > 0:
                     k = 20
@@ -191,6 +201,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1 = batch_Ll1 / batch_size
             Lssim = batch_Lssim / batch_size
             loss = batch_loss
+            if opt.lambda_depth > 0:
+                Ldepth = batch_Ldepth / batch_size
+            if opt.lambda_opa_mask > 0:
+                Lopa_mask = batch_Lopa_mask / batch_size
             if should_densify:
                 if batch_size > 1:
                     visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
@@ -212,6 +226,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             iter_end.record()
             loss_dict = {"Ll1": Ll1,
                         "Lssim": Lssim}
+            if opt.lambda_depth > 0:
+                loss_dict["Ldepth"] = Ldepth
+            if opt.lambda_opa_mask > 0:
+                loss_dict["Lopa"] = Lopa_mask
 
             with torch.no_grad():
                 # Progress bar
