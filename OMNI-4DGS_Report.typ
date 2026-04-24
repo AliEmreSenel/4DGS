@@ -591,28 +591,36 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   then decoded by lightweight MLPs once at inference.
 ]
 #let encoding-usplat = [
-  Native 4DGS,
 
-  $q$ quaternion for rotation,
+Inherited from base model (SoM / MoSca):
 
-  $alpha$ opacity (how solid or transparent the Gaussian is, between 0 and 1), $c in RR^(N_k)$ color coefficients
+$mu_(x y u, t) in RR^3$ — 3D position at time t. This is what changes frame by frame as the Gaussian moves. It is the output of the base model's motion parameterization evaluated at each timestamp
+$q$ — quaternion encoding rotation
+$alpha in [0,1]$ — opacity
+$c in RR^(N^k)$ — color coefficients (spherical harmonics)
 
-  $mu_(x y z,t) in RR^3$ - This is what changes over time as the Gaussian moves - it's the output of the base model's motion parameterization at each frame
+Computed by USplat4D:
+Scalar uncertainty at frame t:
 
+$sigma_(i,t)^2 = 1 / sum_(p in P_(i,t)) (T_(i,t) dot alpha_i)^2$
 
-  Uncertainty at t: \ $sigma_(i,t)^2 = 1 / (sum_(p in P_t)(T_(i,t)alpha_i)^2)$
-  The more pixels strongly observe this Gaussian, the bigger the denominator, the smaller the uncertainty. A Gaussian buried behind others or nearly transparent has a tiny denominator → huge uncertainty.
+The more pixels strongly observe this Gaussian (high transmittance T, high opacity $alpha$), the bigger the denominator, the smaller the uncertainty. A Gaussian buried behind others or nearly transparent has a tiny denominator → huge uncertainty.
+Convergence check:
 
+$I_t = product_(h in Omega_(i,t)) l_t(h)$
 
-  Convergence at t: $II("all pixels converged to color")$.
+Equals 1 only if every pixel this Gaussian covers has color error below threshold ηc = 0.5. During early training the uncertainty estimate is biased and could be zero, so $II$ forces high uncertainty on unconverged Gaussians, preventing them from becoming anchors.
+Scalar uncertainty with convergence guard:
 
-  Scalar Uncertainty: $u_(i,t) = sigma_(i,t)^2 "if" II_i "else" K >> 1$
+$u_(i,t) = sigma_(i,t)^2$ if $bb(I)_i = 1$, else $K >> 1$
 
-  Directional Anisotropic Uncertainty: $U_(i,t) = R_(w,c) U_c R_(w,c)^T$ from world-camera rotation and $U_c = u_(i,t)"diag"(r_x, r_y, r_z)$.
+Directional (anisotropic) uncertainty matrix:
 
-  This upgrades the single scalar uᵢ,ₜ into a full 3D matrix. The idea is that uncertainty is not equal in all directions - monocular depth (z axis) is far less reliable than the image plane (x, y). So you scale the uncertainty differently per axis using [rx, ry, rz] = [1, 1, 0.01], meaning depth uncertainty is treated as 100 times larger. Then rotate this axis-aligned ellipsoid into world coordinates using the camera-to-world rotation Rwc, so it's expressed in the same space as the Gaussians.
+$U_(i,t) = R_(w c) dot "diag"(r_x u_(i,t), r_y u_(i,t), r_z u_(i,t)) dot R_(W C)^T$
+
+With [rx, ry, rz] = [1, 1, 0.01]. Monocular depth (z axis) is 100x less reliable than image-plane directions (x, y). This matrix appears as $U^(-1)$ in all loss terms — it down-weights gradient updates along uncertain directions and up-weights them along reliable ones.
+  
 ]
-
 #let training-4dgs = [*Batch sampling in time* to reduce jitter]
 #let training-1000 = [
   Same as 4DGS.
@@ -639,25 +647,50 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   Huffman coding is applied to the discrete codes at the end of training.
 ]
 #let training-usplat = [
-  $L=L_"RGB" + lambda_"key"L_"key" + lambda_"not-key"L_"not-key"$
-  $L_"motion" = "dist." + "rigid SE(3)" + "smooth SO(3)" + "low acceleration"$
+Stage 1 — Pretrain base model:
+Fully train SoM or MoSca to convergence. This produces the initial Gaussian positions p° and motion parameterization. USplat4D does not start from scratch — it always begins from a converged base model.
+Stage 2 — Graph construction (one time, before extra training):
 
-  dist =  isometry: keep distances between neighboring Gaussians constant over time (they shouldn't stretch apart)
-  
-  rigid SE(3) — rigidity: neighboring Gaussians should move together as a rigid body
+Deduplicate by voxels — remove spatially redundant Gaussians
+Key node selection — rank all Gaussians by uncertainty. Keep top 2% with lowest uncertainty AND observed confidently for >5 consecutive frames (significant period). These 1000 Gaussians become key nodes Vk — the reliable anchors
+Key-key edges (UA-kNN) — for each key node i, find k nearest neighbors among other key nodes using Mahalanobis distance weighted by uncertainty. Evaluated at t̂ = argmin_t uᵢ,ₜ (most reliable frame for each node). Unreliable nodes feel "farther away" — cross-object edges naturally don't form
+Non-key assignment — assign each non-key Gaussian to its single closest key node across the entire sequence: $j = op("argmin")_(l in V_k) sum_t norm(p_(i,t) - p_(l,t))_U$. Summing over all frames finds the key node that stays consistently close, not just close at one moment
 
-  smooth SO(3) — rotation smoothness: rotations should change gradually, no sudden flips
+Stage 2 — Extra training iterations:
+Density control disabled for first 10% and last 20% of iterations to protect graph structure from new unassigned Gaussians being spawned.
+Total loss:
 
-  low acceleration — velocity should change slowly
+$L = L_"RGB" + lambda_"key" L_"key" + lambda_"not-key" L_"not-key"$
+Key node loss:
+
+$L_"key" = sum_t sum_(i in V_K) norm(p_(i,t) - p_i^star)_(U^(-1)_(w,t,i))^2 + L_"motion,key"$
 
 
-  Graph is partitioned into {key, non-key}: deduplicate by voxel
-  1. *Deduplicate by voxels*.
-  2. Keep top 2% long-living models (>5 frames)
-  3. Assign Edge weights between Key Nodes and Attach non-key to its closest key.
-  4. Optimize choice of Key nodes, Propagate Motion from key to non-key with DQB. Weigh loss by uncertainty matrix as $||||_U$
+Two parts: pull key nodes toward their pretrained positions p° (don't drift), weighted by U⁻¹ so depth direction gets weaker correction than image-plane directions. Plus motion locality constraints — isometry (distances between neighbors stay constant), rigidity (neighbors move together as rigid body), rotation smoothness (no sudden flips), low acceleration (velocity changes slowly).
+Non-key node loss:
 
-  $O = underbrace(N log N, "KD-tree") + underbrace(N T, "non-key assign") + underbrace(N k, "per-item optimise")$
+$L_"not-key" = sum_t sum_(i in.not V_K) norm(p_(i,t) - p_i^"DQB")_(U^(-1)_(w,t,i))^2 + L_"motion,not-key"$
+
+Three parts: weak pull toward pretrained position p° (weak because non-key uncertainty is high), pull toward DQB-interpolated position from key node anchor (main driver of motion), plus same motion locality constraints.
+DQB interpolation:
+
+$(p^"DQB"_(i,t), q^"DQB"_(i,t)) = "DQB"((w_(i,j), T_(j,t))_(j in E_i))$
+
+Blends the rigid SE(3) transformations of neighboring key nodes weighted by distance. p^DQB is NOT the final position — it is a soft target in L_non-key. The actual position pᵢ,ₜ remains a free variable and can deviate from p^DQB if the photometric loss strongly disagrees. This is why non-rigid motion is handled.
+The three roles of uncertainty in this framework:
+
+Re-weighting key node deviations — U⁻¹ controls how strongly key nodes are corrected per direction
+Guiding non-key interpolation — determines who becomes a key node, which determines who non-key nodes follow
+Balancing gradient updates — uncertain Gaussians get softer updates, reliable ones get stronger updates
+
+Complexity:
+
+O(N log N + NT + Nk)
+
+
+N log N → KD-tree for nearest neighbor search
+NT → assigning each non-key to closest key across T frames
+Nk → per-item optimization each iteration
 ]
 
 #let changes-4dgs = [
@@ -675,7 +708,7 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   *Contribution-based pruning* runs during training: prune only if it is low in both opacity and maximum spatial scale (quantile threshold). Accumulate pruning votes in train, remove only after repeatedly remaining below threshold.
 ]
 #let changes-usplat = [
-  During early train, the certainty estimator is biased, so it could be zero. The $II_i$ term forces high uncertainty, so the points do not become anchors.
+  During early train, the certainty estimator is biased, so it could be zero. The $bb(I)_i$ term forces high uncertainty, so the points do not become anchors.
 
   *Monucular has more depth uncertainty*.
 ]
@@ -709,7 +742,19 @@ Fewer parameters reduces train time and memory, at the cost of accuracy.
   view-dependent $phi_i$ depth, and gaussian scale.
 ]
 #let rendering-usplat = [
-  Assumes pixel color at t: $C_t^p = sum T_(i,t)^P alpha_i c_i$, with L2 loss over image, to $sigma^2_(i,t)$ formula.
+  Standard native 4DGS rendering — inherited entirely from the base model. No changes to the rendering pipeline.
+At render time: condition the 4D Gaussian to 3D at timestamp t:
+
+$mu_(x y u | t) = mu_(1:3) + Sigma_(1:3,4) dot Sigma_(4,4)^(-1) dot (t - mu_4)$
+
+Then project and alpha-blend as standard 3DGS:
+
+$C_t^p = sum_i T_i^p dot alpha_i dot c_i$
+
+
+
+with L2 loss over image → leads to the σ²ᵢ,ₜ formula for uncertainty estimation.
+USplat4D only changes how the Gaussians are trained, not how they are rendered or represented.
 ]
 
 #table(
