@@ -121,6 +121,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             batch_loss = torch.tensor(0.0, device="cuda")
             batch_Ldepth = torch.tensor(0.0, device="cuda")
             batch_Lopa_mask = torch.tensor(0.0, device="cuda")
+            batch_Lrigid = torch.tensor(0.0, device="cuda")
+            batch_Lmotion = torch.tensor(0.0, device="cuda")
+            batch_psnr = torch.tensor(0.0, device="cuda")
+            reg_loss = torch.tensor(0.0, device="cuda")
+            Ldepth = torch.tensor(0.0, device="cuda")
+            Lopa_mask = torch.tensor(0.0, device="cuda")
+            Lrigid = torch.tensor(0.0, device="cuda")
+            Lmotion = torch.tensor(0.0, device="cuda")
             
             for batch_idx in range(batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
@@ -139,8 +147,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 ###### opa mask Loss ######
                 if opt.lambda_opa_mask > 0:
+                    gt_alpha_mask = viewpoint_cam.gt_alpha_mask.to(alpha.device, dtype=alpha.dtype)
                     o = alpha.clamp(1e-6, 1-1e-6)
-                    sky = 1 - viewpoint_cam.gt_alpha_mask
+                    sky = 1 - gt_alpha_mask
 
                     Lopa_mask_i = (- sky * torch.log(1 - o)).mean()
 
@@ -152,14 +161,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 ###### depth loss ######
                 if opt.lambda_depth > 0:
-                    Ldepth_i = l1_loss(depth, viewpoint_cam.gt_depth)
-                    loss = loss + opt.lambda_depth * Ldepth_i
-                    batch_Ldepth += Ldepth_i.detach()
+                    gt_depth = viewpoint_cam.gt_depth.to(depth.device, dtype=depth.dtype)
+                    valid = torch.isfinite(gt_depth)
+                    if valid.any():
+                        Ldepth_i = (depth[valid] - gt_depth[valid]).abs().mean()
+                        loss = loss + opt.lambda_depth * Ldepth_i
+                        batch_Ldepth += Ldepth_i.detach()
                 ########################
                                 
-                ###### rigid loss ######
-                if opt.lambda_rigid > 0:
-                    k = 20
+                batch_Ll1 += Ll1_i.detach()
+                batch_Lssim += Lssim_i.detach()
+                batch_psnr += psnr(image, gt_image).mean().detach()
+
+                loss = loss / batch_size
+                batch_loss += loss.detach()
+                loss.backward()
+                if should_densify:
+                    batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
+                    batch_radii.append(radii)
+                    batch_visibility_filter.append(visibility_filter)
+
+            ###### rigid loss ######
+            if opt.lambda_rigid > 0:
+                k = min(20, gaussians.get_xyz.shape[0] - 1)
+                if k > 0:
                     # cur_time = viewpoint_cam.timestamp
                     # _, delta_mean = gaussians.get_current_covariance_and_mean_offset(1.0, cur_time)
                     xyz_mean = gaussians.get_xyz
@@ -178,25 +203,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # weight *= torch.exp(-0.5*(mean_t[None, :, None]-mean_t_nn)**2/cov_t[None, :, None]/cov_t_nn*(cov_t[None, :, None]+cov_t_nn)).squeeze(-1).detach()
                     vel_dist = torch.norm(velocity[idx] - velocity[None, :, None], p=2, dim=-1)
                     Lrigid = (weight * vel_dist).sum() / k / xyz_cur.shape[0]
-                    loss = loss + opt.lambda_rigid * Lrigid
-                ########################
+                    reg_loss = reg_loss + opt.lambda_rigid * Lrigid
+                    batch_Lrigid = Lrigid.detach()
+                else:
+                    Lrigid = torch.tensor(0.0, device="cuda")
+                    batch_Lrigid = Lrigid.detach()
+            ########################
                 
-                ###### motion loss ######
-                if opt.lambda_motion > 0:
-                    _, velocity = gaussians.get_current_covariance_and_mean_offset(1.0, gaussians.get_t + 0.1)
+            ###### motion loss ######
+            if opt.lambda_motion > 0:
+                _, velocity = gaussians.get_current_covariance_and_mean_offset(1.0, gaussians.get_t + 0.1)
+                if velocity.shape[0] > 0:
                     Lmotion = velocity.norm(p=2, dim=1).mean()
-                    loss = loss + opt.lambda_motion * Lmotion
-                ########################
-                batch_Ll1 += Ll1_i.detach()
-                batch_Lssim += Lssim_i.detach()
+                    reg_loss = reg_loss + opt.lambda_motion * Lmotion
+                    batch_Lmotion = Lmotion.detach()
+                else:
+                    Lmotion = torch.tensor(0.0, device="cuda")
+                    batch_Lmotion = Lmotion.detach()
+            ########################
 
-                loss = loss / batch_size
-                batch_loss += loss.detach()
-                loss.backward()
-                if should_densify:
-                    batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
-                    batch_radii.append(radii)
-                    batch_visibility_filter.append(visibility_filter)
+            if opt.lambda_rigid > 0 or opt.lambda_motion > 0:
+                batch_loss += reg_loss.detach()
+                if reg_loss.requires_grad:
+                    reg_loss.backward()
 
             Ll1 = batch_Ll1 / batch_size
             Lssim = batch_Lssim / batch_size
@@ -205,6 +234,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 Ldepth = batch_Ldepth / batch_size
             if opt.lambda_opa_mask > 0:
                 Lopa_mask = batch_Lopa_mask / batch_size
+            if opt.lambda_rigid > 0:
+                Lrigid = batch_Lrigid
+            if opt.lambda_motion > 0:
+                Lmotion = batch_Lmotion
             if should_densify:
                 if batch_size > 1:
                     visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
@@ -230,6 +263,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 loss_dict["Ldepth"] = Ldepth
             if opt.lambda_opa_mask > 0:
                 loss_dict["Lopa"] = Lopa_mask
+            if opt.lambda_rigid > 0:
+                loss_dict["Lrigid"] = Lrigid
+            if opt.lambda_motion > 0:
+                loss_dict["Lmotion"] = Lmotion
 
             with torch.no_grad():
                 # Progress bar
@@ -237,21 +274,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 ema_l1loss_for_log = 0.4 * Ll1.detach() + 0.6 * ema_l1loss_for_log
                 ema_ssimloss_for_log = 0.4 * Lssim.detach() + 0.6 * ema_ssimloss_for_log
                 
+                lambda_loss_values = {
+                    "lambda_opa_mask": Lopa_mask,
+                    "lambda_depth": Ldepth,
+                    "lambda_rigid": Lrigid,
+                    "lambda_motion": Lmotion,
+                }
+                
                 for lambda_name in lambda_all:
-                    if opt.__dict__[lambda_name] > 0:
-                        loss_name = f"L{lambda_name.replace('lambda_', '')}"
-                        lambda_ema_for_log[lambda_name] = 0.4 * vars()[loss_name].detach() + 0.6 * lambda_ema_for_log[lambda_name]
-                        loss_dict[lambda_name.replace("lambda_", "L")] = vars()[lambda_name.replace("lambda_", "L")]
+                    if opt.__dict__[lambda_name] > 0 and lambda_name in lambda_loss_values:
+                        lambda_ema_for_log[lambda_name] = 0.4 * lambda_loss_values[lambda_name].detach() + 0.6 * lambda_ema_for_log[lambda_name]
                         
                 if iteration % 10 == 0:
-                    psnr_for_log = psnr(image, gt_image).mean().item()
+                    psnr_for_log = (batch_psnr / batch_size).item()
                     postfix = {"Loss": f"{ema_loss_for_log.item():.{7}f}",
                                             "PSNR": f"{psnr_for_log:.{2}f}",
                                             "Ll1": f"{ema_l1loss_for_log.item():.{4}f}",
                                             "Lssim": f"{ema_ssimloss_for_log.item():.{4}f}",}
                     
                     for lambda_name in lambda_all:
-                        if opt.__dict__[lambda_name] > 0:
+                        if opt.__dict__[lambda_name] > 0 and lambda_name in lambda_loss_values:
                             postfix[lambda_name.replace("lambda_", "L")] = f"{lambda_ema_for_log[lambda_name].item():.{4}f}"
                             
                     progress_bar.set_postfix(postfix)
