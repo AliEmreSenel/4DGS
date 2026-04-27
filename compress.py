@@ -88,6 +88,32 @@ def split_checkpoint_payload(model_params):
     return tuple(core), aux_tail
 
 
+def load_gaussian_args(ckpt_path):
+    gaussian_args_path = os.path.join(os.path.dirname(os.path.abspath(ckpt_path)), "gaussian_args")
+    if not os.path.exists(gaussian_args_path):
+        return None
+
+    with open(gaussian_args_path, "r", encoding="utf-8") as f:
+        gaussian_args = json.load(f)
+
+    if not isinstance(gaussian_args, dict):
+        raise ValueError(f"Expected JSON object in {gaussian_args_path}, got {type(gaussian_args)}")
+
+    return gaussian_args
+
+
+def resolve_model_kwargs(ckpt_path, core_params, model_overrides=None):
+    model_overrides = model_overrides or {}
+
+    gaussian_args = load_gaussian_args(ckpt_path)
+    if gaussian_args is not None:
+        kwargs = dict(gaussian_args)
+        kwargs.update(model_overrides)
+        return kwargs
+
+    return infer_model_kwargs(core_params, model_overrides=model_overrides)
+
+
 def infer_model_kwargs(core_params, model_overrides=None):
     model_overrides = model_overrides or {}
 
@@ -380,7 +406,7 @@ def load_original_and_reconstructed(
     model_params, iteration = ckpt
 
     core_params, aux_tail = split_checkpoint_payload(model_params)
-    model_kwargs = infer_model_kwargs(core_params, model_overrides=model_overrides)
+    model_kwargs = resolve_model_kwargs(ckpt_path, core_params, model_overrides=model_overrides)
 
     original = GaussianModel(**model_kwargs)
     original = load_gaussians_from_core_tuple(original, core_params, device=device)
@@ -453,7 +479,7 @@ def main(
     ram_size = tensor_bytes(ckpt)
 
     core_params, aux_tail = split_checkpoint_payload(model_params)
-    model_kwargs = infer_model_kwargs(core_params, model_overrides=model_overrides)
+    model_kwargs = resolve_model_kwargs(ckpt_path, core_params, model_overrides=model_overrides)
 
     gaussians = GaussianModel(**model_kwargs)
     gaussians = load_gaussians_from_core_tuple(gaussians, core_params, device=device)

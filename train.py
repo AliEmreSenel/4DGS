@@ -34,6 +34,10 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+def save_gaussian_args(model_path, gaussian_kwargs):
+    with open(os.path.join(model_path, "gaussian_args"), "w") as f:
+        f.write(str(Namespace(**gaussian_kwargs)))
+        
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, isotropic_gaussians):
     
@@ -42,9 +46,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0,
-                              prefilter_var=dataset.prefilter_var, isotropic_gaussians=isotropic_gaussians)
+
+    gaussian_kwargs = {
+        "sh_degree": dataset.sh_degree,
+        "gaussian_dim": gaussian_dim,
+        "time_duration": time_duration,
+        "rot_4d": rot_4d,
+        "force_sh_3d": force_sh_3d,
+        "sh_degree_t": 2 if pipe.eval_shfs_4d else 0,
+        "prefilter_var": dataset.prefilter_var,
+        "isotropic_gaussians": isotropic_gaussians,
+    }
+    gaussians = GaussianModel(**gaussian_kwargs)
     scene = Scene(dataset, gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
+    save_gaussian_args(scene.model_path, gaussian_kwargs)
+
     gaussians.training_setup(opt)
     
     if checkpoint:
