@@ -158,6 +158,7 @@ def compute_uncertainty_single_frame(
 
     return u, g_radii
 
+@torch.no_grad()
 def compute_uncertainty_all_frames(
     gaussians,           # your GaussianModel
     train_cameras,       # your list of training cameras
@@ -171,13 +172,12 @@ def compute_uncertainty_all_frames(
     T = len(train_cameras)
     u_all = torch.full((G, T), fill_value=phi, device=device)
 
-    for t, viewpoint_cam in enumerate(train_cameras):
+    for t, (gt_img_raw, viewpoint_cam) in enumerate(train_cameras):
         # Get rendered outputs from YOUR renderer
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
 
         # Get GT image
-        gt_img, _ = train_cameras[t]
-        gt_img = gt_img.to(device)
+        gt_img = gt_img_raw.to(device)
 
         # Get positions at this timestamp
         _, delta_mean = gaussians.get_current_covariance_and_mean_offset(
