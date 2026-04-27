@@ -21,6 +21,9 @@ from externals.simple_knn import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from utils.sh_utils import sh_channels_4d
+from utils.gpcc_utils import compress_gpcc, decompress_gpcc, calculate_morton_order
+from utils.compress_utils import huffman_encode, huffman_decode
+import copy
 
 class GaussianModel:
 
@@ -635,15 +638,209 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
-
     def add_densification_stats(self, viewspace_point_tensor, update_filter, avg_t_grad=None):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.xyz_gradient_accum[update_filter] += torch.norm(
+            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
+        )
         self.denom[update_filter] += 1
-        if self.gaussian_dim == 4:
-            self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+        if self.gaussian_dim == 4 and avg_t_grad is not None:
+            tgrad = avg_t_grad[update_filter]
+            if tgrad.ndim == 1:
+                tgrad = tgrad.unsqueeze(-1)
+            self.t_gradient_accum[update_filter] += tgrad
         
     def add_densification_stats_grad(self, viewspace_point_grad, update_filter, avg_t_grad=None):
-        self.xyz_gradient_accum[update_filter] += viewspace_point_grad[update_filter]
+        grad = viewspace_point_grad[update_filter]
+        if grad.ndim == 2 and grad.shape[1] >= 2:
+            grad = torch.norm(grad[:, :2], dim=-1, keepdim=True)
+        elif grad.ndim == 1:
+            grad = grad.unsqueeze(-1)
+
+        self.xyz_gradient_accum[update_filter] += grad
         self.denom[update_filter] += 1
+        if self.gaussian_dim == 4 and avg_t_grad is not None:
+            tgrad = avg_t_grad[update_filter]
+            if tgrad.ndim == 1:
+                tgrad = tgrad.unsqueeze(-1)
+            self.t_gradient_accum[update_filter] += tgrad
+
+    def _compressible_tensors(self):
+        out = {
+            "features_dc": self._features_dc.detach(),
+            "features_rest": self._features_rest.detach(),
+            "scaling": self._scaling.detach(),
+            "opacity": self._opacity.detach(),
+        }
+        if not self.isotropic_gaussians:
+            out["rotation"] = self._rotation.detach()
         if self.gaussian_dim == 4:
-            self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+            out["t"] = self._t.detach()
+            out["scaling_t"] = self._scaling_t.detach()
+            if self.rot_4d and not self.isotropic_gaussians:
+                out["rotation_r"] = self._rotation_r.detach()
+        return out
+
+    def _quantize_xyz_u16(self, xyz: torch.Tensor):
+        xyz = xyz.detach().float()
+        xyz_min = xyz.amin(dim=0)
+        xyz_max = xyz.amax(dim=0)
+        xyz_extent = (xyz_max - xyz_min).clamp_min(1e-8)
+        xyz_q = torch.round((xyz - xyz_min) * (65535.0 / xyz_extent)).to(torch.int32)
+        meta = {
+            "min": xyz_min.cpu(),
+            "max": xyz_max.cpu(),
+        }
+        return xyz_q, meta
+
+    def _dequantize_xyz_u16(self, xyz_q: torch.Tensor, meta: dict):
+        xyz_min = meta["min"].to(xyz_q.device).float()
+        xyz_max = meta["max"].to(xyz_q.device).float()
+        xyz_extent = (xyz_max - xyz_min).clamp_min(1e-8)
+        xyz = xyz_q.float() * (xyz_extent / 65535.0) + xyz_min
+        return xyz
+
+    def _encode_scalar_q_huffman(self, tensor: torch.Tensor, num_bits: int = 8):
+        x = tensor.detach().float().reshape(tensor.shape[0], -1).contiguous()
+
+        x_min = x.amin(dim=0, keepdim=True)
+        x_max = x.amax(dim=0, keepdim=True)
+        qmax = float((1 << num_bits) - 1)
+        step = ((x_max - x_min) / qmax).clamp_min(1e-8)
+
+        q = torch.round((x - x_min) / step).to(torch.int32).cpu().numpy().reshape(-1)
+        huf_idx, huf_tab = huffman_encode(q)
+
+        return {
+            "shape": list(tensor.shape),
+            "num_bits": int(num_bits),
+            "min": x_min.cpu().numpy(),
+            "step": step.cpu().numpy(),
+            "index": huf_idx,
+            "htable": huf_tab,
+        }
+
+    def _decode_scalar_q_huffman(self, pack: dict, device="cuda"):
+        shape = tuple(pack["shape"])
+        flat = np.asarray(huffman_decode(pack["index"], pack["htable"]), dtype=np.int32)
+        flat = flat.reshape(shape[0], -1)
+
+        x_min = torch.from_numpy(np.asarray(pack["min"])).to(device=device, dtype=torch.float32)
+        step = torch.from_numpy(np.asarray(pack["step"])).to(device=device, dtype=torch.float32)
+
+        x = torch.from_numpy(flat).to(device=device, dtype=torch.float32) * step + x_min
+        return x.reshape(shape)
+
+    def capture_compressed(self, attr_bits: int = 8):
+        xyz_q, xyz_meta = self._quantize_xyz_u16(self.get_xyz)
+
+        sort_idx = calculate_morton_order(xyz_q.int())
+        xyz_q_sorted = xyz_q[sort_idx]
+
+        # Reject duplicate quantized points
+        if torch.unique(xyz_q_sorted, dim=0).shape[0] != xyz_q_sorted.shape[0]:
+            raise ValueError("Quantized xyz contains duplicates; compressed geometry would lose point multiplicity.")
+
+        save_dict = {
+            "format": "gaussian-compressed-v1",
+            "meta": {
+                "gaussian_dim": self.gaussian_dim,
+                "rot_4d": self.rot_4d,
+                "isotropic_gaussians": self.isotropic_gaussians,
+                "force_sh_3d": self.force_sh_3d,
+                "max_sh_degree": self.max_sh_degree,
+                "active_sh_degree": self.active_sh_degree,
+                "max_sh_degree_t": self.max_sh_degree_t,
+                "active_sh_degree_t": self.active_sh_degree_t,
+                "time_duration": list(self.time_duration),
+                "prefilter_var": self.prefilter_var,
+                "attr_bits": int(attr_bits),
+                "xyz_quant": xyz_meta,
+                "spatial_lr_scale": self.spatial_lr_scale,
+                "num_points": int(self.get_xyz.shape[0]),
+            },
+            "xyz": compress_gpcc(xyz_q_sorted.cpu()),
+            "attr": {},
+        }
+
+        if self.gaussian_dim == 4 and self.env_map.numel() > 0:
+            save_dict["env_map"] = self.env_map.detach().cpu()
+
+        for name, tensor in self._compressible_tensors().items():
+            save_dict["attr"][name] = self._encode_scalar_q_huffman(
+                tensor[sort_idx], num_bits=attr_bits
+            )
+
+        return save_dict
+
+    def restore_compressed(self, save_dict, training_args=None, device: str = "cuda"):
+        assert save_dict["format"] == "gaussian-compressed-v1"
+        meta = save_dict["meta"]
+
+        assert self.gaussian_dim == meta["gaussian_dim"]
+        assert self.rot_4d == meta["rot_4d"]
+        assert self.isotropic_gaussians == meta["isotropic_gaussians"]
+        assert self.force_sh_3d == meta["force_sh_3d"]
+        assert self.max_sh_degree == meta["max_sh_degree"]
+        assert self.max_sh_degree_t == meta["max_sh_degree_t"]
+
+        self.active_sh_degree = meta["active_sh_degree"]
+        self.active_sh_degree_t = meta.get("active_sh_degree_t", 0)
+        self.time_duration = meta.get("time_duration", self.time_duration)
+        self.prefilter_var = meta.get("prefilter_var", self.prefilter_var)
+        self.spatial_lr_scale = meta.get("spatial_lr_scale", self.spatial_lr_scale)
+
+        xyz_q = decompress_gpcc(save_dict["xyz"]).to(device=device, dtype=torch.int32)
+        sort_idx = calculate_morton_order(xyz_q.int())
+        xyz_q = xyz_q[sort_idx]
+        xyz = self._dequantize_xyz_u16(xyz_q, meta["xyz_quant"])
+
+        attrs = {}
+        for name, pack in save_dict["attr"].items():
+            attrs[name] = self._decode_scalar_q_huffman(pack, device=device)
+
+        n_pts = xyz.shape[0]
+        assert n_pts == meta["num_points"], f"Decoded xyz count mismatch: {n_pts} vs {meta['num_points']}"
+        for name, t in attrs.items():
+            assert t.shape[0] == n_pts, f"Attribute {name} has {t.shape[0]} rows, expected {n_pts}"
+
+        self._xyz = nn.Parameter(xyz.contiguous().requires_grad_(True))
+        self._features_dc = nn.Parameter(attrs["features_dc"].contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(attrs["features_rest"].contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(attrs["scaling"].contiguous().requires_grad_(True))
+        self._opacity = nn.Parameter(attrs["opacity"].contiguous().requires_grad_(True))
+
+        if self.isotropic_gaussians:
+            self._rotation = torch.empty((0, 4), device=device, dtype=self._xyz.dtype)
+        else:
+            self._rotation = nn.Parameter(attrs["rotation"].contiguous().requires_grad_(True))
+
+        if self.gaussian_dim == 4:
+            self._t = nn.Parameter(attrs["t"].contiguous().requires_grad_(True))
+            self._scaling_t = nn.Parameter(attrs["scaling_t"].contiguous().requires_grad_(True))
+            if self.rot_4d:
+                if self.isotropic_gaussians:
+                    self._rotation_r = torch.empty((0, 4), device=device, dtype=self._xyz.dtype)
+                else:
+                    self._rotation_r = nn.Parameter(attrs["rotation_r"].contiguous().requires_grad_(True))
+
+        self.env_map = save_dict.get("env_map", torch.empty(0)).to(device)
+
+        self.max_radii2D = torch.zeros((n_pts), device=device)
+        self.xyz_gradient_accum = torch.zeros((n_pts, 1), device=device)
+        self.denom = torch.zeros((n_pts, 1), device=device)
+        if self.gaussian_dim == 4:
+            self.t_gradient_accum = torch.zeros((n_pts, 1), device=device)
+
+        self.optimizer = None
+        if training_args is not None:
+            self.training_setup(training_args)
+            
+    def save_compressed(self, path, attr_bits: int = 8):
+        parent = os.path.dirname(path)
+        if parent:
+            mkdir_p(parent)
+        torch.save(self.capture_compressed(attr_bits=attr_bits), path)
+
+    def load_compressed(self, path, training_args=None, device: str = "cuda"):
+        save_dict = torch.load(path, map_location="cpu")
+        self.restore_compressed(save_dict, training_args=training_args, device=device)

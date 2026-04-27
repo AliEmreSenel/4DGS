@@ -22,6 +22,10 @@ dependencies = [
   "imageio[ffmpeg]>=2.37.3",
   "pointops2",
   "simple-knn",
+  "dahuffman>=0.4.2",
+  "ipykernel>=7.2.0",
+  "pandas>=3.0.2",
+  "matplotlib>=3.10.9",
 ]
 
 [tool.setuptools.packages.find]
