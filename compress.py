@@ -390,6 +390,35 @@ def resolve_device(requested_device=None):
 
     return requested_device
 
+def load_gaussians_from_memory(
+    ckpt_obj,
+    ckpt_path=None,
+    device="auto",
+    model_overrides=None,
+):
+    device = resolve_device(device)
+    model_overrides = model_overrides or {}
+
+    model_params, iteration = ckpt_obj
+    core_params, aux_tail = split_checkpoint_payload(model_params)
+
+    if ckpt_path is not None:
+        model_kwargs = resolve_model_kwargs(
+            ckpt_path,
+            core_params,
+            model_overrides=model_overrides,
+        )
+    else:
+        model_kwargs = infer_model_kwargs(
+            core_params,
+            model_overrides=model_overrides,
+        )
+
+    gaussians = GaussianModel(**model_kwargs)
+    gaussians = load_gaussians_from_core_tuple(gaussians, core_params, device=device)
+
+    return gaussians, iteration, aux_tail, model_kwargs
+
 def load_original_and_reconstructed(
     ckpt_path,
     attr_bits=8,

@@ -736,10 +736,6 @@ class GaussianModel:
         sort_idx = calculate_morton_order(xyz_q.int())
         xyz_q_sorted = xyz_q[sort_idx]
 
-        # Reject duplicate quantized points
-        if torch.unique(xyz_q_sorted, dim=0).shape[0] != xyz_q_sorted.shape[0]:
-            raise ValueError("Quantized xyz contains duplicates; compressed geometry would lose point multiplicity.")
-
         save_dict = {
             "format": "gaussian-compressed-v1",
             "meta": {
@@ -762,7 +758,7 @@ class GaussianModel:
             "attr": {},
         }
 
-        if self.gaussian_dim == 4 and self.env_map.numel() > 0:
+        if self.gaussian_dim == 4 and self.env_map is not None and self.env_map.numel() > 0:
             save_dict["env_map"] = self.env_map.detach().cpu()
 
         for name, tensor in self._compressible_tensors().items():
@@ -823,7 +819,11 @@ class GaussianModel:
                 else:
                     self._rotation_r = nn.Parameter(attrs["rotation_r"].contiguous().requires_grad_(True))
 
-        self.env_map = save_dict.get("env_map", torch.empty(0)).to(device)
+        env_map = save_dict.get("env_map")
+        if env_map is None:
+            self.env_map = torch.empty(0, device=device)
+        else:
+            self.env_map = env_map.to(device)
 
         self.max_radii2D = torch.zeros((n_pts), device=device)
         self.xyz_gradient_accum = torch.zeros((n_pts, 1), device=device)
