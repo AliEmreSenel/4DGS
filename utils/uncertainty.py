@@ -4,7 +4,6 @@ from typing import Tuple
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-
 from gaussian_renderer import render
 
 """Dynamic Uncertainty Estimation (Section 4.1 of USplat4D paper).
@@ -31,30 +30,19 @@ depth deviations are penalized 100x more in the Mahalanobis loss).
 @torch.no_grad()
 def compute_uncertainty_single_frame(
     means_t: Tensor,       # (G, 3)  Gaussian positions in world space at frame t
-    quats_t: Tensor,       # (G, 4)  Gaussian rotations (wxyz) at frame t
-    scales: Tensor,        # (G, 3)  log-scales (exp gives true scales)
     opacities_raw: Tensor, # (G,)    pre-sigmoid opacities
     w2c: Tensor,           # (4, 4)  world-to-camera
     K: Tensor,             # (3, 3)  camera intrinsics
     img_wh: Tuple[int, int],  # (W, H)
     gt_img: Tensor,        # (H, W, 3)  ground-truth RGB in [0,1]
     full_rendered_rgb: Tensor, # (H, W, 3) full scene rendered RGB in [0,1]
+    radii: Tensor,    
+    depth: Tensor,  
     eta_c: float = 0.5,    # color-error threshold for convergence check
     phi: float = 1e6,      # large constant for high-uncertainty Gaussians
     depth_margin_rel: float = 0.05,  # relative depth margin for occlusion test
 ) -> Tuple[Tensor, Tensor]:
-    """Compute per-Gaussian uncertainty for a single frame.
-
-    Returns:
-        u_scalar: (G,)  scalar uncertainty per Gaussian, in [0, phi]
-        radii:    (G,)  2D screen-space radii (pixels), 0 for invisible
-
-    Implementation note:
-        We approximate sum_h(v_i^h)^2 ≈ alpha_i^2 * pi * r_i^2 for visible
-        Gaussians (where r_i is the screen-space radius from gsplat projection).
-        This approximation holds when the Gaussian is the first in depth order
-        at its covered pixels (T ≈ 1). Occluded Gaussians get u = phi.
-    """
+   
     device = means_t.device
     W, H = img_wh
     G = means_t.shape[0]
@@ -62,51 +50,29 @@ def compute_uncertainty_single_frame(
     # ---------- 1. Render scene to get depth + RGB + per-Gaussian projections ----------
     # Activate Gaussian parameters
     alpha = torch.sigmoid(opacities_raw)          # (G,)
-    scale = torch.exp(scales)                      # (G, 3)
-    # quats already in wxyz, gsplat expects wxyz
-    # SoM stores canonical quats in wxyz convention
+   
+    # Project Gaussian centers to camera space analytically
+    means3D_h = torch.cat(
+        [means_t, torch.ones(G, 1, device=device)], dim=-1
+    )  # (G, 4)
+    means_cam = (w2c @ means3D_h.T).T  # (G, 4)
 
-    # Use packed=False to get (1, G, ...) per-Gaussian info
-    with torch.enable_grad():
-        # Need enable_grad because gsplat's 2D projection creates a computation
-        # graph; we only need forward values so we detach afterward.
-        render_out, alphas, info = rasterization(
-            means=means_t,
-            quats=quats_t,
-            scales=scale,
-            opacities=alpha,
-            colors=torch.sigmoid(  # dummy colors for rendering
-                torch.zeros(G, 3, device=device)
-            ),
-            viewmats=w2c.unsqueeze(0),  # (1, 4, 4)
-            Ks=K.unsqueeze(0),           # (1, 3, 3)
-            width=W,
-            height=H,
-            packed=False,
-            render_mode="RGB+ED",       # return depth too
-            near_plane=0.01,
-            far_plane=1e10,
-        )
+    # Per-Gaussian camera-space depth
+    g_depths = means_cam[:, 2]  # (G,)
 
-    # render_out: (1, H, W, 4) — [RGB, depth]
-    rendered_depth = render_out[0, :, :, 3]   # (H, W) camera-space depth
-    # rendered_rgb:  not needed here (we render again with real colors below)
+    # Per-Gaussian projected 2D pixel centers
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    z = means_cam[:, 2].clamp(min=1e-6)
+    g_means2d = torch.stack([
+        fx * means_cam[:, 0] / z + cx,
+        fy * means_cam[:, 1] / z + cy,
+    ], dim=-1)  # (G, 2)
 
-    # Per-Gaussian from info (non-packed, shape (1, G)):
-    g_radii   = info["radii"]      # (1, G)   or (1, G, 2) — screen-space radius
-    g_depths  = info["depths"]     # (1, G)   camera-space depth per Gaussian
-    g_means2d = info["means2d"]    # (1, G, 2) projected 2D pixel centers
+    # radii and rendered_depth come from outside — pass them in as arguments
+    g_radii = radii           # (G,)  passed in
+    rendered_depth = depth    # (H, W) passed in
 
-    # Flatten camera dim
-    g_radii   = g_radii[0]        # (G,) or (G, 2)
-    g_depths  = g_depths[0]       # (G,)
-    g_means2d = g_means2d[0]      # (G, 2)
-
-    # Normalize to scalar radius (max of x/y if 2D)
-    if g_radii.dim() == 2:
-        g_radii = g_radii.max(dim=-1).values  # (G,)
-
-    # ---------- 2. Compute per-Gaussian scalar uncertainty ----------
     u = torch.full((G,), fill_value=phi, dtype=torch.float32, device=device)
 
     # Gaussians with radii > 0 are within the camera frustum
@@ -144,7 +110,7 @@ def compute_uncertainty_single_frame(
         vis_idx = visible_mask.nonzero(as_tuple=True)[0]
         px = g_means2d[vis_idx, 0].round().long()
         py = g_means2d[vis_idx, 1].round().long()
-        radii = g_radii[vis_idx].long()
+        radii_vis = g_radii[vis_idx].long()
 
         # Check convergence: for each Gaussian, check if ANY pixel in its footprint
         # has color error > eta_c. If so, mark as unconverged.
@@ -152,7 +118,7 @@ def compute_uncertainty_single_frame(
         max_color_err = torch.zeros(len(vis_idx), device=device)
         
         for i in range(len(vis_idx)):
-            r = radii[i].item()
+            r = radii_vis[i].item()
             if r <= 0:
                 continue
             
@@ -192,115 +158,55 @@ def compute_uncertainty_single_frame(
 
     return u, g_radii
 
-@torch.no_grad()
-
-    """Compute per-Gaussian per-frame scalar uncertainties for all frames.
-
-    Returns:
-        u: (G, T)  uncertainty values.  Low = reliable, phi = unreliable.
-    """
-    G = model.num_fg_gaussians
-    T = model.num_frames
+def compute_uncertainty_all_frames(
+    gaussians,           # your GaussianModel
+    train_cameras,       # your list of training cameras
+    pipe,
+    background,
+    device,
+    eta_c=0.5,
+    phi=1e6,
+):
+    G = gaussians.get_xyz.shape[0]
+    T = len(train_cameras)
     u_all = torch.full((G, T), fill_value=phi, device=device)
 
-    img_wh = train_dataset.get_img_wh()  # (W, H)
+    for t, viewpoint_cam in enumerate(train_cameras):
+        # Get rendered outputs from YOUR renderer
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
 
-    all_color_errs = []
-    all_raw_u = []
-    fail_conv_ratios = []
-    
-    from loguru import logger as guru
-    guru.info(f"USplat4D: Computing uncertainties for {T} frames with eta_c={eta_c}, phi={phi}")
+        # Get GT image
+        gt_img, _ = train_cameras[t]
+        gt_img = gt_img.to(device)
 
-    for t in range(T):
-        # Get Gaussian positions at frame t
-        with torch.no_grad():
-            means_t, quats_t = model.compute_poses_fg(
-                torch.tensor([t], device=device)
-            )
-            means_t = means_t[:, 0]   # (G, 3)
-            quats_t = quats_t[:, 0]   # (G, 4)
+        # Get positions at this timestamp
+        _, delta_mean = gaussians.get_current_covariance_and_mean_offset(
+            1.0, viewpoint_cam.timestamp
+        )
+        means_t = gaussians.get_xyz + delta_mean
 
-        w2c = model.w2cs[t]  # (4, 4)
-        K   = model.Ks[t]    # (3, 3)
-
-        # Fetch ground-truth image for frame t from dataset
-        item = train_dataset[t]
-        gt_img = item["imgs"].to(device)      # (H, W, 3), float [0,1]
-        if gt_img.dim() == 4:
-            gt_img = gt_img[0]
-
-        # Render the full scene (bg+fg) to correctly evaluate color convergence
-        with torch.no_grad():
-            rendered_dict = model.render(
-                t=t,
-                w2cs=w2c.unsqueeze(0),
-                Ks=K.unsqueeze(0),
-                img_wh=img_wh,
-                bg_color=0.0
-            )
-            full_rendered_rgb = rendered_dict["img"][0]  # (H, W, 3)
-        
-        # DEBUG: Check rendered image statistics
-        rgb_min = full_rendered_rgb.min().item()
-        rgb_max = full_rendered_rgb.max().item()
-        rgb_mean = full_rendered_rgb.mean().item()
-        gt_min = gt_img.min().item()
-        gt_max = gt_img.max().item()
-        gt_mean = gt_img.mean().item()
-        
-        if t % max(1, T // 5) == 0:  # Print for ~5 frames
-            try:
-                guru.debug(f"  Frame {t}: rendered RGB [{rgb_min:.4f},{rgb_max:.4f}], mean={rgb_mean:.4f} | "
-                          f"gt RGB [{gt_min:.4f},{gt_max:.4f}], mean={gt_mean:.4f}")
-            except:
-                pass
-
-        u_t, _, d_stats = compute_uncertainty_single_frame(
+        # Get K matrix from camera
+        K = torch.tensor([
+        [viewpoint_cam.image_width / (2 * math.tan(viewpoint_cam.FoVx * 0.5)), 0, viewpoint_cam.image_width / 2],
+        [0, viewpoint_cam.image_height / (2 * math.tan(viewpoint_cam.FoVy * 0.5)), viewpoint_cam.image_height / 2],
+        [0, 0, 1]
+        ], dtype=torch.float32, device=device)
+        u_t, _ = compute_uncertainty_single_frame(
             means_t=means_t,
-            quats_t=quats_t,
-            scales=model.fg.params["scales"],
-            opacities_raw=model.fg.params["opacities"],
-            w2c=w2c,
+            opacities_raw=gaussians._opacity,
+            w2c=viewpoint_cam.world_view_transform,
             K=K,
-            img_wh=img_wh,
-            gt_img=gt_img,
-            full_rendered_rgb=full_rendered_rgb,
+            img_wh=(viewpoint_cam.image_width, viewpoint_cam.image_height),
+            gt_img=gt_img.permute(1, 2, 0),
+            full_rendered_rgb=render_pkg["render"].permute(1, 2, 0),
+            radii=render_pkg["radii"],
+            depth=render_pkg["depth"].squeeze(),
             eta_c=eta_c,
             phi=phi,
-            depth_margin_rel=depth_margin_rel,
         )
         u_all[:, t] = u_t
 
-        all_color_errs.append(d_stats["color_err"])
-        all_raw_u.append(d_stats["raw_u"])
-        fail_conv_ratios.append(d_stats["not_converged_ratio"])
-        
-    # --- Print massive debug summary ---
-    try:
-        from loguru import logger as guru
-        all_errs = torch.cat(all_color_errs) if all_color_errs else torch.tensor([])
-        all_u = torch.cat(all_raw_u) if all_raw_u else torch.tensor([])
-        
-        if len(all_errs) > 0:
-            q_err = torch.quantile(all_errs.float(), torch.tensor([0.25, 0.5, 0.75, 0.9, 0.95, 0.99]))
-            guru.info(f"=== UNCERTAINTY STATS (eta_c={eta_c}, phi={phi}) ===")
-            guru.info(f"  Color Err Percentiles: p25={q_err[0]:.4f}, p50={q_err[1]:.4f}, p75={q_err[2]:.4f}, p90={q_err[3]:.4f}, p95={q_err[4]:.4f}, p99={q_err[5]:.4f}")
-            guru.info(f"  Color Err < eta_c: {(all_errs < eta_c).float().mean().item() * 100:.1f}%")
-            guru.info(f"  Avg Convergence Failure Ratio: {sum(fail_conv_ratios)/max(1, len(fail_conv_ratios))*100:.1f}%")
-        
-        if len(all_u) > 0:
-            q_u = torch.quantile(all_u.float(), torch.tensor([0.1, 0.5, 0.9]))
-            guru.info(f"  Raw `u` (inv_sum_sq_v) Percentiles: p10={q_u[0]:.6f}, p50={q_u[1]:.6f}, p90={q_u[2]:.6f}")
-        
-        phi_hit_ratio = (u_all == phi).float().mean().item()
-        guru.info(f"  Final u==phi ratio covering all frames: {phi_hit_ratio*100:.1f}%")
-        guru.info("==================================================")
-    except Exception as e:
-        pass
-
-    return u_all  # (G, T)
-
+    return u_all
 
 def build_uncertainty_3d_matrices(
     u_scalar: Tensor,    # (G, T)  scalar uncertainties
