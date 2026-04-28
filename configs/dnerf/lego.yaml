@@ -57,3 +57,4 @@ OptimizationParams:
   lambda_opa_mask: 0.0
   lambda_rigid: 1.0
   lambda_motion: 0.0
+  lambda_depth: 0.0
