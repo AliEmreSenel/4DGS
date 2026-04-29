@@ -576,7 +576,7 @@
   ]
 
   #table(
-    columns: (0.5fr, 0.5fr, 1.5fr, 1.7fr, 1fr, 1.2fr),
+    columns: (0.6fr, 0.6fr, 1.5fr, 1.7fr, 1fr, 1.2fr),
     fill: (x, y) => if x == 0 or y == 0 { luma(230) },
 
     [], [#row-summary], [#row-encoding], [#row-training], [#row-changes], [#row-rendering],

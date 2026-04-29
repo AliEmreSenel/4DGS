@@ -34,13 +34,15 @@
   keywords: (),
   abstract: abstract,
   bibliography: bibliography("bibliography.bib"),
-  accepted: none,
+  accepted: false,
   id: none,
   appendix: appendix,
 )
 
 #show link: underline
 
+// TODO add link to github
+ 
 // TODO add references to why each technique is picked per-technique (ie. memory vs compute vs accuracy constraints)
 
 = Introduction
@@ -120,7 +122,7 @@ $
 
 $
   P_i = frac(mu_i - k_v, norm(mu_i - k_v))
-  quad #stack(dir: ttb, spacing: 5pt, align(left)[camera-gaussian], align(left)[unit direction])
+  quad #stack(dir: ttb, spacing: 5pt, align(left)[camera to gaussian], align(left)[unit direction])
 $
 
 $
@@ -135,7 +137,7 @@ Other optimizations have also been developed for the rendering (inference) opera
 
 == Training Procedure
 
-Standard backpropagation is used to learn the best parameters for scene fidelity, while loss can be measured using common image similarity metrics.
+Standard backpropagation is used to learn the best parameters for scene fidelity, while loss can be measured using common image similarity metrics. Multiple different Losses can be used, to accommodate the 
 
 [SSIM metrics]
 
@@ -171,7 +173,7 @@ We compare reconstruction loss, training time, storage size, and render speed, t
 
 = Model Parametrization
 
-
+[Loss Reweighting]
 
 = Ablations
 
