@@ -219,6 +219,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         dir_pp = (means3D - cam_center).detach()
         dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
         shs_mlp = pc.get_features
+        time_features = None
         if pc.gaussian_dim == 4 and marginal_t is not None:
             shs_mlp = shs_mlp[mask]
 
@@ -228,7 +229,30 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             scales_mlp = scales_mlp[mask]
             rotations_mlp = rotations_mlp[mask]
 
-        phi, opacity = pc.get_mobilegs_opacity_phi(shs_mlp, scales_mlp, dir_pp_normalized, rotations_mlp)
+        if pc.gaussian_dim == 4:
+            t_values = pc.get_t
+            if marginal_t is not None:
+                t_values = t_values[mask]
+                marginal_t_mlp = marginal_t[mask]
+            else:
+                marginal_t_mlp = torch.ones((t_values.shape[0], 1), device=t_values.device, dtype=t_values.dtype)
+            time_span = max(float(pc.time_duration[1] - pc.time_duration[0]), 1e-6)
+            time_mid = 0.5 * float(pc.time_duration[0] + pc.time_duration[1])
+            t_norm = (t_values - time_mid) / time_span
+            cam_t_norm = torch.full_like(t_norm, (float(viewpoint_camera.timestamp) - time_mid) / time_span)
+            time_features = torch.cat([
+                (float(viewpoint_camera.timestamp) - t_values) / time_span,
+                t_norm,
+                marginal_t_mlp,
+            ], dim=1)
+
+        phi, opacity = pc.get_mobilegs_opacity_phi(
+            shs_mlp,
+            scales_mlp,
+            dir_pp_normalized,
+            rotations_mlp,
+            time_features=time_features,
+        )
 
         rendered_image, radii, _kernel_time = rasterizer(
             means3D=means3D,

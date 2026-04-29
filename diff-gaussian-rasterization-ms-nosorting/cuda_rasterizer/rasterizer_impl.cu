@@ -24,6 +24,7 @@
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <c10/cuda/CUDAStream.h>
 namespace cg = cooperative_groups;
 
 #include "auxiliary.h"
@@ -149,7 +150,8 @@ void CudaRasterizer::Rasterizer::markVisible(
 	float* projmatrix,
 	bool* present)
 {
-	checkFrustum << <(P + 255) / 256, 256 >> > (
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	checkFrustum << <(P + 255) / 256, 256, 0, stream >> > (
 		P,
 		means3D,
 		viewmatrix, projmatrix,
@@ -205,37 +207,29 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 
 
 
-struct RenderWorkspace {
-    int* tile_offsets_tmp = nullptr;
-    int* temp_counts = nullptr;
-    uint2* d_tile_ranges = nullptr; // x: start_offset, y: current_counter
-    float2* precomp_w_thres = nullptr; 
-    int allocated_tiles = 0;
-    int allocated_points = 0;
+struct ChunkRenderWorkspace {
+	int* tile_offsets_tmp;
+	int* temp_counts;
+	uint2* d_tile_ranges;
+	float2* precomp_w_thres;
 
-    void ensureCapacity(int num_tiles, int num_points) {
-        if (num_tiles > allocated_tiles || num_points > allocated_points) {
-            free(); 
-            cudaMalloc(&tile_offsets_tmp, num_tiles * sizeof(int));
-            cudaMalloc(&temp_counts, num_tiles * sizeof(int));
-            cudaMalloc(&d_tile_ranges, num_tiles * sizeof(uint2));
-            cudaMalloc(&precomp_w_thres, num_points * sizeof(float2));
-            allocated_tiles = num_tiles;
-            allocated_points = num_points;
-        }
-    }
-    
-    void free() {
-        if (tile_offsets_tmp) { cudaFree(tile_offsets_tmp); tile_offsets_tmp = nullptr; }
-        if (temp_counts) { cudaFree(temp_counts); temp_counts = nullptr; }
-        if (d_tile_ranges) { cudaFree(d_tile_ranges); d_tile_ranges = nullptr; }
-        if (precomp_w_thres) { cudaFree(precomp_w_thres); precomp_w_thres = nullptr; }
-        allocated_tiles = 0;
-        allocated_points = 0;
-    }
+	static ChunkRenderWorkspace fromChunk(char*& chunk, size_t num_tiles, size_t num_points)
+	{
+		ChunkRenderWorkspace ws;
+		CudaRasterizer::obtain(chunk, ws.tile_offsets_tmp, num_tiles, 128);
+		CudaRasterizer::obtain(chunk, ws.temp_counts, num_tiles, 128);
+		CudaRasterizer::obtain(chunk, ws.d_tile_ranges, num_tiles, 128);
+		CudaRasterizer::obtain(chunk, ws.precomp_w_thres, num_points, 128);
+		return ws;
+	}
 };
 
-
+static size_t requiredChunkRenderWorkspace(size_t num_tiles, size_t num_points)
+{
+	char* size = nullptr;
+	ChunkRenderWorkspace::fromChunk(size, num_tiles, num_points);
+	return ((size_t)size) + 128;
+}
 
 // Init Ranges
 __global__ void initOITRangesKernel(int n, const int* offsets, uint2* ranges) {
@@ -551,30 +545,24 @@ int CudaRasterizer::Rasterizer::forward(
 	int* radii,
 	bool debug)
 {
-
-	// Timers for functions
-	cudaEvent_t overallStart, overallStop;
-	cudaEventCreate(&overallStart);
-	cudaEventCreate(&overallStop);
-	float milliseconds;
-	cudaEventRecord(overallStart, 0);
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
 
 
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	size_t chunk_size = required<GeometryState>(P);
+	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	size_t chunk_size = required<GeometryState>(P) + requiredChunkRenderWorkspace(tile_grid.x * tile_grid.y, P);
 	char* chunkptr = geometryBuffer(chunk_size);
 	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
+	ChunkRenderWorkspace workspace = ChunkRenderWorkspace::fromChunk(chunkptr, tile_grid.x * tile_grid.y, P);
 
 	if (radii == nullptr)
 	{
 		radii = geomState.internal_radii;
 	}
 
-
-	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	dim3 block(BLOCK_X, BLOCK_Y, 1);
 
 	// Dynamically resize image-based auxiliary buffers during training
@@ -616,56 +604,53 @@ int CudaRasterizer::Rasterizer::forward(
 		prefiltered
 	), debug)
 
-	static RenderWorkspace workspace;
+	CHECK_CUDA(cudaMemsetAsync(out_color, 0, width * height * 3 * sizeof(float), stream), debug);
+	CHECK_CUDA(cudaMemsetAsync(w_fg, 0, width * height * sizeof(float), stream), debug);
+	CHECK_CUDA(cudaMemsetAsync(Ts, 0, width * height * sizeof(float), stream), debug);
 
-    cudaMemset(out_color, 0, width * height * 3 * sizeof(float));
-    cudaMemset(w_fg, 0, width * height * sizeof(float));
-    cudaMemset(Ts, 0, width * height * sizeof(float));
+	int num_tiles = tile_grid.x * tile_grid.y;
+	int* tile_counts = workspace.temp_counts;
+	CHECK_CUDA(cudaMemsetAsync(tile_counts, 0, num_tiles * sizeof(int), stream), debug);
 
-    int num_tiles = tile_grid.x * tile_grid.y;
-    workspace.ensureCapacity(num_tiles, P); 
-
-    int* tile_counts = workspace.temp_counts;
-    cudaMemset(tile_counts, 0, num_tiles * sizeof(int));
-
-    precomputeGaussianData<<<(P + 255) / 256, 256>>>(
+	precomputeGaussianData<<<(P + 255) / 256, 256, 0, stream>>>(
         P, radii, geomState.depths, phi, (glm::vec3*)scales, 
         geomState.conic_opacity, workspace.precomp_w_thres
     );
 
-    countOITPointsPerTile<<<(P + 255) / 256, 256>>>(
+	countOITPointsPerTile<<<(P + 255) / 256, 256, 0, stream>>>(
         P, width, height, geomState.means2D, radii, 
         geomState.conic_opacity, workspace.precomp_w_thres,
         tile_counts
     );
 
     int* tile_offsets = workspace.tile_offsets_tmp;
-    CHECK_CUDA(cub::DeviceScan::ExclusiveSum(geomState.scanning_space, geomState.scan_size, tile_counts, tile_offsets, num_tiles), debug);
+	CHECK_CUDA(cub::DeviceScan::ExclusiveSum(geomState.scanning_space, geomState.scan_size, tile_counts, tile_offsets, num_tiles, stream), debug);
 
     int last_off, last_cnt;
-    cudaMemcpy(&last_off, tile_offsets + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&last_cnt, tile_counts + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost);
+	CHECK_CUDA(cudaMemcpyAsync(&last_off, tile_offsets + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
+	CHECK_CUDA(cudaMemcpyAsync(&last_cnt, tile_counts + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
+	CHECK_CUDA(cudaStreamSynchronize(stream), debug);
     int total_instances = last_off + last_cnt;
 
     size_t binning_chunk_size = required<BinningState>(total_instances);
     char* binning_chunkptr = binningBuffer(binning_chunk_size);
     BinningState binningState = BinningState::fromChunk(binning_chunkptr, total_instances);
 
-    initOITRangesKernel<<<(num_tiles + 255) / 256, 256>>>(num_tiles, tile_offsets, workspace.d_tile_ranges);
+    initOITRangesKernel<<<(num_tiles + 255) / 256, 256, 0, stream>>>(num_tiles, tile_offsets, workspace.d_tile_ranges);
 
-	fillOITTiles<<<(P + 255) / 256, 256>>>(
+	fillOITTiles<<<(P + 255) / 256, 256, 0, stream>>>(
         P, width, height, geomState.means2D, radii, 
         geomState.conic_opacity, workspace.precomp_w_thres,
 		binningState.point_list, workspace.d_tile_ranges, total_instances
     );
 
-	CHECK_CUDA(cudaMemcpy(imgState.ranges, workspace.d_tile_ranges, num_tiles * sizeof(uint2), cudaMemcpyDeviceToDevice), debug);
+	CHECK_CUDA(cudaMemcpyAsync(imgState.ranges, workspace.d_tile_ranges, num_tiles * sizeof(uint2), cudaMemcpyDeviceToDevice, stream), debug);
 
     const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
     
     cudaFuncSetAttribute(renderTileOIT<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, 0);
 
-    renderTileOIT<3><<<tile_grid, block>>>(
+    renderTileOIT<3><<<tile_grid, block, 0, stream>>>(
 		imgState.ranges,
 		binningState.point_list,
         width, height, 
@@ -676,13 +661,9 @@ int CudaRasterizer::Rasterizer::forward(
 		out_color, w_fg, Ts, imgState.accum_alpha, imgState.n_contrib, background
     );
 	
-	cudaEventRecord(overallStop, 0);
-	cudaEventSynchronize(overallStop);
-	cudaEventElapsedTime(&milliseconds, overallStart, overallStop);
-	kernel_times[0] = milliseconds;
-
-	cudaEventDestroy(overallStart);
-	cudaEventDestroy(overallStop);
+	if (kernel_times != nullptr) {
+		kernel_times[0] = 0.0f;
+	}
 
     return total_instances;
 }
@@ -728,6 +709,7 @@ int CudaRasterizer::Rasterizer::forward_depth(
 	int* radii,
 	bool debug)
 {
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -786,11 +768,18 @@ int CudaRasterizer::Rasterizer::forward_depth(
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+		geomState.scanning_space,
+		geomState.scan_size,
+		geomState.tiles_touched,
+		geomState.point_offsets,
+		P,
+		stream), debug)
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	int num_rendered;
-	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+	CHECK_CUDA(cudaMemcpyAsync(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
+	CHECK_CUDA(cudaStreamSynchronize(stream), debug);
 
 	size_t binning_chunk_size = required<BinningState>(num_rendered);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
@@ -798,7 +787,7 @@ int CudaRasterizer::Rasterizer::forward_depth(
 
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
-	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+	duplicateWithKeys << <(P + 255) / 256, 256, 0, stream >> > (
 		P,
 		geomState.means2D,
 		geomState.depths,
@@ -817,13 +806,13 @@ int CudaRasterizer::Rasterizer::forward_depth(
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
-		num_rendered, 0, 32 + bit), debug)
+		num_rendered, 0, 32 + bit, stream), debug)
 
-	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
+	CHECK_CUDA(cudaMemsetAsync(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2), stream), debug);
 
 	// Identify start and end of per-tile workloads in sorted list
 	if (num_rendered > 0)
-		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
+		identifyTileRanges << <(num_rendered + 255) / 256, 256, 0, stream >> > (
 			num_rendered,
 			binningState.point_list_keys,
 			imgState.ranges);

@@ -11,6 +11,7 @@
 
 #include "forward.h"
 #include "auxiliary.h"
+#include <c10/cuda/CUDAStream.h>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 
@@ -847,7 +848,8 @@ void FORWARD::render(
 	float* out_color
 	)
 {
-	renderTileAtomicCUDA<NUM_CHANNELS> << <grid, block >> > (
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	renderTileAtomicCUDA<NUM_CHANNELS> << <grid, block, 0, stream >> > (
 		ranges,
 		point_list,
 		W, H,
@@ -903,7 +905,8 @@ void FORWARD::render_depth(
 	const glm::vec3* cam_pos
 	)
 {
-	render_depthCUDA<NUM_CHANNELS> << <grid, block >> > (
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	render_depthCUDA<NUM_CHANNELS> << <grid, block, 0, stream >> > (
 		ranges,
 		point_list,
 		W, H,
@@ -965,7 +968,8 @@ void FORWARD::preprocess(int P, int D, int M,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
-	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256, 0, stream >> > (
 		P, D, M,
 		means3D,
 		scales,

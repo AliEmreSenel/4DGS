@@ -3,7 +3,9 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
  * This software is free for non-commercial, research and evaluation use 
+	renderCUDA<NUM_CHANNELS> << <grid, block, 0, stream >> > (
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
@@ -11,6 +13,7 @@
 
 #include "backward.h"
 #include "auxiliary.h"
+#include <c10/cuda/CUDAStream.h>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
@@ -1173,11 +1176,12 @@ void BACKWARD::preprocess(
 	glm::vec4* dL_drot_r,
 	float* dL_dopacity)
 {
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 	// Propagate gradients for the path of 2D conic matrix computation. 
 	// Somewhat long, thus it is its own kernel rather than being part of 
 	// "preprocess". When done, loss gradient w.r.t. 3D means has been
 	// modified and gradient w.r.t. 3D covariance matrix has been computed.	
-	computeCov2DCUDA << <(P + 255) / 256, 256 >> > (
+	computeCov2DCUDA << <(P + 255) / 256, 256, 0, stream >> > (
 		P,
 		means3D,
 		radii,
@@ -1195,7 +1199,7 @@ void BACKWARD::preprocess(
 	// Propagate gradients for remaining steps: finish 3D mean gradients,
 	// propagate color gradients to SH (if desireD), propagate 3D covariance
 	// matrix gradients to scale and rotation.
-	preprocessCUDA<NUM_CHANNELS> << < (P + 255) / 256, 256 >> > (
+	preprocessCUDA<NUM_CHANNELS> << < (P + 255) / 256, 256, 0, stream >> > (
 		P, D, D_t, M,
 		(float3*)means3D,
 		radii,
@@ -1251,7 +1255,8 @@ void BACKWARD::render(
 	float* dL_dcolors,
 	float* dL_dflows)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	renderCUDA<NUM_CHANNELS> << <grid, block, 0, stream >> >(
 		ranges,
 		point_list,
 		W, H,

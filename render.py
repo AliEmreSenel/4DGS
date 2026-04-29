@@ -3,11 +3,84 @@ import argparse
 import math
 import os
 from pathlib import Path
+import queue
 import sys
+import threading
+from dataclasses import dataclass
+from typing import Any
 
 import imageio.v2 as imageio
 import numpy as np
 import torch
+
+
+@dataclass
+class InFlightFrame:
+    idx: int
+    t: float
+    ready_event: torch.cuda.Event
+    cpu_image_u8: torch.Tensor
+    # Keep GPU tensors/camera alive until the event signals completion.
+    keepalive: tuple[Any, ...]
+
+
+class AsyncFrameWriter:
+    def __init__(self, video_path: Path, fps: int, frames_dir: Path, save_png: bool, max_queue: int, total_frames: int):
+        self.frames_dir = frames_dir
+        self.save_png = save_png
+        self.total_frames = total_frames
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, max_queue))
+        self._exception: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(video_path, fps),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self, video_path: Path, fps: int):
+        writer = None
+        try:
+            writer = imageio.get_writer(video_path, fps=fps, codec="libx264", quality=8)
+            while True:
+                item = self._queue.get()
+                if item is None:
+                    break
+                idx, t, image = item
+                if self.save_png:
+                    frame_path = self.frames_dir / f"{idx:04d}.png"
+                    imageio.imwrite(frame_path, image)
+                writer.append_data(image)
+                if (idx + 1) % 25 == 0 or idx == 0 or (idx + 1) == self.total_frames:
+                    print(f"[{idx+1}/{self.total_frames}] queued frame written t={t:.4f}")
+        except Exception as e:
+            self._exception = e
+        finally:
+            if writer is not None:
+                writer.close()
+
+    def submit(self, idx: int, t: float, image: np.ndarray):
+        while True:
+            if self._exception is not None:
+                raise RuntimeError("Asynchronous frame writer failed") from self._exception
+            try:
+                self._queue.put((idx, t, image), timeout=0.2)
+                return
+            except queue.Full:
+                continue
+
+    def close(self):
+        while True:
+            if self._exception is not None:
+                break
+            try:
+                self._queue.put(None, timeout=0.2)
+                break
+            except queue.Full:
+                continue
+        self._thread.join()
+        if self._exception is not None:
+            raise RuntimeError("Asynchronous frame writer failed") from self._exception
 
 
 def load_saved_namespace(cfg_path: Path):
@@ -189,6 +262,29 @@ def main():
     parser.add_argument("--split", type=str, choices=["train", "test"], default="test")
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--isotropic_gaussians", action="store_true")
+    parser.add_argument(
+        "--render_concurrency",
+        type=int,
+        default=0,
+        help="Max in-flight render jobs (0 = auto).",
+    )
+    parser.add_argument(
+        "--render_streams",
+        type=int,
+        default=1,
+        help="CUDA streams for dispatching render jobs. Values >1 are experimental.",
+    )
+    parser.add_argument(
+        "--writer_queue",
+        type=int,
+        default=16,
+        help="Max queued frames waiting to be encoded/written.",
+    )
+    parser.add_argument(
+        "--skip_png",
+        action="store_true",
+        help="Skip per-frame PNG files and only write MP4.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -354,99 +450,164 @@ def main():
     time_start = default_time_start if args.time_start is None else args.time_start
     time_end = default_time_end if args.time_end is None else args.time_end
 
+    save_png = not args.skip_png
     frames_dir = out_dir / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
+    if save_png:
+        frames_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "orbit_time.mp4"
 
     elev = math.radians(args.elevation_deg)
     look_at = center.copy()
     look_at[1] += args.look_at_offset_y
 
-    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
+    auto_concurrency = max(2, min(16, (os.cpu_count() or 8) // 2))
+    max_in_flight = args.render_concurrency if args.render_concurrency > 0 else auto_concurrency
+    max_in_flight = max(1, max_in_flight)
+    num_streams = max(1, min(args.render_streams, max_in_flight))
+    streams = [torch.cuda.Stream() for _ in range(num_streams)]
+
+    print(
+        "Render pipeline settings: "
+        f"in_flight={max_in_flight}, streams={num_streams}, writer_queue={args.writer_queue}, "
+        f"save_png={save_png}"
+    )
+
+    def build_camera(idx: int):
+        frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
+        az = math.radians(
+            args.orbit_start_deg + frac * (args.orbit_end_deg - args.orbit_start_deg)
+        )
+        horiz = radius * math.cos(elev)
+        z = center[2] + radius * math.sin(elev)
+        eye = np.array(
+            [
+                center[0] + horiz * math.cos(az),
+                center[1] + horiz * math.sin(az),
+                z,
+            ],
+            dtype=np.float32,
+        )
+
+        if args.time_mode == "orbit-only":
+            t_val = (
+                args.freeze_time
+                if args.freeze_time is not None
+                else 0.5 * (time_start + time_end)
+            )
+        elif args.time_mode == "time-only":
+            eye = centers[0]
+            t_val = time_start + frac * (time_end - time_start)
+        else:
+            t_val = time_start + frac * (time_end - time_start)
+
+        if args.time_mode == "time-only":
+            ref_cam = base_cam
+            cam = Camera(
+                colmap_id=0,
+                R=ref_cam.R,
+                T=ref_cam.T,
+                FoVx=FoVx if not use_intrinsics else -1.0,
+                FoVy=FoVy if not use_intrinsics else -1.0,
+                image=torch.empty(0),
+                gt_alpha_mask=None,
+                image_name=f"orbit_{idx:04d}",
+                uid=idx,
+                data_device="cuda",
+                timestamp=float(t_val),
+                cx=cx,
+                cy=cy,
+                fl_x=fl_x,
+                fl_y=fl_y,
+                resolution=(width, height),
+                meta_only=True,
+            ).cuda()
+        else:
+            R, T = look_at_colmap(eye, look_at)
+            cam = Camera(
+                colmap_id=0,
+                R=R,
+                T=T,
+                FoVx=FoVx if not use_intrinsics else -1.0,
+                FoVy=FoVy if not use_intrinsics else -1.0,
+                image=torch.empty(0),
+                gt_alpha_mask=None,
+                image_name=f"orbit_{idx:04d}",
+                uid=idx,
+                data_device="cuda",
+                timestamp=float(t_val),
+                cx=cx,
+                cy=cy,
+                fl_x=fl_x,
+                fl_y=fl_y,
+                resolution=(width, height),
+                meta_only=True,
+            ).cuda()
+
+        return cam, float(t_val)
+
+    def enqueue_render(idx: int) -> InFlightFrame:
+        stream = streams[idx % len(streams)]
+        cam, t_val = build_camera(idx)
+        with torch.cuda.stream(stream):
+            render_pkg = render(cam, gaussians, pipe, background)
+            render_tensor = render_pkg["render"]
+            gpu_image = torch.clamp(render_tensor, 0.0, 1.0).permute(1, 2, 0).contiguous()
+            gpu_image_u8 = (gpu_image * 255.0).to(torch.uint8)
+            cpu_image_u8 = torch.empty(
+                gpu_image_u8.shape,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=True,
+            )
+            cpu_image_u8.copy_(gpu_image_u8, non_blocking=True)
+
+            ready_event = torch.cuda.Event(blocking=False)
+            ready_event.record(stream)
+
+        return InFlightFrame(
+            idx=idx,
+            t=t_val,
+            ready_event=ready_event,
+            cpu_image_u8=cpu_image_u8,
+            keepalive=(cam, gpu_image_u8, render_tensor),
+        )
+
+    writer = AsyncFrameWriter(
+        video_path=video_path,
+        fps=args.fps,
+        frames_dir=frames_dir,
+        save_png=save_png,
+        max_queue=args.writer_queue,
+        total_frames=args.frames,
+    )
+
+    pending: dict[int, InFlightFrame] = {}
+    next_to_write = 0
+
+    def flush_ready(blocking: bool):
+        nonlocal next_to_write
+        while next_to_write in pending:
+            current = pending[next_to_write]
+            if not current.ready_event.query():
+                if not blocking:
+                    break
+                current.ready_event.synchronize()
+
+            image = current.cpu_image_u8.numpy().copy()
+            writer.submit(current.idx, current.t, image)
+            del pending[next_to_write]
+            next_to_write += 1
+            blocking = False
+
     try:
         for idx in range(args.frames):
-            frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
-            az = math.radians(
-                args.orbit_start_deg
-                + frac * (args.orbit_end_deg - args.orbit_start_deg)
-            )
-            horiz = radius * math.cos(elev)
-            z = center[2] + radius * math.sin(elev)
-            eye = np.array(
-                [
-                    center[0] + horiz * math.cos(az),
-                    center[1] + horiz * math.sin(az),
-                    z,
-                ],
-                dtype=np.float32,
-            )
+            pending[idx] = enqueue_render(idx)
+            flush_ready(blocking=False)
+            if len(pending) >= max_in_flight:
+                flush_ready(blocking=True)
 
-            if args.time_mode == "orbit-only":
-                t = (
-                    args.freeze_time
-                    if args.freeze_time is not None
-                    else 0.5 * (time_start + time_end)
-                )
-            elif args.time_mode == "time-only":
-                eye = centers[0]
-                t = time_start + frac * (time_end - time_start)
-            else:
-                t = time_start + frac * (time_end - time_start)
-
-            if args.time_mode == "time-only":
-                ref_cam = base_cam
-                cam = Camera(
-                    colmap_id=0,
-                    R=ref_cam.R,
-                    T=ref_cam.T,
-                    FoVx=FoVx if not use_intrinsics else -1.0,
-                    FoVy=FoVy if not use_intrinsics else -1.0,
-                    image=torch.empty(0),
-                    gt_alpha_mask=None,
-                    image_name=f"orbit_{idx:04d}",
-                    uid=idx,
-                    data_device="cuda",
-                    timestamp=float(t),
-                    cx=cx,
-                    cy=cy,
-                    fl_x=fl_x,
-                    fl_y=fl_y,
-                    resolution=(width, height),
-                    meta_only=True,
-                ).cuda()
-            else:
-                R, T = look_at_colmap(eye, look_at)
-                cam = Camera(
-                    colmap_id=0,
-                    R=R,
-                    T=T,
-                    FoVx=FoVx if not use_intrinsics else -1.0,
-                    FoVy=FoVy if not use_intrinsics else -1.0,
-                    image=torch.empty(0),
-                    gt_alpha_mask=None,
-                    image_name=f"orbit_{idx:04d}",
-                    uid=idx,
-                    data_device="cuda",
-                    timestamp=float(t),
-                    cx=cx,
-                    cy=cy,
-                    fl_x=fl_x,
-                    fl_y=fl_y,
-                    resolution=(width, height),
-                    meta_only=True,
-                ).cuda()
-
-            with torch.no_grad():
-                render_pkg = render(cam, gaussians, pipe, background)
-                image = torch.clamp(render_pkg["render"], 0.0, 1.0)
-                image = (image.permute(1, 2, 0).detach().cpu().numpy() * 255.0).astype(
-                    np.uint8
-                )
-
-            frame_path = frames_dir / f"{idx:04d}.png"
-            imageio.imwrite(frame_path, image)
-            writer.append_data(image)
-            print(f"[{idx+1}/{args.frames}] saved {frame_path.name} t={t:.4f}")
+        while pending:
+            flush_ready(blocking=True)
     finally:
         writer.close()
 
@@ -465,9 +626,14 @@ def main():
         f"gaussian_dim={gaussian_dim}\n"
         f"rot_4d={rot_4d}\n"
         f"sh_degree_t={sh_degree_t}\n"
+        f"render_concurrency={max_in_flight}\n"
+        f"render_streams={num_streams}\n"
+        f"writer_queue={args.writer_queue}\n"
+        f"save_png={save_png}\n"
     )
     print(f"Wrote video to {video_path}")
-    print(f"Wrote frames to {frames_dir}")
+    if save_png:
+        print(f"Wrote frames to {frames_dir}")
 
 
 if __name__ == "__main__":

@@ -30,15 +30,15 @@ import copy
 class MobileOpacityPhiNN(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int = 128):
         super().__init__()
-        mid_dim = hidden_dim // 2
         self.backbone = nn.Sequential(
             nn.Linear(input_dim, hidden_dim * 2),
             nn.ReLU(),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, mid_dim),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
         )
+        mid_dim = hidden_dim // 2
         self.phi_head = nn.Linear(mid_dim, 1)
         self.opacity_head = nn.Linear(mid_dim, 1)
         self._init_heads()
@@ -50,13 +50,13 @@ class MobileOpacityPhiNN(nn.Module):
         nn.init.constant_(self.opacity_head.weight, 0.0)
         nn.init.constant_(self.opacity_head.bias, inverse_sigmoid(torch.tensor(0.1)).item())
 
-    def forward(self, shs, scales, viewdirs, rotations):
+    def forward(self, shs, scales, viewdirs, rotations, time_features):
         shs = shs.view(shs.shape[0], -1)
         shs = F.normalize(shs, dim=1)
         scales = F.normalize(scales, dim=1)
         rotations = F.normalize(rotations, dim=1)
 
-        feat = torch.cat([shs, viewdirs, scales, rotations], dim=1)
+        feat = torch.cat([shs, viewdirs, scales, rotations, time_features], dim=1)
         feat = self.backbone(feat)
 
         phi = F.relu(self.phi_head(feat))
@@ -141,13 +141,13 @@ class GaussianModel:
         self.setup_functions()
 
     def _build_mobilegs_opacity_phi_nn(self):
-        input_dim = 3 * self.get_max_sh_channels + 3 + 3 + 4
+        input_dim = 3 * self.get_max_sh_channels + 3 + 3 + 4 + 3
         return MobileOpacityPhiNN(input_dim).cuda()
 
-    def get_mobilegs_opacity_phi(self, shs, scales, viewdirs, rotations):
+    def get_mobilegs_opacity_phi(self, shs, scales, viewdirs, rotations, time_features):
         if self.mobilegs_opacity_phi_nn is None:
             self.mobilegs_opacity_phi_nn = self._build_mobilegs_opacity_phi_nn()
-        return self.mobilegs_opacity_phi_nn(shs, scales, viewdirs, rotations)
+        return self.mobilegs_opacity_phi_nn(shs, scales, viewdirs, rotations, time_features)
 
     def capture(self):
         mobilegs_state = None

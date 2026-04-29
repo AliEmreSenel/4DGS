@@ -27,3 +27,5 @@ eggs/
 *.sh
 *.zip
 .DS_Store
+/tebe
+/hpc_configs

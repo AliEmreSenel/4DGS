@@ -9,6 +9,7 @@
  * For inquiries contact  george.drettakis@inria.fr
  */
 #include <iostream>
+#include <c10/cuda/CUDAStream.h>
 #include "forward.h"
 #include "auxiliary.h"
 #include <cooperative_groups.h>
@@ -642,7 +643,8 @@ void FORWARD::render(
 	float* out_flow,
 	float* out_depth)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	renderCUDA<NUM_CHANNELS> << <grid, block, 0, stream >> > (
 		ranges,
 		point_list,
 		W, H,
@@ -693,7 +695,8 @@ void FORWARD::preprocess(int P, int D, int D_t, int M,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
-	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
+	cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256, 0, stream >> > (
 		P, D, D_t, M,
 		means3D,
 		out_means3D,
