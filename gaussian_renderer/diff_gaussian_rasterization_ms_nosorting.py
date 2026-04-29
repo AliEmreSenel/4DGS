@@ -25,6 +25,7 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
+    compute_scores=False,
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -38,6 +39,7 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
+        compute_scores,
     )
 
 
@@ -56,6 +58,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         cov3Ds_precomp,
         raster_settings,
+        compute_scores,
     ):
         args = (
             raster_settings.bg,
@@ -78,6 +81,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
+            compute_scores,
             raster_settings.debug,
         )
 
@@ -96,6 +100,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                     binningBuffer,
                     imgBuffer,
                     w_fg,
+                    gaussian_scores,
                 ) = _C.rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_ms_nosort_fw.dump")
@@ -113,6 +118,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 binningBuffer,
                 imgBuffer,
                 w_fg,
+                gaussian_scores,
             ) = _C.rasterize_gaussians(*args)
 
         del accum_weights_ptr, accum_weights_count, accum_max_count
@@ -134,12 +140,13 @@ class _RasterizeGaussians(torch.autograd.Function):
             geomBuffer,
             binningBuffer,
             imgBuffer,
+            gaussian_scores,
         )
-        return color, radii, kernel_time
+        return color, radii, kernel_time, gaussian_scores
 
     @staticmethod
-    def backward(ctx, grad_out_color, grad_radii, grad_kernel_time):
-        del grad_radii, grad_kernel_time
+    def backward(ctx, grad_out_color, grad_radii, grad_kernel_time, grad_gaussian_scores):
+        del grad_radii, grad_kernel_time, grad_gaussian_scores
 
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
@@ -158,6 +165,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             geomBuffer,
             binningBuffer,
             imgBuffer,
+            gaussian_scores,
         ) = ctx.saved_tensors
 
         args = (
@@ -232,6 +240,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
+            None,
         )
         return grads
 
@@ -278,6 +287,7 @@ class GaussianRasterizer(nn.Module):
         scales=None,
         rotations=None,
         cov3D_precomp=None,
+        compute_scores=False,
     ):
         if (shs is None and colors_precomp is None) or (
             shs is not None and colors_precomp is not None
@@ -313,4 +323,5 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             self.raster_settings,
+            compute_scores,
         )

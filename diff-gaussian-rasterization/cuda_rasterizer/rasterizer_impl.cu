@@ -227,6 +227,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const bool rot_4d, const int gaussian_dim, const bool force_sh_3d,
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
+		float* gaussian_scores,
 	float* out_color,
 	float* out_flow,
 	float* out_depth,
@@ -365,6 +366,7 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
+		gaussian_scores,
 		out_color,
 		out_flow,
 		out_depth), debug)

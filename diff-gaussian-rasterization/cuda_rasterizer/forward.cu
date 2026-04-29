@@ -513,6 +513,7 @@ renderCUDA(
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
+	float* __restrict__ gaussian_scores,
 	float* __restrict__ out_color,
 	float* __restrict__ out_flow,
 	float* __restrict__ out_depth)
@@ -590,6 +591,8 @@ renderCUDA(
 			float alpha = min(0.99f, con_o.w * exp(power));
 			if (alpha < 1.0f / 255.0f)
 				continue;
+			if (gaussian_scores != nullptr)
+				atomicAdd(&gaussian_scores[collected_id[j]], alpha * T);
 			float test_T = T * (1 - alpha);
 			if (test_T < 0.0001f)
 			{
@@ -639,6 +642,7 @@ void FORWARD::render(
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
+	float* gaussian_scores,
 	float* out_color,
 	float* out_flow,
 	float* out_depth)
@@ -656,6 +660,7 @@ void FORWARD::render(
 		final_T,
 		n_contrib,
 		bg_color,
+		gaussian_scores,
 		out_color,
 		out_flow,
 		out_depth);

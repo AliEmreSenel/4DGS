@@ -57,6 +57,7 @@ namespace CudaRasterizer
 			const bool rot_4d, const int gaussian_dim, const bool force_sh_3d,
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
+			float* gaussian_scores,
 			float* out_color,
 			float* out_flow,
 			float* out_depth,

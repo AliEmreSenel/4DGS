@@ -371,7 +371,8 @@ __global__ void __launch_bounds__(256) renderTileOIT(
 	float* __restrict__ Ts,
 	float* __restrict__ accum_alpha,
 	uint32_t* __restrict__ n_contrib,
-    const float* __restrict__ background
+	const float* __restrict__ background,
+	float* __restrict__ gaussian_scores
 ) {
     auto block = cg::this_thread_block();
     uint32_t horizontal_blocks = (W + 15) / 16;
@@ -461,10 +462,15 @@ __global__ void __launch_bounds__(256) renderTileOIT(
             if (alpha < 0.00392f) continue;
             
             float4 col = s_color[db][i];
+			int p_idx = point_list[tile_range.x + r * 256 + i];
             
             c[0] += col.x * alpha;
             c[1] += col.y * alpha;
             c[2] += col.z * alpha;
+
+			if (gaussian_scores != nullptr) {
+				atomicAdd(&gaussian_scores[p_idx], alpha * __expf(Ts_acc));
+			}
             
             w_fg_acc += alpha * w.z;
             Ts_acc += __logf(max(1.0f - alpha, 1e-6f));
@@ -536,6 +542,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* cam_pos,
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
+	float* gaussian_scores,
 	float* out_color,
 
 	float* accum_weights_ptr,
@@ -658,7 +665,7 @@ int CudaRasterizer::Rasterizer::forward(
         feature_ptr, 
         geomState.conic_opacity,
         workspace.precomp_w_thres,
-		out_color, w_fg, Ts, imgState.accum_alpha, imgState.n_contrib, background
+		out_color, w_fg, Ts, imgState.accum_alpha, imgState.n_contrib, background, gaussian_scores
     );
 	
 	if (kernel_times != nullptr) {

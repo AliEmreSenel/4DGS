@@ -33,7 +33,7 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
 	const torch::Tensor& means3D,
@@ -64,6 +64,7 @@ RasterizeGaussiansCUDA(
 	const int gaussian_dim,
 	const bool force_sh_3d,
 	const bool prefiltered,
+	const bool compute_scores,
 	const bool debug)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -81,6 +82,7 @@ RasterizeGaussiansCUDA(
   torch::Tensor out_flow = torch::full({2, H, W}, 0.0, float_opts);
   torch::Tensor out_depth = torch::full({1, H, W}, 0.0, float_opts);
   torch::Tensor out_T = torch::full({1, H, W}, 0.0, float_opts);
+	torch::Tensor gaussian_scores = compute_scores ? torch::full({P}, 0.0, float_opts) : torch::empty({0}, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
   torch::Tensor out_means3D = means3D.clone();
   
@@ -134,6 +136,7 @@ RasterizeGaussiansCUDA(
 		tan_fovx,
 		tan_fovy,
 		prefiltered,
+			compute_scores ? gaussian_scores.contiguous().data_ptr<float>() : nullptr,
 		out_color.contiguous().data_ptr<float>(),
 		out_flow.contiguous().data_ptr<float>(), 
 		out_depth.contiguous().data_ptr<float>(),
@@ -145,7 +148,7 @@ RasterizeGaussiansCUDA(
   CudaRasterizer::GeometryState geoState = CudaRasterizer::GeometryState::fromChunk(geo_ptr, P);
 
   torch::Tensor covs3D_com = torch::from_blob(geoState.cov3D, {P, 6}, float_opts);
-  return std::make_tuple(rendered, out_color, out_flow, out_depth, out_T, radii, geomBuffer, binningBuffer, imgBuffer, covs3D_com, out_means3D);
+	return std::make_tuple(rendered, out_color, out_flow, out_depth, out_T, radii, geomBuffer, binningBuffer, imgBuffer, covs3D_com, out_means3D, gaussian_scores);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>

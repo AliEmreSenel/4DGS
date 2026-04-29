@@ -69,6 +69,7 @@ namespace FORWARD
 		float* final_T,
 		uint32_t* n_contrib,
 		const float* bg_color,
+		float* gaussian_scores,
 		float* out_color,
 		float* out_flow,
 		float* out_depth);

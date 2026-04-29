@@ -33,7 +33,7 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 }
 
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, 
-torch::Tensor, torch::Tensor,  torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+torch::Tensor, torch::Tensor,  torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
   const torch::Tensor& background,
   const torch::Tensor& means3D,
@@ -55,6 +55,7 @@ RasterizeGaussiansCUDA(
   const int degree,
   const torch::Tensor& campos,
   const bool prefiltered,
+  const bool compute_scores,
   const bool debug
   )
 {
@@ -73,6 +74,7 @@ RasterizeGaussiansCUDA(
   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor w_fg = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor Ts = torch::full({H, W}, 0.0, float_opts);
+  torch::Tensor gaussian_scores = compute_scores ? torch::full({P}, 0.0, float_opts) : torch::empty({0}, float_opts);
 
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 
@@ -124,6 +126,7 @@ RasterizeGaussiansCUDA(
       tan_fovx,
       tan_fovy,
       prefiltered,
+      compute_scores ? gaussian_scores.contiguous().data_ptr<float>() : nullptr,
       out_color.contiguous().data<float>(),
 
       accum_weights_ptr.contiguous().data<float>(),  
@@ -135,7 +138,7 @@ RasterizeGaussiansCUDA(
   }
 
   return std::make_tuple(rendered, out_color, accum_weights_ptr, accum_weights_count, accum_max_count, radii, kernel_times, geomBuffer,
-  binningBuffer, imgBuffer, w_fg);
+  binningBuffer, imgBuffer, w_fg, gaussian_scores);
   
 }
 

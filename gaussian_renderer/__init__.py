@@ -17,7 +17,7 @@ from .diff_gaussian_rasterization import GaussianRasterizer as SortedGaussianRas
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, return_gaussian_scores = False):
     """
     Render the scene. 
     
@@ -103,6 +103,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     cov3D_precomp = None
     marginal_t = None
     prefilter_var = -1.0
+    mask = None
     if use_mobilegs_sort_free:
         scales = pc.get_scaling
         rotations = pc.get_rotation
@@ -187,7 +188,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     flow_2d = torch.zeros_like(pc.get_xyz[:, :2])
     
     # Prefilter
-    if pc.gaussian_dim == 4 and marginal_t is not None:
+    if pc.gaussian_dim == 4 and marginal_t is not None and not return_gaussian_scores:
         mask = marginal_t[:,0] > 0.05
         if means2D is not None:
             means2D = means2D[mask]
@@ -220,18 +221,18 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
         shs_mlp = pc.get_features
         time_features = None
-        if pc.gaussian_dim == 4 and marginal_t is not None:
+        if pc.gaussian_dim == 4 and mask is not None:
             shs_mlp = shs_mlp[mask]
 
         scales_mlp = pc.get_scaling
         rotations_mlp = pc.get_rotation
-        if pc.gaussian_dim == 4 and marginal_t is not None:
+        if pc.gaussian_dim == 4 and mask is not None:
             scales_mlp = scales_mlp[mask]
             rotations_mlp = rotations_mlp[mask]
 
         if pc.gaussian_dim == 4:
             t_values = pc.get_t
-            if marginal_t is not None:
+            if mask is not None:
                 t_values = t_values[mask]
                 marginal_t_mlp = marginal_t[mask]
             else:
@@ -254,7 +255,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             time_features=time_features,
         )
 
-        rendered_image, radii, _kernel_time = rasterizer(
+        rendered_image, radii, _kernel_time, gaussian_scores = rasterizer(
             means3D=means3D,
             means2D=means2D,
             shs=shs,
@@ -265,6 +266,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             scales=scales,
             rotations=rotations,
             cov3D_precomp=cov3D_precomp,
+            compute_scores=return_gaussian_scores,
         )
         depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
         alpha = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
@@ -272,7 +274,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         covs_com = means3D.new_zeros((means3D.shape[0], 6))
     else:
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
-        rendered_image, radii, depth, alpha, flow, covs_com = rasterizer(
+        rendered_image, radii, depth, alpha, flow, covs_com, gaussian_scores = rasterizer(
             means3D = means3D,
             means2D = means2D,
             shs = shs,
@@ -285,7 +287,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             rotations = rotations,
             rotations_r = rotations_r,
             cov3D_precomp = cov3D_precomp,
-            prefilter_var = prefilter_var)
+            prefilter_var = prefilter_var,
+            compute_scores = return_gaussian_scores)
     
     if pipe.env_map_res:
         assert pc.env_map is not None
@@ -302,7 +305,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         # mask2 = (0 < xyz_inter[...,0]) & (xyz_inter[...,1] > 0) # & (xyz_inter[...,2] > -19)
         rendered_image = rendered_image + (1 - alpha) * bg_color_from_envmap # * mask2[None]
     
-    if pc.gaussian_dim == 4 and marginal_t is not None:
+    if pc.gaussian_dim == 4 and mask is not None:
         radii_all = radii.new_zeros(mask.shape)
         radii_all[mask] = radii
     else:
@@ -316,4 +319,5 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "radii": radii_all,
             "depth": depth,
             "alpha": alpha,
-            "flow": flow}
+            "flow": flow,
+            "gaussian_scores": gaussian_scores if return_gaussian_scores else None}

@@ -108,6 +108,12 @@ class OptimizationParams(ParamGroup):
         self.lambda_motion = 0.0
         self.lambda_depth = 0.0
         self.mobilegs_opacity_phi_lr = 1e-3
+        # Spatio-temporal pruning parameters
+        self.enable_spatio_temporal_pruning = False
+        self.spatio_temporal_pruning_ratio = 0.80
+        self.spatio_temporal_pruning_from_iter = -1
+        self.spatio_temporal_pruning_until_iter = -1
+        self.spatio_temporal_pruning_interval = -1
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

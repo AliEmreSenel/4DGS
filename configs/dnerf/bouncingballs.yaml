@@ -10,7 +10,7 @@ exhaust_test: True
 ModelParams:
   sh_degree: 3
   source_path: "data/dnerf/bouncingballs"
-  model_path: "output/dnerf/bouncingballs/"
+  model_path: "output/dnerf/bouncingballs_prune/"
   images: "images"
   resolution: 2
   white_background: False
@@ -58,3 +58,8 @@ OptimizationParams:
   lambda_rigid: 0.0
   lambda_motion: 0.0
   lambda_depth: 0.0
+  enable_spatio_temporal_pruning: True
+  spatio_temporal_pruning_ratio: 0.85
+  spatio_temporal_pruning_from_iter: 500
+  spatio_temporal_pruning_until_iter: 10_000
+  spatio_temporal_pruning_interval: 200
