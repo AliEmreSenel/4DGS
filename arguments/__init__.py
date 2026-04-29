@@ -99,13 +99,14 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
-        self.densify_grad_t_threshold = 0.0002 / 40
+        self.densify_grad_t_threshold = 0.000005
         self.densify_until_num_points = -1
         self.final_prune_from_iter = -1
         self.sh_increase_interval = 1000
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
+        self.lambda_depth = 0.0
         self.mobilegs_opacity_phi_lr = 1e-3
         super().__init__(parser, "Optimization Parameters")
 

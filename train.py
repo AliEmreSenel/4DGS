@@ -461,6 +461,16 @@ def setup_seed(seed, deterministic=False):
      torch.backends.cuda.matmul.allow_tf32 = True
      torch.backends.cudnn.allow_tf32 = True
 
+def flatten_cfg(cfg, out=None):
+    if out is None:
+        out = {}
+    for k, v in cfg.items():
+        if isinstance(v, DictConfig):
+            flatten_cfg(v, out)
+        else:
+            out[k] = v
+    return out
+
 if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
@@ -468,17 +478,16 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--config", type=str)
-    parser.add_argument('--debug_from', type=int, default=-1)
-    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--debug_from", type=int, default=-1)
+    parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--start_checkpoint", type=str, default = None)
-    
+    parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--gaussian_dim", type=int, default=3)
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
-    parser.add_argument('--num_pts', type=int, default=100_000)
-    parser.add_argument('--num_pts_ratio', type=float, default=1.0)
+    parser.add_argument("--num_pts", type=int, default=100_000)
+    parser.add_argument("--num_pts_ratio", type=float, default=1.0)
     parser.add_argument("--rot_4d", action="store_true")
     parser.add_argument("--force_sh_3d", action="store_true")
     parser.add_argument("--batch_size", type=int, default=1)
@@ -486,24 +495,28 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--exhaust_test", action="store_true")
-    
+
+    # First pass: only get --config
+    pre_args, _ = parser.parse_known_args(sys.argv[1:])
+
+    # Load config and use it as parser defaults
+    if pre_args.config is not None:
+        cfg = OmegaConf.load(pre_args.config)
+        cfg_defaults = flatten_cfg(cfg)
+
+        for k in cfg_defaults:
+            if not hasattr(pre_args, k):
+                raise ValueError(f"Unknown config key: {k}")
+
+        parser.set_defaults(**cfg_defaults)
+
+    # Second pass: real parse, CLI now overrides config
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
-        
-    cfg = OmegaConf.load(args.config)
-    def recursive_merge(key, host):
-        if isinstance(host[key], DictConfig):
-            for key1 in host[key].keys():
-                recursive_merge(key1, host[key])
-        else:
-            assert hasattr(args, key), key
-            setattr(args, key, host[key])
-    for k in cfg.keys():
-        recursive_merge(k, cfg)
-        
     if args.exhaust_test:
-        args.test_iterations = args.test_iterations + [i for i in range(0,op.iterations,500)]
-    
+        args.test_iterations = args.test_iterations + [
+            i for i in range(0, args.iterations, 500)
+        ]
     setup_seed(args.seed, deterministic=args.deterministic)
     
     print("Optimizing " + args.model_path)
@@ -512,8 +525,23 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
-             args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.isotropic_gaussians)
 
-    # All done
+    training(
+        lp.extract(args),
+        op.extract(args),
+        pp.extract(args),
+        args.test_iterations,
+        args.save_iterations,
+        args.start_checkpoint,
+        args.debug_from,
+        args.gaussian_dim,
+        args.time_duration,
+        args.num_pts,
+        args.num_pts_ratio,
+        args.rot_4d,
+        args.force_sh_3d,
+        args.batch_size,
+        args.isotropic_gaussians,
+    )
+
     print("\nTraining complete.")
