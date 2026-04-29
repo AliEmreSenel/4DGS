@@ -34,7 +34,7 @@
   keywords: (),
   abstract: abstract,
   bibliography: bibliography("bibliography.bib"),
-  accepted: false,
+  accepted: true,
   id: none,
   appendix: appendix,
 )
@@ -47,11 +47,11 @@
 
 = Introduction
 
-The task of scene reconstruction from videos has been studied extensively in the last years, due to its far-reaching applications in computer vision. As a technique, Gaussian Splatting was originally developed in the late 90' [], but due to its computational demands, it only resurfaced more recently through the 3DGS Architecture. In this static setting, multiple images are used to train a machine learning model to "learn" a scene, obtaining a function that can be used to sample a pixel color from position and orientation of the camera in space. This is functionally similar to previous paradigms such as NERF [], which trained MLPs to reproduce a scene. Gaussian Splatting follows a different paradigm, in that the latent structure of a model is composed of numerous Gaussian Distributions placed 3D space. The Gaussians are projected to a 2D plane and rasterized to obtain a camera representation of the colors corresponding to each pixels of a reconstructed image. Learning is comparing the reconstructed image with the baseline truth from the dataset, but inference allows the syntesis of new camera angles with impressive accuracy. In the formulation, Gaussian Splats serve as building blocks for complex scenes, and are being parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing for diagonal deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of the gaussian, encoded from a fixed number of Spherical Harmonic (SH) coefficients, which can approximate uniformly any color distribution. Compared to having a constant color, SH coefficients allow smooth coloring over the surface, where expressiveness depends on the number of coefficients. Both the use of Covariance+Rotation and SH reduce the number of gaussians needed, since they allow for greater range of behavior, at the cost of a higher number of variables.
+Gaussian Splatting has been used extensively in the task of scene reconstruction from videos, due to its far-reaching applications in computer vision. In this static setting, multiple images are used to train a machine learning model to "learn" a scene, obtaining a function that can produce novel camera views, conditioned on time, position and orientation space. \ 
+
+Gaussian Splatting follows a different paradigm, in that the latent structure of a model is composed of numerous Gaussian Distributions placed 3D space. The Gaussians are projected to a 2D plane and rasterized to obtain a camera representation of the colors corresponding to each pixels of a reconstructed image. Learning is comparing the reconstructed image with the baseline truth from the dataset, but inference allows the syntesis of new camera angles with impressive accuracy. In the formulation, Gaussian Splats serve as building blocks for complex scenes, and are being parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing for diagonal deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of the gaussian, encoded from a fixed number of Spherical Harmonic (SH) coefficients, which can approximate uniformly any color distribution. Compared to having a constant color, SH coefficients allow smooth coloring over the surface, where expressiveness depends on the number of coefficients. Both the use of Covariance+Rotation and SH reduce the number of gaussians needed, since they allow for greater range of behavior, at the cost of a higher number of variables.
 
 During inference, camera position is fixed, and a pixel color is obtained by integrating the scene through the view-pixel ray: each gaussian color contribution is added, while accounting for opacity, distance, and leftover un-occluded light, crossing the gaussians in the correct order.
-
-[3DGS Splatting Image]
 
 Gaussian Splatting allows for novel view synthesis, while offering major improvements in terms of speed and accuracy, compared to previous methods such as NERF, _reaching ..._ []. In moving the task from static scenes to videos, that is, building a model that can learn an evolving scene and reproduce it from novel angles, two major directions have been identified: Wu et al [] used a static 3DGS model with an added decoder-encoder architecture for representing time bias through a latent self-consistent embedding; while 2024, Yang et al [] developed native 4D Gaussian Splatting, which learns the distribution directly using native 4D Gaussian primitives, as opposed to 3D Gaussians with an added time embedding. In this paper, all mentions of 4D Gussian Splatting refer to the native representation.
 
@@ -79,9 +79,9 @@ $
 
 == Projection and Rendering
 
-From a set of 4DGS-Native gaussian, images may be reproduced from known and unknown angles. Mathematically, the procedure is conducted by first conditioning the gaussians distributions in time, which produces a 3D normal distribution. This "colored cloud" is mapped to a 2D camera plane using a world-to-camera projection matrix. During training, the operation enables the calculation of loss, since the reprojected image can be directly compared to one of the reference images. Generalization loss can also be calculated, evaluating loss between pictures that the model has not seen, and reconstructed images. The image reconstruction is obtained traditionally by first fixing camera position and orientation, and evaluating per-pixel color as a function of all the visible gaussians, which contribute to the color profile. More precisely, each pixel induces a ray that marches outwards, intersecting all gaussians in the way between the focal point of the camera end the background, passing through the pixel point. The color of the pixel is obtained through the integration of each color contribution per-gaussian. The formula for the final color is traditionally sort-dependence, but we also investigate sort-free rendering, as it has been shown to greatly reduce the render bottleneck in related work, such as @du2026_mobilegs.
+From a set of 4DGS-Native gaussian, images may be reproduced from known and unknown angles. Mathematically, the procedure is conducted by first conditioning the gaussians distributions in time, which produces a 3D normal distribution. This "colored cloud" is mapped to a 2D camera plane using a world-to-camera projection matrix. During training, the operation enables the calculation of loss, since the reprojected image can be directly compared to one of the reference images. Generalization loss can also be calculated, evaluating loss between pictures that the model has not seen, and reconstructed images. The image reconstruction is obtained traditionally by first fixing camera position and orientation, and evaluating per-pixel color as a function of all the visible gaussians, which contribute to the color profile. More precisely, each pixel induces a ray that marches outwards, intersecting all gaussians in the way between the focal point of the camera end the background, passing through the pixel point. The color of the pixel is obtained through the integration of each color contribution per-gaussian. The formula for the final color is traditionally sort-dependent, but we also investigate sort-free rendering, as it has been shown to greatly reduce the render bottleneck in related work, such as @du2026_mobilegs.
 
-Sort-based rendering has been the traditional technique to compute color: at a high level, it consists of sorting the relevant gaussians for evaluating pixel color, processing their overall opacity one at a time to compute the "leftover" light term (Transmittance) $T_i (p, t)$, which modulates the color contribution $c_i (v,t)$ for each successive gaussian. All leftover light $T_(N+1)$ is simply attributed to the background color $c_("bg")$. It is important to stress that in the most general formulation, color is view-direction dependent, as well as time dependent. Moreover, the formula offers limited parallelization, containing a sorting operation, which induces a bottleneck.
+*Sort-based rendering* has been the traditional technique to compute color: at a high level, it consists of sorting the relevant gaussians for evaluating pixel color, processing their overall opacity one at a time to compute the "leftover" light term (Transmittance) $T_i (p, t)$, which modulates the color contribution $c_i (v,t)$ for each successive gaussian. All leftover light $T_(N+1)$ is simply attributed to the background color $c_("bg")$. It is important to stress that in the most general formulation, color is view-direction dependent, as well as time dependent. Moreover, the formula offers limited parallelization, containing a sorting operation, which induces a bottleneck.
 
 $
   cases(
@@ -95,7 +95,7 @@ $
   &+ T_(N+1)(p, t) c_("bg")
 $
 
-First proposed in @Hou2024SortFreeGS, Sort-Free Rendering removes the bottleneck by computing color directly through a direct sum, where each color contribution is weighed through weights that are computed by multiple small Multilayer Perceptrons (MLP). In a sense, the presence of MLP "compresses" information from the gaussians, resulting in both smaller storage requirements and a faster inference time. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. In our work, we picked @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extend the architecture trivially by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, with computing pixel color and gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
+*Sort-Free Rendering*, first proposed in @Hou2024SortFreeGS, removes the rendering bottleneck by computing color directly through a direct sum, where each color contribution is weighed through weights that are computed by multiple small Multilayer Perceptrons (MLP). In a sense, the presence of MLP "compresses" information from the gaussians, resulting in both smaller storage requirements and a faster inference time. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. In our work, we picked @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, with computing pixel color and gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
 
 $
   C_"pix" = (1 - T)
@@ -137,9 +137,13 @@ Other optimizations have also been developed for the rendering (inference) opera
 
 == Training Procedure
 
-Standard backpropagation is used to learn the best parameters for scene fidelity, while loss can be measured using common image similarity metrics. Multiple different Losses can be used, to accommodate the 
+Standard Backpropagation is used in the model to train the best parameters for scene fidelity, while loss can be measured using common image similarity metrics. Depending on the architectural components, different losses can be used at the same time, with different weighing levels to obtain a 
+
+[Reconstruction Error]
 
 [SSIM metrics]
+
+[LSPIS]
 
 [Image Reconstruction L1 or L2 loss]
 
@@ -149,13 +153,15 @@ Mention Custom CUDA kernel, difficulty in compatibility (relevant to later sayin
 
 [In-training Pruning]
 
+[Densification]
+
 == Compression
 
-Pruning
+[Pruning]
 
-Render-time MLPs
+[Render-time MLPs]
 
-Codebook compression, K-means and GPCC
+[Codebook compression, K-means and GPCC]
 
 == Points of Improvement
 
@@ -173,11 +179,41 @@ We compare reconstruction loss, training time, storage size, and render speed, t
 
 = Model Parametrization
 
-[Loss Reweighting]
+We combine most papers contribution into a single architecture, which can be studied through ablations. We start from the 4DGS-Native Architecture, adding features from available implementations, and re-implementing the missing structures from the others. 
+
+*Initialization* of gaussian position and colors relies on a pretrained pretrained model @luo2025_instant4d, massively reducing training time and produces better results through a grounded information. // TODO exact model name
+
+*Isotropy* involves choosing between Isotropic gaussians @luo2025_instant4d and Anisotropic Gaussians, @yang2024_4dgs, corresponding to a tradeoff between faster training, stemming from a reduced number of variables, and more expressive Gaussians. 
+
+*Rotation* encoding relies on two quaternions per-gaussian to learn and encode rotation. Quaternions are preferred to rotation matrices because of their simpler implementation smaller number of parameters, which avoids and reduces the number of variables
+
+*Spherical Harmonics* are trained with a predefined precision. Following the 4DGS-Native implementation, higher order harmonics are "unlocked" for learning over the training time.
+
+*Loss* depends on the active components of the architecture. Consequently, the only choice when using a combined model is the exact weighing of the different components. We use the 
+
+*Pruning* is treated as a penultimate step in training the models, in the models we have, at the end of the  Different, yet similar, strategies were proposed for pruning: Opacity Pruning @du2026_mobilegs, which discards transparent gaussians, Contribution pruning @du2026_mobilegs, dropping gaussians that affect the loss minimally, Grid Pruning @luo2025_instant4d. However, we focus only on Spatio-Temporal Contribution @yuan2025_4dgs1k, as it captures both aspects of prevalence in time and in space.
+
+*Densification* consists of the opposite operation to pruning, duplicating single Gaussians to provide more expressivity. In the models that we picked for reference, the step is generally discarded from the architecture, in order to reduce training time. However, we preserve it to guarantee.
+
+*Rendering* changes primarily whether Sort-Based @yang2024_4dgs or Sort-Free @du2026_mobilegs are used. We extend the latter with a time component, to also capture time-dependent behavior.
+
+*Distillation* can be used to effectively reduce the storage size of the SH coefficients, by training a MLP to effectively compress color through a teacher-student model.
+
+*Storage* reduction techniques consist of Neural Vector Quantization (NVQ), used in conjunction with MLP compression @du2026_mobilegs.
+
+The addition of each component may negate the contribution of another: eg. Isotropic Gaussians allow for faster training and smaller memory footprint, but reduce the model's capacity.
+
+== Training
+
+Following 4DGS-Native, we use ADAM and batch training. 
+
+== Loss
+
+As all our reference papers except USPLAT rely on the _L1_ and _DSSIM_ metrics to train, with a $0.80 - 0.20$ weighing, we start from this prior and introduce the USPLAT loss components.
 
 = Ablations
 
-We use ablations extensively to evaluate the performance of the model, since each architecture layer introduces errors which may affect the other components negatively. Consequently, the architecture is developed to be modular and exchangeable, for better awareness of each part. We provide a diagram of the combined architecture, and perform repeated ablation experiments, comparing the results to the different techniques.
+We train variations of the same architecture on the same example, with fixed computational resources. We record time for convergence, final reconstruction loss, Number of Gaussians, Memory Footprint, Compression, and inference time. The complete table of experiments is provided in the appendix. // TODO add table of results
 
 = Discussion
 

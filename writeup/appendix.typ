@@ -1,15 +1,5 @@
 #let appendix = [
 
-  - *Important Metrics*: measure performance in each architecture. This cannot be plain loss, since it varies between architectures.
-    - Color Reconstruction Error
-    - Memory Footprint
-    - Training Time
-    - Other SOTA?
-
-  There is a tradeoff between _reconstruction accuracy_ and _speed of training_ with _memory footprint_. If we don't care about training time, we can distill more to have renders that can run on phones.
-
-  Fewer parameters reduces train time and memory, at the cost of accuracy.
-
   #colbreak()
 
   = List of Architecture Choices
