@@ -73,6 +73,7 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.debug = False
         self.sort_free_render = False
+        self.random_dropout_prob = 0.0
         self.env_map_res = 0
         self.env_optimize_until = 1000000000
         self.env_optimize_from = 0

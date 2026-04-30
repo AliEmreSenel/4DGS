@@ -17,7 +17,7 @@ from .diff_gaussian_rasterization import GaussianRasterizer as SortedGaussianRas
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, return_gaussian_scores = False):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, return_gaussian_scores = False, apply_random_dropout = False):
     """
     Render the scene. 
     
@@ -186,10 +186,24 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     
     # The CUDA rasterizer expects a dense per-Gaussian flow buffer.
     flow_2d = torch.zeros_like(pc.get_xyz[:, :2])
+
+    dropout_prob = float(getattr(pipe, "random_dropout_prob", 0.0))
+    dropout_mask = None
+    if apply_random_dropout and dropout_prob > 0.0 and not return_gaussian_scores:
+        dropout_prob = min(dropout_prob, 1.0)
+        dropout_mask = torch.rand(
+            (means3D.shape[0],), device=means3D.device, dtype=torch.float32
+        ) > dropout_prob
+        if not dropout_mask.any():
+            dropout_mask[torch.randint(dropout_mask.shape[0], (1,), device=dropout_mask.device)] = True
     
+    mask = None
     # Prefilter
     if pc.gaussian_dim == 4 and marginal_t is not None and not return_gaussian_scores:
-        mask = marginal_t[:,0] > 0.05
+        mask = marginal_t[:, 0] > 0.05
+    if dropout_mask is not None:
+        mask = dropout_mask if mask is None else (mask & dropout_mask)
+    if mask is not None:
         if means2D is not None:
             means2D = means2D[mask]
         if means3D is not None:
@@ -305,7 +319,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         # mask2 = (0 < xyz_inter[...,0]) & (xyz_inter[...,1] > 0) # & (xyz_inter[...,2] > -19)
         rendered_image = rendered_image + (1 - alpha) * bg_color_from_envmap # * mask2[None]
     
-    if pc.gaussian_dim == 4 and mask is not None:
+    if mask is not None:
         radii_all = radii.new_zeros(mask.shape)
         radii_all[mask] = radii
     else:

@@ -201,7 +201,13 @@ def training(
                 gt_image = gt_image.to(background.device, non_blocking=True)
                 viewpoint_cam = viewpoint_cam.cuda(non_blocking=True, copy=False)
 
-                render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+                render_pkg = render(
+                    viewpoint_cam,
+                    gaussians,
+                    pipe,
+                    background,
+                    apply_random_dropout=True,
+                )
                 image, viewspace_point_tensor, visibility_filter, radii = (
                     render_pkg["render"],
                     render_pkg["viewspace_points"],
