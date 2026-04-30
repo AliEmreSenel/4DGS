@@ -1,18 +1,18 @@
 gaussian_dim: 4
 time_duration: [0.0, 1.0]
-num_pts: 300_000
+num_pts: 100_000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: False
-batch_size: 8
+batch_size: 2
 exhaust_test: True
 
 ModelParams:
   sh_degree: 3
-  source_path: "data/dnerf/mutant"
-  model_path: "output/dnerf/mutant_prune"
+  source_path: "data/dnerf/nerfcap_dnerf_test"
+  model_path: "output/dnerf/room"
   images: "images"
-  resolution: 2
+  resolution: 3
   white_background: False
   data_device: "cuda"
   eval: True

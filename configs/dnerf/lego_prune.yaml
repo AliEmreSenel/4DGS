@@ -32,12 +32,12 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 30_000
+  iterations: 10_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 30_000
+  position_lr_max_steps: 10_000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -48,7 +48,7 @@ OptimizationParams:
   densification_interval: 100
   opacity_reset_interval: 3000
   densify_from_iter: 500
-  densify_until_iter: 20_000
+  densify_until_iter: 7_500
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005
   densify_until_num_points: -1
@@ -59,7 +59,7 @@ OptimizationParams:
   lambda_motion: 0.0
   lambda_depth: 0.0
   enable_spatio_temporal_pruning: True
-  spatio_temporal_pruning_ratio: 0.50
-  spatio_temporal_pruning_from_iter: 500
-  spatio_temporal_pruning_until_iter: 20_000
-  spatio_temporal_pruning_interval: 500
+  spatio_temporal_pruning_ratio: 0.10
+  spatio_temporal_pruning_from_iter: 400
+  spatio_temporal_pruning_until_iter: 7_500
+  spatio_temporal_pruning_interval: 100
