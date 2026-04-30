@@ -843,21 +843,36 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
+                old_param = group["params"][0]
+                new_size = old_param.shape[0] + extension_tensor.shape[0]
 
-                stored_state["exp_avg"] = torch.cat(
-                    (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
+                # Pre-allocate exp_avg and copy to avoid temporary zeros_like allocation
+                new_exp_avg = torch.zeros(
+                    (new_size,) + stored_state["exp_avg"].shape[1:],
+                    dtype=stored_state["exp_avg"].dtype,
+                    device=stored_state["exp_avg"].device
                 )
-                stored_state["exp_avg_sq"] = torch.cat(
-                    (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
-                    dim=0,
-                )
+                new_exp_avg[:old_param.shape[0]].copy_(stored_state["exp_avg"])
+                del stored_state["exp_avg"]
+                stored_state["exp_avg"] = new_exp_avg
 
+                # Pre-allocate exp_avg_sq and copy
+                new_exp_avg_sq = torch.zeros(
+                    (new_size,) + stored_state["exp_avg_sq"].shape[1:],
+                    dtype=stored_state["exp_avg_sq"].dtype,
+                    device=stored_state["exp_avg_sq"].device
+                )
+                new_exp_avg_sq[:old_param.shape[0]].copy_(stored_state["exp_avg_sq"])
+                del stored_state["exp_avg_sq"]
+                stored_state["exp_avg_sq"] = new_exp_avg_sq
+
+                # Update parameter with concatenation
                 del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
+                new_param = torch.cat(
+                    (old_param, extension_tensor), dim=0
+                ).requires_grad_(True)
+                
+                group["params"][0] = nn.Parameter(new_param)
                 self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
@@ -994,6 +1009,9 @@ class GaussianModel:
                 else self._rotation_r[selected_pts_mask].repeat(N, 1)
             )
 
+        self.prune_points(selected_pts_mask)
+        torch.cuda.empty_cache()
+
         self.densification_postfix(
             new_xyz,
             new_features_dc,
@@ -1005,14 +1023,6 @@ class GaussianModel:
             new_scaling_t,
             new_rotation_r,
         )
-
-        prune_filter = torch.cat(
-            (
-                selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
-            )
-        )
-        self.prune_points(prune_filter)
 
     def densify_and_clone(
         self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold
