@@ -810,7 +810,7 @@ class GaussianModel:
 
     @torch.no_grad()
     def prune_with_spatio_temporal_score(
-        self, scores, pruning_ratio, reset_optimizer_state=True
+        self, scores, pruning_ratio, reset_optimizer_state=True, probabilistic=False
     ):
         if scores.numel() == 0:
             return
@@ -820,12 +820,33 @@ class GaussianModel:
         if num_to_prune <= 0:
             return
 
-        num_to_keep = max(num_points - num_to_prune, 1)
-        keep_scores, keep_indices = torch.topk(scores, k=num_to_keep, largest=True)
-        del keep_scores
-        prune_mask = torch.ones(num_points, dtype=torch.bool, device=scores.device)
-        prune_mask[keep_indices] = False
-        self.prune_points(prune_mask)
+        # Ensure we always keep at least one point
+        num_to_prune = min(num_to_prune, max(num_points - 1, 0))
+
+        if not probabilistic:
+            num_to_keep = max(num_points - num_to_prune, 1)
+            keep_scores, keep_indices = torch.topk(
+                scores, k=num_to_keep, largest=True
+            )
+            del keep_scores
+            prune_mask = torch.ones(num_points, dtype=torch.bool, device=scores.device)
+            prune_mask[keep_indices] = False
+            self.prune_points(prune_mask)
+        else:
+            # Lower score -> higher chance to be pruned. Convert scores to a
+            # sampling probability by inverting and normalizing.
+            max_s = scores.max()
+            raw = (max_s - scores).clamp_min(0.0)
+            if raw.sum().item() == 0:
+                # All scores equal: fallback to uniform random pruning
+                prune_indices = torch.randperm(num_points, device=scores.device)[:num_to_prune]
+            else:
+                probs = raw / (raw.sum() + 1e-12)
+                prune_indices = torch.multinomial(probs, num_samples=num_to_prune, replacement=False)
+
+            prune_mask = torch.zeros(num_points, dtype=torch.bool, device=scores.device)
+            prune_mask[prune_indices] = True
+            self.prune_points(prune_mask)
 
         if reset_optimizer_state and self.optimizer is not None:
             for group in self.optimizer.param_groups:

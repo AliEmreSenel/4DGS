@@ -112,6 +112,7 @@ class OptimizationParams(ParamGroup):
         # Spatio-temporal pruning parameters
         self.enable_spatio_temporal_pruning = False
         self.spatio_temporal_pruning_ratio = 0.80
+        self.spatio_temporal_pruning_random = False
         self.spatio_temporal_pruning_from_iter = -1
         self.spatio_temporal_pruning_until_iter = -1
         self.spatio_temporal_pruning_interval = -1

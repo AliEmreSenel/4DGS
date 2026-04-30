@@ -514,6 +514,7 @@ def training(
                         spatio_temporal_scores,
                         opt.spatio_temporal_pruning_ratio,
                         reset_optimizer_state=True,
+                        probabilistic=getattr(opt, "spatio_temporal_pruning_random", False),
                     )
 
 
