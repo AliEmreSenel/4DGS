@@ -25,9 +25,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from usplat4d.uncertainty import mahalanobis_sq
-from usplat4d.dqb import apply_dqb_to_batch
-from usplat_losses import key_node_loss, non_key_node_loss
+from uncertainty import mahalanobis_sq
+from dqb import apply_dqb_to_batch
 
 
 # --------------------------------------------------------------------------- #

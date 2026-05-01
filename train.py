@@ -28,6 +28,9 @@ import numpy as np
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 from torch.utils.data import DataLoader
+from uncertainty import compute_uncertainty_all_frames
+from graph import build_graph, USplat4DGraph
+from usplat_losses import key_node_loss, non_key_node_loss
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -42,24 +45,10 @@ def save_gaussian_args(model_path, gaussian_kwargs):
         f.write(str(Namespace(**gaussian_kwargs)))
 
 
-def training(
-    dataset,
-    opt,
-    pipe,
-    testing_iterations,
-    saving_iterations,
-    checkpoint,
-    debug_from,
-    gaussian_dim,
-    time_duration,
-    num_pts,
-    num_pts_ratio,
-    rot_4d,
-    force_sh_3d,
-    batch_size,
-    isotropic_gaussians,
-):
-
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
+             gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, isotropic_gaussians,
+             use_usplat=False, usplat_start_iter=10000):
+    
     if dataset.frame_ratio > 1:
         time_duration = [
             time_duration[0] / dataset.frame_ratio,
@@ -90,7 +79,12 @@ def training(
     save_gaussian_args(scene.model_path, gaussian_kwargs)
 
     gaussians.training_setup(opt)
-
+    
+    # USplat4D setup
+    graph = None
+    p_pretrained = None
+    u_scalar = None
+    
     if checkpoint:
         model_params, first_iter = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -190,6 +184,7 @@ def training(
                 batch_point_grad = []
                 batch_visibility_filter = []
                 batch_radii = []
+
             batch_Ll1 = torch.tensor(0.0, device="cuda")
             batch_Lssim = torch.tensor(0.0, device="cuda")
             batch_loss = torch.tensor(0.0, device="cuda")
@@ -203,6 +198,9 @@ def training(
             Lopa_mask = torch.tensor(0.0, device="cuda")
             Lrigid = torch.tensor(0.0, device="cuda")
             Lmotion = torch.tensor(0.0, device="cuda")
+            
+            Lkey = torch.tensor(0.0, device=background.device)
+            Lnon_key = torch.tensor(0.0, device=background.device)
 
             for batch_idx in range(batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
@@ -257,7 +255,140 @@ def training(
                         loss = loss + opt.lambda_depth * Ldepth_i
                         batch_Ldepth += Ldepth_i.detach()
                 ########################
+                
+                # --- Build graph once at usplat_start_iter ---
+                if use_usplat and graph is None and iteration == usplat_start_iter:
+                    print(f"[USplat4D] Building graph at iteration {iteration}...")
+                    with torch.no_grad():
+                        u_scalar = compute_uncertainty_all_frames(
+                            gaussians=gaussians,
+                            train_cameras=training_dataset,
+                            pipe=pipe,
+                            background=background,
+                            device=background.device,
+                            eta_c=opt.usplat_eta_c,
+                            phi=opt.usplat_phi,
+                        )
+                        T_all = len(training_dataset)
+                        G = gaussians.get_xyz.shape[0]
+                        means_t_all = torch.zeros(G, T_all, 3, device=background.device)
+                        for t_idx, (_, cam) in enumerate(training_dataset):
+                            cam = cam.cuda(non_blocking=True, copy=False)
+                            _, delta = gaussians.get_current_covariance_and_mean_offset(
+                                1.0, cam.timestamp
+                            )
+                            means_t_all[:, t_idx] = gaussians.get_xyz + delta
 
+                        graph = build_graph(
+                            means_t=means_t_all,
+                            u_scalar=u_scalar,
+                            key_ratio=0.02,
+                            spt_threshold=5,
+                            knn_k=8,
+                            device=background.device,
+                        )
+                        p_pretrained = gaussians.get_xyz.detach().clone()
+                        print(f"[USplat4D] Graph built: {graph.num_key} key nodes, "
+                            f"{graph.num_nonkey} non-key nodes")
+
+                # --- Compute USplat losses every iteration after graph is built ---
+                if use_usplat and graph is not None and iteration > usplat_start_iter:
+
+                    # Density control schedule
+                    total_usplat = opt.iterations - usplat_start_iter
+                    in_first_10 = iteration < usplat_start_iter + int(0.1 * total_usplat)
+                    in_last_20  = iteration > opt.iterations - int(0.2 * total_usplat)
+                    if in_first_10 or in_last_20:
+                        should_densify = False
+
+                    with torch.no_grad():
+                        _, delta = gaussians.get_current_covariance_and_mean_offset(
+                            1.0, viewpoint_cam.timestamp
+                        )
+                        means_current = gaussians.get_xyz + delta  # (G, 3)
+
+                    N_k = graph.num_key
+                    N_n = graph.num_nonkey
+
+                    # Current positions — shape (N, B, 3) with B=1
+                    pos_key_t = means_current[graph.key_idx].unsqueeze(1)      # (N_k, 1, 3)
+                    pos_nk_t  = means_current[graph.nonkey_idx].unsqueeze(1)   # (N_n, 1, 3)
+
+                    # Pretrained positions — same shape
+                    pos_key_pre = p_pretrained[graph.key_idx].unsqueeze(1)     # (N_k, 1, 3)
+                    pos_nk_pre  = p_pretrained[graph.nonkey_idx].unsqueeze(1)  # (N_n, 1, 3)
+
+                    # Canonical positions (no time dim)
+                    pos_o_key = p_pretrained[graph.key_idx]                    # (N_k, 3)
+                    pos_o_nk  = p_pretrained[graph.nonkey_idx]                 # (N_n, 3)
+
+                    # Identity quaternions for isotropic Gaussians
+                    quats_key = torch.zeros(N_k, 1, 4, device=background.device)
+                    quats_key[..., 0] = 1.0
+                    quats_nk  = torch.zeros(N_n, 1, 4, device=background.device)
+                    quats_nk[..., 0] = 1.0
+
+                    # SE(3) transforms: identity rotation + current position as translation
+                    def make_transforms(pos):
+                        # pos: (N, 1, 3) → transforms: (N, 1, 3, 4)
+                        N = pos.shape[0]
+                        T_mat = torch.zeros(N, 1, 3, 4, device=background.device)
+                        T_mat[:, :, 0, 0] = 1.0
+                        T_mat[:, :, 1, 1] = 1.0
+                        T_mat[:, :, 2, 2] = 1.0
+                        T_mat[:, :, :, 3] = pos[:, :, :]
+                        return T_mat
+
+                    transforms_key = make_transforms(pos_key_t)   # (N_k, 1, 3, 4)
+                    transforms_nk  = make_transforms(pos_nk_t)    # (N_n, 1, 3, 4)
+
+                    # Uncertainty — mean over time, shape (N, 1)
+                    u_key = u_scalar[graph.key_idx].mean(dim=1, keepdim=True)    # (N_k, 1)
+                    u_nk  = u_scalar[graph.nonkey_idx].mean(dim=1, keepdim=True) # (N_n, 1)
+
+                    # Camera rotation — shape (B, 3, 3) with B=1
+                    w2c = viewpoint_cam.world_view_transform        # (4, 4)
+                    R_wc_t = w2c[:3, :3].T.unsqueeze(0)            # (1, 3, 3)
+
+                    # Key rotations and translations for DQB — shape (N_k, B, 3, 3) and (N_k, B, 3)
+                    R_key_t = transforms_key[:, :, :, :3]          # (N_k, 1, 3, 3)
+                    t_key_t = transforms_key[:, :, :, 3]           # (N_k, 1, 3)
+
+                    # --- Key node loss ---
+                    Lkey = key_node_loss(
+                        pos_key_t=pos_key_t,
+                        quats_key_t=quats_key,
+                        transforms_key_t=transforms_key,
+                        pos_key_pretrained=pos_key_pre,
+                        u_key=u_key,
+                        R_wc_t=R_wc_t,
+                        pos_o=pos_o_key,
+                        key_nbrs_local=graph.key_nbrs,
+                        key_nbr_weights=graph.key_nbr_weights,
+                    )
+
+                    # --- Non-key node loss ---
+                    Lnon_key = non_key_node_loss(
+                        pos_nk_t=pos_nk_t,
+                        quats_nk_t=quats_nk,
+                        transforms_nk_t=transforms_nk,
+                        pos_nk_pretrained=pos_nk_pre,
+                        u_nk=u_nk,
+                        R_wc_t=R_wc_t,
+                        pos_o_nk=pos_o_nk,
+                        R_key_t=R_key_t,
+                        t_key_t=t_key_t,
+                        pos_key_t=pos_key_t,
+                        quats_key_t=quats_key,
+                        transforms_key_t=transforms_key,
+                        pos_o_key=pos_o_key,
+                        nonkey_nbrs_local=graph.nonkey_nbrs,
+                        nonkey_nbr_weights=graph.nonkey_nbr_weights,
+                        nonkey_nbrs_global=graph.nonkey_nbrs,
+                    )
+
+                    loss = loss + opt.lambda_key * Lkey + opt.lambda_non_key * Lnon_key
+                
                 batch_Ll1 += Ll1_i.detach()
                 batch_Lssim += Lssim_i.detach()
                 batch_psnr += psnr(image, gt_image).mean().detach()
@@ -782,6 +913,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--exhaust_test", action="store_true")
+    parser.add_argument("--use_usplat", action="store_true")
+    parser.add_argument("--usplat_start_iter", type=int, default=10000)
 
     # First pass: only get --config
     pre_args, _ = parser.parse_known_args(sys.argv[1:])
@@ -798,6 +931,7 @@ if __name__ == "__main__":
         parser.set_defaults(**cfg_defaults)
 
     # Second pass: real parse, CLI now overrides config
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.exhaust_test:
@@ -813,22 +947,8 @@ if __name__ == "__main__":
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
 
-    training(
-        lp.extract(args),
-        op.extract(args),
-        pp.extract(args),
-        args.test_iterations,
-        args.save_iterations,
-        args.start_checkpoint,
-        args.debug_from,
-        args.gaussian_dim,
-        args.time_duration,
-        args.num_pts,
-        args.num_pts_ratio,
-        args.rot_4d,
-        args.force_sh_3d,
-        args.batch_size,
-        args.isotropic_gaussians,
-    )
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
+             args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.isotropic_gaussians,
+             args.use_usplat, args.usplat_start_iter)
 
     print("\nTraining complete.")
