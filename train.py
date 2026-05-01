@@ -28,9 +28,9 @@ import numpy as np
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 from torch.utils.data import DataLoader
-from uncertainty import compute_uncertainty_all_frames
-from graph import build_graph, USplat4DGraph
-from usplat_losses import key_node_loss, non_key_node_loss
+from utils.uncertainty import compute_uncertainty_all_frames
+from utils.graph import build_graph, USplat4DGraph
+from utils.usplat_losses import key_node_loss, non_key_node_loss
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -892,14 +892,10 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--config", type=str)
-    parser.add_argument("--debug_from", type=int, default=-1)
-    parser.add_argument("--detect_anomaly", action="store_true", default=False)
-    parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
-    )
-    parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[7_000, 30_000]
-    )
+    parser.add_argument('--debug_from', type=int, default=-1)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000, 10_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 10_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--gaussian_dim", type=int, default=3)
@@ -914,8 +910,7 @@ if __name__ == "__main__":
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--exhaust_test", action="store_true")
     parser.add_argument("--use_usplat", action="store_true")
-    parser.add_argument("--usplat_start_iter", type=int, default=10000)
-
+    
     # First pass: only get --config
     pre_args, _ = parser.parse_known_args(sys.argv[1:])
 
@@ -931,7 +926,6 @@ if __name__ == "__main__":
         parser.set_defaults(**cfg_defaults)
 
     # Second pass: real parse, CLI now overrides config
-    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     if args.exhaust_test:
@@ -946,6 +940,7 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+
 
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
              args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.isotropic_gaussians,

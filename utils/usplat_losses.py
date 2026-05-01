@@ -25,8 +25,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from uncertainty import mahalanobis_sq
-from dqb import apply_dqb_to_batch
+from utils.uncertainty import mahalanobis_sq
+from utils.dqb import apply_dqb_to_batch
 
 
 # --------------------------------------------------------------------------- #

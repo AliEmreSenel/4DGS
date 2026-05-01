@@ -22,7 +22,8 @@ class USplat4DGraph:
     @property
     def num_nonkey(self) -> int:
         return self.nonkey_idx.shape[0]
-    def build_graph(
+
+def build_graph(
     means_t: Tensor,      # (G, T, 3)   per-Gaussian per-frame world positions
     u_scalar: Tensor,     # (G, T)      per-Gaussian per-frame uncertainties
     key_ratio: float = 0.02,       # fraction of Gaussians treated as key nodes (~top 2%)
@@ -32,7 +33,7 @@ class USplat4DGraph:
     u_tau_percentile: float = 0.50, # uncertainty percentile below which a Gaussian is "low-u"
     device: Optional[torch.device] = None,
 ) -> USplat4DGraph:
-   
+
     if device is None:
         device = means_t.device
     G, T, _ = means_t.shape
@@ -184,10 +185,10 @@ class USplat4DGraph:
         end = min(start + CHUNK, N_n)
         # diff: (chunk, N_k, T, 3)
         d = (nk_means_all[start:end, None, :, :]       # (chunk, 1, T, 3)
-             - key_means_all[None, :, :, :])            # (1, N_k, T, 3)
+            - key_means_all[None, :, :, :])            # (1, N_k, T, 3)
         d_sq = (d ** 2).sum(dim=-1)                    # (chunk, N_k, T)
         u_s = (nk_u_all[start:end, None, :]            # (chunk, 1, T)
-               + key_u_all[None, :, :] + 1e-8)         # (1, N_k, T)
+            + key_u_all[None, :, :] + 1e-8)         # (1, N_k, T)
         agg_dist[start:end] = (d_sq / u_s).sum(dim=-1) # (chunk, N_k)
 
     nonkey_key_local = agg_dist.argmin(dim=-1)   # (N_n,)  index into key_idx
