@@ -147,7 +147,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8, num_pts_ratio=1.0):
+def readColmapSceneInfo(path, images, eval, llffhold=8, num_pts=100_000, num_pts_ratio=1.0):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -352,6 +352,31 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
             rgb = rgb[time_mask]
             normals = normals[time_mask]
             times = times[time_mask]
+        pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=times)
+    elif pcd.points.shape[0] < num_pts:
+        # Add random points to reach num_pts
+        num_extra = num_pts - pcd.points.shape[0]
+        xyz = pcd.points
+        rgb = pcd.colors
+        normals = pcd.normals
+        times = pcd.time
+        
+        bound_min, bound_max = xyz.min(0), xyz.max(0)
+        max_rand_xyz = bound_max + np.array([0.5, 2.0, 0.5])
+        min_rand_xyz = bound_min - np.array([0.5, 0.5, 0.5])
+        
+        xyz_extra = np.random.random((num_extra, 3)) * (max_rand_xyz - min_rand_xyz) + min_rand_xyz
+        rgb_extra = SH2RGB(np.random.random((num_extra, 3)) / 255.0)
+        normals_extra = np.zeros((num_extra, 3))
+        
+        xyz = np.concatenate([xyz, xyz_extra], axis=0)
+        rgb = np.concatenate([rgb, rgb_extra], axis=0)
+        normals = np.concatenate([normals, normals_extra], axis=0)
+        
+        if times is not None:
+            times_extra = torch.zeros((num_extra, 1)) + (time_duration[0] + time_duration[1]) / 2
+            times = np.concatenate([times, times_extra], axis=0)
+        
         pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=times)
         
     if num_extra_pts > 0:
