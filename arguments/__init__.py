@@ -103,6 +103,7 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_t_threshold = 0.000005
         self.densify_until_num_points = -1
         self.final_prune_from_iter = -1
+        self.final_prune_ratio = 0.0
         self.sh_increase_interval = 1000
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0

@@ -142,6 +142,14 @@ def training(
         if opt.spatio_temporal_pruning_interval > 0
         else opt.densification_interval
     )
+    final_prune_ratio = float(getattr(opt, "final_prune_ratio", 0.0))
+    if final_prune_ratio > 1.0:
+        final_prune_ratio = final_prune_ratio / 100.0
+    final_prune_ratio = max(0.0, min(final_prune_ratio, 1.0))
+
+    if opt.final_prune_from_iter >= 0 and final_prune_ratio > 0.0 and gaussian_dim != 4:
+        raise ValueError("Final pruning is ST-pruning and requires gaussian_dim == 4")
+
     num_workers = 12 if dataset.dataloader else 0
     dataloader_kwargs = {
         "batch_size": batch_size,
@@ -491,8 +499,15 @@ def training(
                         env_map_optimizer.step()
                         env_map_optimizer.zero_grad(set_to_none=True)
 
+                should_final_st_prune = (
+                    opt.final_prune_from_iter >= 0
+                    and final_prune_ratio > 0.0
+                    and iteration == opt.final_prune_from_iter
+                )
+
                 if (
                     opt.enable_spatio_temporal_pruning
+                    and not should_final_st_prune
                     and iteration >= spatio_temporal_pruning_from_iter
                     and iteration <= spatio_temporal_pruning_until_iter
                     and (iteration - spatio_temporal_pruning_from_iter)
@@ -514,8 +529,32 @@ def training(
                         spatio_temporal_scores,
                         opt.spatio_temporal_pruning_ratio,
                         reset_optimizer_state=True,
-                        probabilistic=getattr(opt, "spatio_temporal_pruning_random", False),
+                        probabilistic=getattr(
+                            opt, "spatio_temporal_pruning_random", False
+                        ),
                     )
+
+                if should_final_st_prune:
+                    print(
+                        f"\n[ITER {iteration}] Computing final spatio-temporal pruning scores"
+                    )
+                    final_spatio_temporal_scores = (
+                        gaussians.compute_spatio_temporal_variation_score(
+                            scene, pipe, background, render
+                        )
+                    )
+                    print(
+                        f"[ITER {iteration}] Final ST-pruning Gaussians with ratio {final_prune_ratio}"
+                    )
+                    gaussians.prune_with_spatio_temporal_score(
+                        final_spatio_temporal_scores,
+                        final_prune_ratio,
+                        reset_optimizer_state=True,
+                        probabilistic=getattr(
+                            opt, "spatio_temporal_pruning_random", False
+                        ),
+                    )
+                    scene.save(iteration)
 
 
 def prepare_output_and_logger(args):

@@ -1,6 +1,6 @@
 gaussian_dim: 4
 time_duration: [0.0, 1.0]
-num_pts: 100_000
+num_pts: 300_000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: False
@@ -23,6 +23,7 @@ ModelParams:
   dataloader: False
 
 PipelineParams:
+  random_dropout_prob: 0
   convert_SHs_python: False
   compute_cov3D_python: False
   debug: False
@@ -44,22 +45,24 @@ OptimizationParams:
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
-  thresh_opa_prune: 0.005
+  thresh_opa_prune: 0.01
   densification_interval: 100
   opacity_reset_interval: 3000
   densify_from_iter: 500
-  densify_until_iter: 7_500
+  densify_until_iter: 4_000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005
   densify_until_num_points: -1
-  final_prune_from_iter: -1
   sh_increase_interval: 1000
-  lambda_opa_mask: 0.0
-  lambda_rigid: 0.0
-  lambda_motion: 0.0
+  lambda_opa_mask: 0.1
+  lambda_rigid: 0.1
+  lambda_motion: 0.1
   lambda_depth: 0.0
   enable_spatio_temporal_pruning: True
-  spatio_temporal_pruning_ratio: 0.10
-  spatio_temporal_pruning_from_iter: 400
-  spatio_temporal_pruning_until_iter: 7_500
-  spatio_temporal_pruning_interval: 100
+  spatio_temporal_pruning_ratio: 0.3
+  spatio_temporal_pruning_random: True
+  spatio_temporal_pruning_from_iter: 500
+  spatio_temporal_pruning_until_iter: 4_000
+  spatio_temporal_pruning_interval: 500
+  final_prune_from_iter: 8000
+  final_prune_ratio: 0.95

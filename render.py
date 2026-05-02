@@ -2,92 +2,18 @@
 import argparse
 import math
 import os
-from pathlib import Path
-import queue
 import sys
-import threading
-from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
 import torch
 
 
-@dataclass
-class InFlightFrame:
-    idx: int
-    t: float
-    ready_event: torch.cuda.Event
-    cpu_image_u8: torch.Tensor
-    # Keep GPU tensors/camera alive until the event signals completion.
-    keepalive: tuple[Any, ...]
-
-
-class AsyncFrameWriter:
-    def __init__(self, video_path: Path, fps: int, frames_dir: Path, save_png: bool, max_queue: int, total_frames: int):
-        self.frames_dir = frames_dir
-        self.save_png = save_png
-        self.total_frames = total_frames
-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, max_queue))
-        self._exception: Exception | None = None
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(video_path, fps),
-            daemon=True,
-        )
-        self._thread.start()
-
-    def _run(self, video_path: Path, fps: int):
-        writer = None
-        try:
-            writer = imageio.get_writer(video_path, fps=fps, codec="libx264", quality=8)
-            while True:
-                item = self._queue.get()
-                if item is None:
-                    break
-                idx, t, image = item
-                if self.save_png:
-                    frame_path = self.frames_dir / f"{idx:04d}.png"
-                    imageio.imwrite(frame_path, image)
-                writer.append_data(image)
-                if (idx + 1) % 25 == 0 or idx == 0 or (idx + 1) == self.total_frames:
-                    print(f"[{idx+1}/{self.total_frames}] queued frame written t={t:.4f}")
-        except Exception as e:
-            self._exception = e
-        finally:
-            if writer is not None:
-                writer.close()
-
-    def submit(self, idx: int, t: float, image: np.ndarray):
-        while True:
-            if self._exception is not None:
-                raise RuntimeError("Asynchronous frame writer failed") from self._exception
-            try:
-                self._queue.put((idx, t, image), timeout=0.2)
-                return
-            except queue.Full:
-                continue
-
-    def close(self):
-        while True:
-            if self._exception is not None:
-                break
-            try:
-                self._queue.put(None, timeout=0.2)
-                break
-            except queue.Full:
-                continue
-        self._thread.join()
-        if self._exception is not None:
-            raise RuntimeError("Asynchronous frame writer failed") from self._exception
-
-
 def load_saved_namespace(cfg_path: Path):
     text = cfg_path.read_text().strip()
     if not text:
         raise ValueError(f"Empty cfg_args file: {cfg_path}")
-
     safe_globals = {"__builtins__": {}}
     safe_locals = {
         "Namespace": argparse.Namespace,
@@ -95,11 +21,7 @@ def load_saved_namespace(cfg_path: Path):
         "False": False,
         "None": None,
     }
-    try:
-        obj = eval(text, safe_globals, safe_locals)
-    except Exception as e:
-        raise ValueError(f"Could not parse cfg_args from {cfg_path}: {e}") from e
-
+    obj = eval(text, safe_globals, safe_locals)
     if isinstance(obj, argparse.Namespace):
         return obj
     if isinstance(obj, dict):
@@ -142,32 +64,6 @@ def find_checkpoint(model_path: Path, which: str | None):
     if numeric:
         return max(numeric)[1]
     raise FileNotFoundError(f"No checkpoint found in {model_path}")
-
-
-def look_at_colmap(eye, target, world_up=np.array([0.0, 0.0, 1.0], dtype=np.float32)):
-    eye = np.asarray(eye, dtype=np.float32)
-    target = np.asarray(target, dtype=np.float32)
-    forward = target - eye
-    forward = forward / (np.linalg.norm(forward) + 1e-8)
-
-    right = np.cross(forward, world_up)
-    if np.linalg.norm(right) < 1e-6:
-        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        right = np.cross(forward, world_up)
-    right = right / (np.linalg.norm(right) + 1e-8)
-    down = np.cross(forward, right)
-    down = down / (np.linalg.norm(down) + 1e-8)
-
-    c2w = np.eye(4, dtype=np.float32)
-    c2w[:3, 0] = right
-    c2w[:3, 1] = down
-    c2w[:3, 2] = forward
-    c2w[:3, 3] = eye
-
-    w2c = np.linalg.inv(c2w)
-    R = w2c[:3, :3].T
-    T = w2c[:3, 3]
-    return R, T
 
 
 def infer_checkpoint_layout(model_params):
@@ -232,59 +128,298 @@ def infer_checkpoint_layout(model_params):
     return info
 
 
+def normalize(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    if n < 1e-8:
+        return v.copy()
+    return v / n
+
+
+def camera_center_from_RT(R: np.ndarray, T: np.ndarray) -> np.ndarray:
+    return -(R @ T)
+
+
+def camera_forward_from_R(R: np.ndarray) -> np.ndarray:
+    return normalize(np.asarray(R[:, 2], dtype=np.float32))
+
+
+def camera_from_eye_forward(
+    eye, forward, world_up=np.array([0.0, 0.0, 1.0], dtype=np.float32)
+):
+    eye = np.asarray(eye, dtype=np.float32)
+    forward = normalize(np.asarray(forward, dtype=np.float32))
+    world_up = normalize(np.asarray(world_up, dtype=np.float32))
+
+    right = np.cross(forward, world_up)
+    if np.linalg.norm(right) < 1e-6:
+        alt_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, alt_up)
+        if np.linalg.norm(right) < 1e-6:
+            alt_up = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            right = np.cross(forward, alt_up)
+    right = normalize(right)
+    down = normalize(np.cross(forward, right))
+
+    c2w = np.eye(4, dtype=np.float32)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = down
+    c2w[:3, 2] = forward
+    c2w[:3, 3] = eye
+    w2c = np.linalg.inv(c2w)
+    R = w2c[:3, :3].T
+    T = w2c[:3, 3]
+    return R, T
+
+
+def closest_point_to_rays(origins: np.ndarray, dirs: np.ndarray) -> np.ndarray:
+    A = np.zeros((3, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    I = np.eye(3, dtype=np.float64)
+    for o, d in zip(origins, dirs):
+        d = normalize(d.astype(np.float64))
+        M = I - np.outer(d, d)
+        A += M
+        b += M @ o.astype(np.float64)
+    try:
+        x = np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        x = np.median(origins, axis=0)
+    return x.astype(np.float32)
+
+
+def pca_lateral_axis(points: np.ndarray) -> np.ndarray:
+    pts = points - np.mean(points, axis=0, keepdims=True)
+    cov = pts.T @ pts / max(1, pts.shape[0] - 1)
+    vals, vecs = np.linalg.eigh(cov)
+    order = np.argsort(vals)[::-1]
+    axis = vecs[:, order[0]].astype(np.float32)
+    axis[2] = 0.0
+    if np.linalg.norm(axis) < 1e-6:
+        axis = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    return normalize(axis)
+
+
+def triangle_wave(x: float) -> float:
+    y = x % 1.0
+    return 1.0 - abs(2.0 * y - 1.0)
+
+
+def smoothstep01(x: float) -> float:
+    x = max(0.0, min(1.0, x))
+    return x * x * (3.0 - 2.0 * x)
+
+
+def quantize_times(cams, decimals: int = 6):
+    groups = {}
+    for cam in cams:
+        key = round(float(cam.timestamp), decimals)
+        groups.setdefault(key, []).append(cam)
+    keys = sorted(groups.keys())
+    return keys, groups
+
+
+def build_time_slots(cams_all):
+    centers = []
+    forwards = []
+    for cam in cams_all:
+        centers.append(camera_center_from_RT(np.asarray(cam.R), np.asarray(cam.T)))
+        forwards.append(camera_forward_from_R(np.asarray(cam.R)))
+    centers = np.stack(centers, axis=0)
+    forwards = np.stack(forwards, axis=0)
+    anchor = closest_point_to_rays(centers, forwards)
+    lateral = pca_lateral_axis(centers)
+
+    times, groups = quantize_times(cams_all)
+    min_count = min(len(groups[t]) for t in times)
+    if min_count < 2:
+        raise RuntimeError(
+            "Need at least 2 cameras per timestamp for bounded novel rendering"
+        )
+
+    num_slots = min_count
+    pos_by_t = []
+    fwd_by_t = []
+    spacing_by_t = []
+    for t in times:
+        g = groups[t]
+        indexed = []
+        for cam in g:
+            c = camera_center_from_RT(np.asarray(cam.R), np.asarray(cam.T))
+            f = camera_forward_from_R(np.asarray(cam.R))
+            lateral_coord = float(np.dot(c - anchor, lateral))
+            indexed.append((lateral_coord, c, f, cam))
+        indexed.sort(key=lambda x: x[0])
+        indexed = indexed[:num_slots]
+        pos = np.stack([x[1] for x in indexed], axis=0)
+        fwd = np.stack([x[2] for x in indexed], axis=0)
+        pos_by_t.append(pos)
+        fwd_by_t.append(fwd)
+        if pos.shape[0] >= 2:
+            spacing = np.linalg.norm(pos[1:] - pos[:-1], axis=1)
+            spacing_by_t.append(float(np.median(spacing)))
+        else:
+            spacing_by_t.append(0.0)
+
+    return {
+        "times": np.asarray(times, dtype=np.float32),
+        "pos": np.stack(pos_by_t, axis=0).astype(np.float32),
+        "fwd": np.stack(fwd_by_t, axis=0).astype(np.float32),
+        "anchor": anchor.astype(np.float32),
+        "lateral": lateral.astype(np.float32),
+        "num_slots": num_slots,
+        "median_spacing": float(np.median(np.asarray(spacing_by_t, dtype=np.float32))),
+    }
+
+
+def interp_along_time(arr: np.ndarray, times: np.ndarray, t: float) -> np.ndarray:
+    if t <= float(times[0]):
+        return arr[0].copy()
+    if t >= float(times[-1]):
+        return arr[-1].copy()
+    hi = int(np.searchsorted(times, t, side="right"))
+    lo = hi - 1
+    t0 = float(times[lo])
+    t1 = float(times[hi])
+    a = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+    return (1.0 - a) * arr[lo] + a * arr[hi]
+
+
+def interp_segment_extrapolated(arr: np.ndarray, s: float):
+    n = arr.shape[0]
+    if n == 1:
+        return arr[0].copy(), arr[0].copy(), 0.0, 0, 0
+    if s <= 0.0:
+        i0, i1 = 0, 1
+        a = s
+    elif s >= n - 1:
+        i0, i1 = n - 2, n - 1
+        a = s - (n - 2)
+    else:
+        i0 = int(math.floor(s))
+        i1 = min(n - 1, i0 + 1)
+        a = s - i0
+    base = (1.0 - a) * arr[i0] + a * arr[i1]
+    return base, arr[i1] - arr[i0], float(a), i0, i1
+
+
+def sample_bounded_novel(
+    path_data,
+    t: float,
+    u: float,
+    novel_phase: float,
+    novel_strength: float,
+    outward_scale: float,
+    endpoint_overshoot: float,
+    look_mode: str,
+):
+    times = path_data["times"]
+    pos_slots = interp_along_time(path_data["pos"], times, t)
+    fwd_slots = interp_along_time(path_data["fwd"], times, t)
+    anchor = path_data["anchor"]
+    median_spacing = max(1e-6, float(path_data["median_spacing"]))
+    num_slots = pos_slots.shape[0]
+
+    sweep = max(0.0, min(1.0, float(u)))
+    sweep_ex = -endpoint_overshoot + sweep * (1.0 + 2.0 * endpoint_overshoot)
+    s = sweep_ex * (num_slots - 1)
+
+    eye_base, tangent_raw, _, i0, i1 = interp_segment_extrapolated(pos_slots, s)
+    fwd_base, _, _, _, _ = interp_segment_extrapolated(fwd_slots, s)
+    tangent = normalize(np.asarray(tangent_raw, dtype=np.float32))
+    if np.linalg.norm(tangent) < 1e-6:
+        tangent = path_data["lateral"]
+
+    fwd_base = normalize(np.asarray(fwd_base, dtype=np.float32))
+    novel_dir = fwd_base - tangent * float(np.dot(fwd_base, tangent))
+    if np.linalg.norm(novel_dir) < 1e-6:
+        novel_dir = anchor - eye_base
+    novel_dir = normalize(novel_dir.astype(np.float32))
+
+    radial = eye_base - anchor
+    radial = (
+        normalize(radial.astype(np.float32))
+        if np.linalg.norm(radial) > 1e-6
+        else np.zeros(3, dtype=np.float32)
+    )
+
+    edge_weight = smoothstep01(1.0 - abs(2.0 * sweep - 1.0))
+    v = math.sin(2.0 * math.pi * novel_phase)
+    eye = eye_base.copy()
+    if abs(outward_scale) > 1e-8:
+        eye = eye + outward_scale * radial * median_spacing
+    if abs(novel_strength) > 1e-8:
+        eye = eye + (edge_weight * novel_strength * v) * novel_dir * median_spacing
+
+    if look_mode == "anchor":
+        target = anchor
+    elif look_mode == "blend_forward":
+        target = eye + fwd_base
+    elif look_mode == "camera_pair":
+        pair_target = 0.5 * (
+            pos_slots[i0] + fwd_slots[i0] + pos_slots[i1] + fwd_slots[i1]
+        )
+        target = 0.5 * pair_target + 0.5 * anchor
+    else:
+        target = 0.45 * anchor + 0.55 * (eye + fwd_base)
+    forward = normalize((target - eye).astype(np.float32))
+    return eye.astype(np.float32), forward.astype(np.float32)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Render a 360-over-time video from a 4DGS checkpoint"
+        description="Render bounded novel views along the reconstructed camera manifold"
     )
     parser.add_argument("--repo_root", type=str, default=".")
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--source_path", type=str, default=None)
-    parser.add_argument("--frames", type=int, default=1000)
-    parser.add_argument("--fps", type=int, default=60)
-    parser.add_argument("--radius_scale", type=float, default=1.0)
-    parser.add_argument("--elevation_deg", type=float, default=15.0)
-    parser.add_argument("--look_at_offset_y", type=float, default=0.0)
+    parser.add_argument("--frames", type=int, default=600)
+    parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--width", type=int, default=0)
     parser.add_argument("--height", type=int, default=0)
     parser.add_argument("--time_start", type=float, default=None)
     parser.add_argument("--time_end", type=float, default=None)
+    parser.add_argument("--freeze_time", type=float, default=None)
     parser.add_argument(
         "--time_mode",
-        type=str,
-        choices=["orbit-time", "orbit-only", "time-only"],
-        default="orbit-time",
+        choices=[
+            "sync_arc_time",
+            "sync_arc_freeze",
+            "bounded_novel_time",
+            "bounded_novel_freeze",
+        ],
+        default="bounded_novel_time",
     )
-    parser.add_argument("--freeze_time", type=float, default=None)
-    parser.add_argument("--orbit_start_deg", type=float, default=0.0)
-    parser.add_argument("--orbit_end_deg", type=float, default=360.0)
-    parser.add_argument("--split", type=str, choices=["train", "test"], default="test")
+    parser.add_argument("--split", choices=["train", "test", "all"], default="all")
+    parser.add_argument("--sweep_loops", type=float, default=1.0)
+    parser.add_argument("--novel_loops", type=float, default=2.0)
+    parser.add_argument(
+        "--outward_scale",
+        type=float,
+        default=0.05,
+        help="radial bow in units of median inter-camera spacing",
+    )
+    parser.add_argument(
+        "--novel_strength",
+        type=float,
+        default=0.18,
+        help="depth/off-manifold motion in units of median inter-camera spacing",
+    )
+    parser.add_argument(
+        "--endpoint_overshoot",
+        type=float,
+        default=0.08,
+        help="small left/right extrapolation beyond end cameras",
+    )
+    parser.add_argument(
+        "--look_mode",
+        choices=["blend_forward", "anchor", "mixed", "camera_pair"],
+        default="mixed",
+    )
+    parser.add_argument("--skip_png", action="store_true")
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--isotropic_gaussians", action="store_true")
-    parser.add_argument(
-        "--render_concurrency",
-        type=int,
-        default=0,
-        help="Max in-flight render jobs (0 = auto).",
-    )
-    parser.add_argument(
-        "--render_streams",
-        type=int,
-        default=1,
-        help="CUDA streams for dispatching render jobs. Values >1 are experimental.",
-    )
-    parser.add_argument(
-        "--writer_queue",
-        type=int,
-        default=16,
-        help="Max queued frames waiting to be encoded/written.",
-    )
-    parser.add_argument(
-        "--skip_png",
-        action="store_true",
-        help="Skip per-frame PNG files and only write MP4.",
-    )
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
@@ -292,10 +427,9 @@ def main():
     out_dir = (
         Path(args.out_dir).resolve()
         if args.out_dir
-        else model_path / "renders" / "orbit_time"
+        else model_path / "renders" / "bounded_novel"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-
     sys.path.insert(0, str(repo_root))
 
     from arguments import ModelParams, PipelineParams
@@ -314,7 +448,6 @@ def main():
     if cfg_args_path.exists():
         saved = load_saved_namespace(cfg_args_path)
         vars(resolved).update(vars(saved))
-
     if args.config is not None:
         from omegaconf import OmegaConf
 
@@ -328,11 +461,8 @@ def main():
     ckpt_path = find_checkpoint(model_path, args.checkpoint)
     map_location = "cuda" if torch.cuda.is_available() else "cpu"
     model_params, loaded_iter = torch.load(
-        ckpt_path,
-        map_location=map_location,
-        weights_only=False,
+        ckpt_path, map_location=map_location, weights_only=False
     )
-
     inferred = infer_checkpoint_layout(model_params)
     if inferred["gaussian_dim"] is not None:
         resolved.gaussian_dim = inferred["gaussian_dim"]
@@ -345,13 +475,11 @@ def main():
     ) == [-0.5, 0.5]:
         if inferred["time_duration"] is not None:
             resolved.time_duration = inferred["time_duration"]
-
     if args.isotropic_gaussians:
         resolved.isotropic_gaussians = True
 
     dataset = lp.extract(resolved)
     pipe = pp.extract(resolved)
-
     gaussian_dim = getattr(resolved, "gaussian_dim", 3)
     time_duration = getattr(resolved, "time_duration", [-0.5, 0.5])
     rot_4d = getattr(resolved, "rot_4d", False)
@@ -363,12 +491,6 @@ def main():
         inferred["active_sh_degree_t"], 2 if getattr(pipe, "eval_shfs_4d", False) else 0
     )
 
-    if not os.path.exists(dataset.source_path):
-        raise FileNotFoundError(
-            f"Dataset source_path does not exist: {dataset.source_path}. "
-            f"Pass --source_path or --config configs/...yaml."
-        )
-
     gaussians = GaussianModel(
         dataset.sh_degree,
         gaussian_dim=gaussian_dim,
@@ -379,7 +501,6 @@ def main():
         prefilter_var=dataset.prefilter_var,
         isotropic_gaussians=isotropic_gaussians,
     )
-
     scene = Scene(
         dataset,
         gaussians,
@@ -390,7 +511,6 @@ def main():
         num_pts_ratio=num_pts_ratio,
         time_duration=time_duration,
     )
-
     gaussians.restore(model_params, None)
     gaussians.active_sh_degree = gaussians.max_sh_degree
     if hasattr(gaussians, "active_sh_degree_t"):
@@ -404,27 +524,20 @@ def main():
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    cam_list = (
-        scene.test_cameras[1.0]
-        if args.split == "test" and len(scene.test_cameras[1.0]) > 0
-        else scene.train_cameras[1.0]
-    )
-    if len(cam_list) == 0:
-        raise RuntimeError("No cameras found in the selected split")
+    train_cams = list(scene.train_cameras[1.0])
+    test_cams = list(scene.test_cameras[1.0])
+    if args.split == "train":
+        cams = train_cams
+    elif args.split == "test":
+        cams = test_cams
+    else:
+        cams = train_cams + test_cams
+    if len(cams) == 0:
+        raise RuntimeError("No cameras found in selected split")
 
-    centers = np.stack([cam.camera_center.cpu().numpy() for cam in cam_list], axis=0)
-    center = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-    radius = (
-        np.quantile(np.linalg.norm(centers - center[None], axis=1), 0.9)
-        * args.radius_scale
-    )
-    if not np.isfinite(radius) or radius <= 1e-6:
-        radius = max(scene.cameras_extent, 1.0) * args.radius_scale
-
-    base_cam = cam_list[0]
+    base_cam = cams[0]
     width = args.width or int(base_cam.image_width)
     height = args.height or int(base_cam.image_height)
-
     if getattr(base_cam, "cx", -1) > 0:
         scale_x = width / base_cam.image_width
         scale_y = height / base_cam.image_height
@@ -440,89 +553,55 @@ def main():
         FoVx = float(base_cam.FoVx)
         FoVy = float(base_cam.FoVy)
 
-    time_values = np.array([float(cam.timestamp) for cam in cam_list], dtype=np.float32)
-    default_time_start = (
-        float(np.min(time_values)) if len(time_values) else float(time_duration[0])
-    )
-    default_time_end = (
-        float(np.max(time_values)) if len(time_values) else float(time_duration[1])
-    )
+    path_data = build_time_slots(cams)
+    available_times = path_data["times"]
+    default_time_start = float(available_times[0])
+    default_time_end = float(available_times[-1])
     time_start = default_time_start if args.time_start is None else args.time_start
     time_end = default_time_end if args.time_end is None else args.time_end
-
-    save_png = not args.skip_png
-    frames_dir = out_dir / "frames"
-    if save_png:
-        frames_dir.mkdir(parents=True, exist_ok=True)
-    video_path = out_dir / "orbit_time.mp4"
-
-    elev = math.radians(args.elevation_deg)
-    look_at = center.copy()
-    look_at[1] += args.look_at_offset_y
-
-    auto_concurrency = max(2, min(16, (os.cpu_count() or 8) // 2))
-    max_in_flight = args.render_concurrency if args.render_concurrency > 0 else auto_concurrency
-    max_in_flight = max(1, max_in_flight)
-    num_streams = max(1, min(args.render_streams, max_in_flight))
-    streams = [torch.cuda.Stream() for _ in range(num_streams)]
-
-    print(
-        "Render pipeline settings: "
-        f"in_flight={max_in_flight}, streams={num_streams}, writer_queue={args.writer_queue}, "
-        f"save_png={save_png}"
+    freeze_time = (
+        float(args.freeze_time)
+        if args.freeze_time is not None
+        else 0.5 * (time_start + time_end)
     )
 
-    def build_camera(idx: int):
-        frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
-        az = math.radians(
-            args.orbit_start_deg + frac * (args.orbit_end_deg - args.orbit_start_deg)
-        )
-        horiz = radius * math.cos(elev)
-        z = center[2] + radius * math.sin(elev)
-        eye = np.array(
-            [
-                center[0] + horiz * math.cos(az),
-                center[1] + horiz * math.sin(az),
-                z,
-            ],
-            dtype=np.float32,
-        )
+    video_path = out_dir / "bounded_novel.mp4"
+    frames_dir = out_dir / "frames"
+    save_png = not args.skip_png
+    if save_png:
+        frames_dir.mkdir(parents=True, exist_ok=True)
 
-        if args.time_mode == "orbit-only":
-            t_val = (
-                args.freeze_time
-                if args.freeze_time is not None
-                else 0.5 * (time_start + time_end)
+    print(
+        f"bounded_novel: slots={path_data['num_slots']} median_spacing={path_data['median_spacing']:.4f} "
+        f"time=[{time_start:.4f}, {time_end:.4f}] outward={args.outward_scale} "
+        f"novel_strength={args.novel_strength} overshoot={args.endpoint_overshoot}"
+    )
+
+    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
+    try:
+        for idx in range(args.frames):
+            frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
+            if args.time_mode in ("sync_arc_freeze", "bounded_novel_freeze"):
+                t_val = freeze_time
+            else:
+                t_val = time_start + frac * (time_end - time_start)
+            u = triangle_wave(frac * args.sweep_loops)
+            novel_phase = frac * args.novel_loops
+            eye, forward = sample_bounded_novel(
+                path_data=path_data,
+                t=t_val,
+                u=u,
+                novel_phase=novel_phase,
+                novel_strength=(
+                    args.novel_strength
+                    if args.time_mode.startswith("bounded_novel")
+                    else 0.0
+                ),
+                outward_scale=args.outward_scale,
+                endpoint_overshoot=args.endpoint_overshoot,
+                look_mode=args.look_mode,
             )
-        elif args.time_mode == "time-only":
-            eye = centers[0]
-            t_val = time_start + frac * (time_end - time_start)
-        else:
-            t_val = time_start + frac * (time_end - time_start)
-
-        if args.time_mode == "time-only":
-            ref_cam = base_cam
-            cam = Camera(
-                colmap_id=0,
-                R=ref_cam.R,
-                T=ref_cam.T,
-                FoVx=FoVx if not use_intrinsics else -1.0,
-                FoVy=FoVy if not use_intrinsics else -1.0,
-                image=torch.empty(0),
-                gt_alpha_mask=None,
-                image_name=f"orbit_{idx:04d}",
-                uid=idx,
-                data_device="cuda",
-                timestamp=float(t_val),
-                cx=cx,
-                cy=cy,
-                fl_x=fl_x,
-                fl_y=fl_y,
-                resolution=(width, height),
-                meta_only=True,
-            ).cuda()
-        else:
-            R, T = look_at_colmap(eye, look_at)
+            R, T = camera_from_eye_forward(eye, forward)
             cam = Camera(
                 colmap_id=0,
                 R=R,
@@ -531,7 +610,7 @@ def main():
                 FoVy=FoVy if not use_intrinsics else -1.0,
                 image=torch.empty(0),
                 gt_alpha_mask=None,
-                image_name=f"orbit_{idx:04d}",
+                image_name=f"bounded_novel_{idx:04d}",
                 uid=idx,
                 data_device="cuda",
                 timestamp=float(t_val),
@@ -542,94 +621,45 @@ def main():
                 resolution=(width, height),
                 meta_only=True,
             ).cuda()
-
-        return cam, float(t_val)
-
-    def enqueue_render(idx: int) -> InFlightFrame:
-        stream = streams[idx % len(streams)]
-        cam, t_val = build_camera(idx)
-        with torch.cuda.stream(stream):
-            render_pkg = render(cam, gaussians, pipe, background)
-            render_tensor = render_pkg["render"]
-            gpu_image = torch.clamp(render_tensor, 0.0, 1.0).permute(1, 2, 0).contiguous()
-            gpu_image_u8 = (gpu_image * 255.0).to(torch.uint8)
-            cpu_image_u8 = torch.empty(
-                gpu_image_u8.shape,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=True,
-            )
-            cpu_image_u8.copy_(gpu_image_u8, non_blocking=True)
-
-            ready_event = torch.cuda.Event(blocking=False)
-            ready_event.record(stream)
-
-        return InFlightFrame(
-            idx=idx,
-            t=t_val,
-            ready_event=ready_event,
-            cpu_image_u8=cpu_image_u8,
-            keepalive=(cam, gpu_image_u8, render_tensor),
-        )
-
-    writer = AsyncFrameWriter(
-        video_path=video_path,
-        fps=args.fps,
-        frames_dir=frames_dir,
-        save_png=save_png,
-        max_queue=args.writer_queue,
-        total_frames=args.frames,
-    )
-
-    pending: dict[int, InFlightFrame] = {}
-    next_to_write = 0
-
-    def flush_ready(blocking: bool):
-        nonlocal next_to_write
-        while next_to_write in pending:
-            current = pending[next_to_write]
-            if not current.ready_event.query():
-                if not blocking:
-                    break
-                current.ready_event.synchronize()
-
-            image = current.cpu_image_u8.numpy().copy()
-            writer.submit(current.idx, current.t, image)
-            del pending[next_to_write]
-            next_to_write += 1
-            blocking = False
-
-    try:
-        for idx in range(args.frames):
-            pending[idx] = enqueue_render(idx)
-            flush_ready(blocking=False)
-            if len(pending) >= max_in_flight:
-                flush_ready(blocking=True)
-
-        while pending:
-            flush_ready(blocking=True)
+            with torch.no_grad():
+                render_pkg = render(cam, gaussians, pipe, background)
+                image = (
+                    torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    .permute(1, 2, 0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+            image_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+            writer.append_data(image_u8)
+            if save_png:
+                imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
+            if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
+                print(
+                    f"[{idx+1}/{args.frames}] t={t_val:.4f} u={u:.3f} novel_phase={novel_phase:.3f}"
+                )
     finally:
         writer.close()
 
-    meta_path = out_dir / "render_info.txt"
-    meta_path.write_text(
+    info = out_dir / "render_info.txt"
+    info.write_text(
+        f"mode=bounded_novel\n"
         f"checkpoint={ckpt_path}\n"
         f"loaded_iter={loaded_iter}\n"
         f"split={args.split}\n"
         f"frames={args.frames}\n"
         f"fps={args.fps}\n"
-        f"center={center.tolist()}\n"
-        f"radius={radius}\n"
+        f"time_mode={args.time_mode}\n"
         f"time_start={time_start}\n"
         f"time_end={time_end}\n"
-        f"time_mode={args.time_mode}\n"
-        f"gaussian_dim={gaussian_dim}\n"
-        f"rot_4d={rot_4d}\n"
-        f"sh_degree_t={sh_degree_t}\n"
-        f"render_concurrency={max_in_flight}\n"
-        f"render_streams={num_streams}\n"
-        f"writer_queue={args.writer_queue}\n"
-        f"save_png={save_png}\n"
+        f"freeze_time={freeze_time}\n"
+        f"sweep_loops={args.sweep_loops}\n"
+        f"novel_loops={args.novel_loops}\n"
+        f"outward_scale={args.outward_scale}\n"
+        f"novel_strength={args.novel_strength}\n"
+        f"endpoint_overshoot={args.endpoint_overshoot}\n"
+        f"num_slots={path_data['num_slots']}\n"
+        f"median_spacing={path_data['median_spacing']}\n"
     )
     print(f"Wrote video to {video_path}")
     if save_png:
