@@ -1,6 +1,6 @@
 gaussian_dim: 4
 time_duration: [0.0, 1.0]
-num_pts: 100_000
+num_pts: 100000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: False
@@ -12,7 +12,7 @@ ModelParams:
   source_path: "data/dnerf/bouncingballs"
   model_path: "output/dnerf/bouncingballs_simple_prune/"
   images: "images"
-  resolution: 1
+  resolution: 2
   white_background: False
   data_device: "cuda"
   eval: True
@@ -23,7 +23,8 @@ ModelParams:
   dataloader: False
 
 PipelineParams:
-  random_dropout_prob: 0.1
+  use_usplat: False
+  random_dropout_prob: 0
   sort_free_render: False
   convert_SHs_python: False
   compute_cov3D_python: False
@@ -50,20 +51,21 @@ OptimizationParams:
   densification_interval: 100
   opacity_reset_interval: 3000
   densify_from_iter: 500
-  densify_until_iter: 4_000
+  densify_until_iter: 5_000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.000005
   densify_until_num_points: -1
   sh_increase_interval: 1000
   lambda_opa_mask: 0.0
-  lambda_rigid: 0.1
-  lambda_motion: 0.1
+  lambda_rigid: 0.0
+  lambda_motion: 0.0
   lambda_depth: 0.0
   enable_spatio_temporal_pruning: True
-  spatio_temporal_pruning_ratio: 0.3
+  spatio_temporal_pruning_ratio: 0.8
   spatio_temporal_pruning_random: True
-  spatio_temporal_pruning_from_iter: 500
-  spatio_temporal_pruning_until_iter: 4_000
+  spatio_temporal_pruning_from_iter: 400
+  spatio_temporal_pruning_until_iter: 400
   spatio_temporal_pruning_interval: 500
-  final_prune_from_iter: 8000
-  final_prune_ratio: 0.95
+  usplat_start_iter: 500
+  final_prune_from_iter: 5000
+  final_prune_ratio: 0.85

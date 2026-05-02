@@ -57,3 +57,9 @@ OptimizationParams:
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0
+  lambda_key: 1.0
+  lambda_non_key: 1.0
+  usplat_start_iter: 15000
+  usplat_eta_c: 0.5
+  usplat_phi: 1000000.0
+  use_usplat: true

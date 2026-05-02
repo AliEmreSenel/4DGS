@@ -72,6 +72,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
+        self.use_usplat = False
         self.sort_free_render = False
         self.random_dropout_prob = 0.0
         self.env_map_res = 0
@@ -108,6 +109,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
+
         self.lambda_depth = 0.0
         self.mobilegs_opacity_phi_lr = 1e-3
         # Spatio-temporal pruning parameters
@@ -117,7 +119,15 @@ class OptimizationParams(ParamGroup):
         self.spatio_temporal_pruning_from_iter = -1
         self.spatio_temporal_pruning_until_iter = -1
         self.spatio_temporal_pruning_interval = -1
+
+        self.lambda_key = 1.0
+        self.lambda_non_key = 1.0
+        self.usplat_start_iter = 500
+        self.usplat_eta_c = 0.5
+        self.usplat_phi = 1000000.0
+
         super().__init__(parser, "Optimization Parameters")
+        
 
 def get_combined_args(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]
