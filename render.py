@@ -171,6 +171,38 @@ def camera_from_eye_forward(
     return R, T
 
 
+def look_at_colmap(
+    eye,
+    target,
+    world_up=np.array([0.0, 0.0, 1.0], dtype=np.float32),
+):
+    eye = np.asarray(eye, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+    forward = target - eye
+    forward = forward / (np.linalg.norm(forward) + 1e-8)
+
+    right = np.cross(forward, world_up)
+    if np.linalg.norm(right) < 1e-6:
+        alt_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, alt_up)
+        if np.linalg.norm(right) < 1e-6:
+            alt_up = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            right = np.cross(forward, alt_up)
+    right = right / (np.linalg.norm(right) + 1e-8)
+    down = np.cross(forward, right)
+    down = down / (np.linalg.norm(down) + 1e-8)
+
+    c2w = np.eye(4, dtype=np.float32)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = down
+    c2w[:3, 2] = forward
+    c2w[:3, 3] = eye
+    w2c = np.linalg.inv(c2w)
+    R = w2c[:3, :3].T
+    T = w2c[:3, 3]
+    return R, T
+
+
 def closest_point_to_rays(origins: np.ndarray, dirs: np.ndarray) -> np.ndarray:
     A = np.zeros((3, 3), dtype=np.float64)
     b = np.zeros(3, dtype=np.float64)
@@ -365,9 +397,386 @@ def sample_bounded_novel(
     return eye.astype(np.float32), forward.astype(np.float32)
 
 
+def select_bounded_cameras(train_cams, test_cams, split: str):
+    if split == "train":
+        return train_cams
+    if split == "test":
+        return test_cams
+    return train_cams + test_cams
+
+
+def select_orbit_cameras(train_cams, test_cams, split: str):
+    if split == "train":
+        return train_cams
+    if split == "test":
+        return test_cams if len(test_cams) > 0 else train_cams
+    return test_cams if len(test_cams) > 0 else train_cams
+
+
+def infer_resolution_and_intrinsics(base_cam, width_arg: int, height_arg: int):
+    width = width_arg or int(base_cam.image_width)
+    height = height_arg or int(base_cam.image_height)
+    if getattr(base_cam, "cx", -1) > 0:
+        scale_x = width / base_cam.image_width
+        scale_y = height / base_cam.image_height
+        cx = base_cam.cx * scale_x
+        cy = base_cam.cy * scale_y
+        fl_x = base_cam.fl_x * scale_x
+        fl_y = base_cam.fl_y * scale_y
+        use_intrinsics = True
+        FoVx = FoVy = -1.0
+    else:
+        cx = cy = fl_x = fl_y = -1.0
+        use_intrinsics = False
+        FoVx = float(base_cam.FoVx)
+        FoVy = float(base_cam.FoVy)
+    return width, height, use_intrinsics, FoVx, FoVy, cx, cy, fl_x, fl_y
+
+
+def make_meta_camera(
+    Camera,
+    idx: int,
+    image_name: str,
+    R,
+    T,
+    timestamp: float,
+    width: int,
+    height: int,
+    use_intrinsics: bool,
+    FoVx: float,
+    FoVy: float,
+    cx: float,
+    cy: float,
+    fl_x: float,
+    fl_y: float,
+):
+    return Camera(
+        colmap_id=0,
+        R=R,
+        T=T,
+        FoVx=FoVx if not use_intrinsics else -1.0,
+        FoVy=FoVy if not use_intrinsics else -1.0,
+        image=torch.empty(0),
+        gt_alpha_mask=None,
+        image_name=image_name,
+        uid=idx,
+        data_device="cuda",
+        timestamp=float(timestamp),
+        cx=cx,
+        cy=cy,
+        fl_x=fl_x,
+        fl_y=fl_y,
+        resolution=(width, height),
+        meta_only=True,
+    ).cuda()
+
+
+def render_orbit_mode(
+    args,
+    scene,
+    render,
+    background,
+    dataset,
+    gaussians,
+    pipe,
+    Camera,
+    time_duration,
+    ckpt_path,
+    loaded_iter,
+    out_dir: Path,
+):
+    train_cams = list(scene.train_cameras[1.0])
+    test_cams = list(scene.test_cameras[1.0])
+    cam_list = select_orbit_cameras(train_cams, test_cams, args.split)
+    if len(cam_list) == 0:
+        raise RuntimeError("No cameras found in the selected split")
+
+    centers = np.stack(
+        [cam.camera_center.detach().cpu().numpy() for cam in cam_list], axis=0
+    )
+    center = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    radius = (
+        np.quantile(np.linalg.norm(centers - center[None], axis=1), 0.9)
+        * args.radius_scale
+    )
+    if not np.isfinite(radius) or radius <= 1e-6:
+        radius = max(scene.cameras_extent, 1.0) * args.radius_scale
+
+    base_cam = cam_list[0]
+    width, height, use_intrinsics, FoVx, FoVy, cx, cy, fl_x, fl_y = (
+        infer_resolution_and_intrinsics(base_cam, args.width, args.height)
+    )
+
+    time_values = np.array([float(cam.timestamp) for cam in cam_list], dtype=np.float32)
+    default_time_start = (
+        float(np.min(time_values)) if len(time_values) else float(time_duration[0])
+    )
+    default_time_end = (
+        float(np.max(time_values)) if len(time_values) else float(time_duration[1])
+    )
+    time_start = default_time_start if args.time_start is None else args.time_start
+    time_end = default_time_end if args.time_end is None else args.time_end
+
+    frames_dir = out_dir / "frames"
+    save_png = not args.skip_png
+    if save_png:
+        frames_dir.mkdir(parents=True, exist_ok=True)
+    video_path = out_dir / "orbit_time.mp4"
+
+    elev = math.radians(args.elevation_deg)
+    look_at = center.copy()
+    look_at[1] += args.look_at_offset_y
+
+    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
+    try:
+        for idx in range(args.frames):
+            frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
+            az = math.radians(
+                args.orbit_start_deg
+                + frac * (args.orbit_end_deg - args.orbit_start_deg)
+            )
+            horiz = radius * math.cos(elev)
+            z = center[2] + radius * math.sin(elev)
+            eye = np.array(
+                [
+                    center[0] + horiz * math.cos(az),
+                    center[1] + horiz * math.sin(az),
+                    z,
+                ],
+                dtype=np.float32,
+            )
+
+            if args.time_mode == "orbit-only":
+                t_val = (
+                    float(args.freeze_time)
+                    if args.freeze_time is not None
+                    else 0.5 * (time_start + time_end)
+                )
+            elif args.time_mode == "time-only":
+                t_val = time_start + frac * (time_end - time_start)
+            else:
+                t_val = time_start + frac * (time_end - time_start)
+
+            if args.time_mode == "time-only":
+                ref_cam = base_cam
+                cam = make_meta_camera(
+                    Camera,
+                    idx=idx,
+                    image_name=f"orbit_{idx:04d}",
+                    R=ref_cam.R,
+                    T=ref_cam.T,
+                    timestamp=t_val,
+                    width=width,
+                    height=height,
+                    use_intrinsics=use_intrinsics,
+                    FoVx=FoVx,
+                    FoVy=FoVy,
+                    cx=cx,
+                    cy=cy,
+                    fl_x=fl_x,
+                    fl_y=fl_y,
+                )
+            else:
+                R, T = look_at_colmap(eye, look_at)
+                cam = make_meta_camera(
+                    Camera,
+                    idx=idx,
+                    image_name=f"orbit_{idx:04d}",
+                    R=R,
+                    T=T,
+                    timestamp=t_val,
+                    width=width,
+                    height=height,
+                    use_intrinsics=use_intrinsics,
+                    FoVx=FoVx,
+                    FoVy=FoVy,
+                    cx=cx,
+                    cy=cy,
+                    fl_x=fl_x,
+                    fl_y=fl_y,
+                )
+
+            with torch.no_grad():
+                render_pkg = render(cam, gaussians, pipe, background)
+                image = (
+                    torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    .permute(1, 2, 0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+            image_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+            writer.append_data(image_u8)
+            if save_png:
+                imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
+            if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
+                print(
+                    f"[{idx+1}/{args.frames}] t={t_val:.4f} az_deg={math.degrees(az):.2f}"
+                )
+    finally:
+        writer.close()
+
+    info = out_dir / "render_info.txt"
+    info.write_text(
+        f"mode=orbit_time\n"
+        f"checkpoint={ckpt_path}\n"
+        f"loaded_iter={loaded_iter}\n"
+        f"split={args.split}\n"
+        f"frames={args.frames}\n"
+        f"fps={args.fps}\n"
+        f"time_mode={args.time_mode}\n"
+        f"time_start={time_start}\n"
+        f"time_end={time_end}\n"
+        f"freeze_time={args.freeze_time}\n"
+        f"center={center.tolist()}\n"
+        f"radius={radius}\n"
+        f"orbit_start_deg={args.orbit_start_deg}\n"
+        f"orbit_end_deg={args.orbit_end_deg}\n"
+        f"elevation_deg={args.elevation_deg}\n"
+        f"look_at_offset_y={args.look_at_offset_y}\n"
+    )
+    print(f"Wrote video to {video_path}")
+    if save_png:
+        print(f"Wrote frames to {frames_dir}")
+
+
+def render_bounded_mode(
+    args,
+    scene,
+    render,
+    background,
+    gaussians,
+    pipe,
+    Camera,
+    ckpt_path,
+    loaded_iter,
+    out_dir: Path,
+):
+    train_cams = list(scene.train_cameras[1.0])
+    test_cams = list(scene.test_cameras[1.0])
+    cams = select_bounded_cameras(train_cams, test_cams, args.split)
+    if len(cams) == 0:
+        raise RuntimeError("No cameras found in selected split")
+
+    base_cam = cams[0]
+    width, height, use_intrinsics, FoVx, FoVy, cx, cy, fl_x, fl_y = (
+        infer_resolution_and_intrinsics(base_cam, args.width, args.height)
+    )
+
+    path_data = build_time_slots(cams)
+    available_times = path_data["times"]
+    default_time_start = float(available_times[0])
+    default_time_end = float(available_times[-1])
+    time_start = default_time_start if args.time_start is None else args.time_start
+    time_end = default_time_end if args.time_end is None else args.time_end
+    freeze_time = (
+        float(args.freeze_time)
+        if args.freeze_time is not None
+        else 0.5 * (time_start + time_end)
+    )
+
+    video_path = out_dir / "bounded_novel.mp4"
+    frames_dir = out_dir / "frames"
+    save_png = not args.skip_png
+    if save_png:
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"bounded_novel: slots={path_data['num_slots']} median_spacing={path_data['median_spacing']:.4f} "
+        f"time=[{time_start:.4f}, {time_end:.4f}] outward={args.outward_scale} "
+        f"novel_strength={args.novel_strength} overshoot={args.endpoint_overshoot}"
+    )
+
+    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
+    try:
+        for idx in range(args.frames):
+            frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
+            if args.time_mode in ("sync_arc_freeze", "bounded_novel_freeze"):
+                t_val = freeze_time
+            else:
+                t_val = time_start + frac * (time_end - time_start)
+            u = triangle_wave(frac * args.sweep_loops)
+            novel_phase = frac * args.novel_loops
+            eye, forward = sample_bounded_novel(
+                path_data=path_data,
+                t=t_val,
+                u=u,
+                novel_phase=novel_phase,
+                novel_strength=(
+                    args.novel_strength
+                    if args.time_mode.startswith("bounded_novel")
+                    else 0.0
+                ),
+                outward_scale=args.outward_scale,
+                endpoint_overshoot=args.endpoint_overshoot,
+                look_mode=args.look_mode,
+            )
+            R, T = camera_from_eye_forward(eye, forward)
+            cam = make_meta_camera(
+                Camera,
+                idx=idx,
+                image_name=f"bounded_novel_{idx:04d}",
+                R=R,
+                T=T,
+                timestamp=t_val,
+                width=width,
+                height=height,
+                use_intrinsics=use_intrinsics,
+                FoVx=FoVx,
+                FoVy=FoVy,
+                cx=cx,
+                cy=cy,
+                fl_x=fl_x,
+                fl_y=fl_y,
+            )
+            with torch.no_grad():
+                render_pkg = render(cam, gaussians, pipe, background)
+                image = (
+                    torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    .permute(1, 2, 0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+            image_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+            writer.append_data(image_u8)
+            if save_png:
+                imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
+            if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
+                print(
+                    f"[{idx+1}/{args.frames}] t={t_val:.4f} u={u:.3f} novel_phase={novel_phase:.3f}"
+                )
+    finally:
+        writer.close()
+
+    info = out_dir / "render_info.txt"
+    info.write_text(
+        f"mode=bounded_novel\n"
+        f"checkpoint={ckpt_path}\n"
+        f"loaded_iter={loaded_iter}\n"
+        f"split={args.split}\n"
+        f"frames={args.frames}\n"
+        f"fps={args.fps}\n"
+        f"time_mode={args.time_mode}\n"
+        f"time_start={time_start}\n"
+        f"time_end={time_end}\n"
+        f"freeze_time={freeze_time}\n"
+        f"sweep_loops={args.sweep_loops}\n"
+        f"novel_loops={args.novel_loops}\n"
+        f"outward_scale={args.outward_scale}\n"
+        f"novel_strength={args.novel_strength}\n"
+        f"endpoint_overshoot={args.endpoint_overshoot}\n"
+        f"num_slots={path_data['num_slots']}\n"
+        f"median_spacing={path_data['median_spacing']}\n"
+    )
+    print(f"Wrote video to {video_path}")
+    if save_png:
+        print(f"Wrote frames to {frames_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Render bounded novel views along the reconstructed camera manifold"
+        description="Render videos from a trained 3D/4D Gaussian checkpoint"
     )
     parser.add_argument("--repo_root", type=str, default=".")
     parser.add_argument("--model_path", type=str, required=True)
@@ -384,6 +793,9 @@ def main():
     parser.add_argument(
         "--time_mode",
         choices=[
+            "orbit-time",
+            "orbit-only",
+            "time-only",
             "sync_arc_time",
             "sync_arc_freeze",
             "bounded_novel_time",
@@ -417,6 +829,11 @@ def main():
         choices=["blend_forward", "anchor", "mixed", "camera_pair"],
         default="mixed",
     )
+    parser.add_argument("--radius_scale", type=float, default=1.0)
+    parser.add_argument("--elevation_deg", type=float, default=15.0)
+    parser.add_argument("--look_at_offset_y", type=float, default=0.0)
+    parser.add_argument("--orbit_start_deg", type=float, default=0.0)
+    parser.add_argument("--orbit_end_deg", type=float, default=360.0)
     parser.add_argument("--skip_png", action="store_true")
     parser.add_argument("--out_dir", type=str, default=None)
     parser.add_argument("--isotropic_gaussians", action="store_true")
@@ -424,10 +841,12 @@ def main():
 
     repo_root = Path(args.repo_root).resolve()
     model_path = Path(args.model_path).resolve()
+    orbit_modes = {"orbit-time", "orbit-only", "time-only"}
+    default_subdir = "orbit_time" if args.time_mode in orbit_modes else "bounded_novel"
     out_dir = (
         Path(args.out_dir).resolve()
         if args.out_dir
-        else model_path / "renders" / "bounded_novel"
+        else model_path / "renders" / default_subdir
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(repo_root))
@@ -491,6 +910,12 @@ def main():
         inferred["active_sh_degree_t"], 2 if getattr(pipe, "eval_shfs_4d", False) else 0
     )
 
+    if not os.path.exists(dataset.source_path):
+        raise FileNotFoundError(
+            f"Dataset source_path does not exist: {dataset.source_path}. "
+            f"Pass --source_path or --config configs/...yaml."
+        )
+
     gaussians = GaussianModel(
         dataset.sh_degree,
         gaussian_dim=gaussian_dim,
@@ -524,146 +949,34 @@ def main():
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    train_cams = list(scene.train_cameras[1.0])
-    test_cams = list(scene.test_cameras[1.0])
-    if args.split == "train":
-        cams = train_cams
-    elif args.split == "test":
-        cams = test_cams
+    if args.time_mode in orbit_modes:
+        render_orbit_mode(
+            args=args,
+            scene=scene,
+            render=render,
+            background=background,
+            dataset=dataset,
+            gaussians=gaussians,
+            pipe=pipe,
+            Camera=Camera,
+            time_duration=time_duration,
+            ckpt_path=ckpt_path,
+            loaded_iter=loaded_iter,
+            out_dir=out_dir,
+        )
     else:
-        cams = train_cams + test_cams
-    if len(cams) == 0:
-        raise RuntimeError("No cameras found in selected split")
-
-    base_cam = cams[0]
-    width = args.width or int(base_cam.image_width)
-    height = args.height or int(base_cam.image_height)
-    if getattr(base_cam, "cx", -1) > 0:
-        scale_x = width / base_cam.image_width
-        scale_y = height / base_cam.image_height
-        cx = base_cam.cx * scale_x
-        cy = base_cam.cy * scale_y
-        fl_x = base_cam.fl_x * scale_x
-        fl_y = base_cam.fl_y * scale_y
-        use_intrinsics = True
-        FoVx = FoVy = -1.0
-    else:
-        cx = cy = fl_x = fl_y = -1.0
-        use_intrinsics = False
-        FoVx = float(base_cam.FoVx)
-        FoVy = float(base_cam.FoVy)
-
-    path_data = build_time_slots(cams)
-    available_times = path_data["times"]
-    default_time_start = float(available_times[0])
-    default_time_end = float(available_times[-1])
-    time_start = default_time_start if args.time_start is None else args.time_start
-    time_end = default_time_end if args.time_end is None else args.time_end
-    freeze_time = (
-        float(args.freeze_time)
-        if args.freeze_time is not None
-        else 0.5 * (time_start + time_end)
-    )
-
-    video_path = out_dir / "bounded_novel.mp4"
-    frames_dir = out_dir / "frames"
-    save_png = not args.skip_png
-    if save_png:
-        frames_dir.mkdir(parents=True, exist_ok=True)
-
-    print(
-        f"bounded_novel: slots={path_data['num_slots']} median_spacing={path_data['median_spacing']:.4f} "
-        f"time=[{time_start:.4f}, {time_end:.4f}] outward={args.outward_scale} "
-        f"novel_strength={args.novel_strength} overshoot={args.endpoint_overshoot}"
-    )
-
-    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
-    try:
-        for idx in range(args.frames):
-            frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
-            if args.time_mode in ("sync_arc_freeze", "bounded_novel_freeze"):
-                t_val = freeze_time
-            else:
-                t_val = time_start + frac * (time_end - time_start)
-            u = triangle_wave(frac * args.sweep_loops)
-            novel_phase = frac * args.novel_loops
-            eye, forward = sample_bounded_novel(
-                path_data=path_data,
-                t=t_val,
-                u=u,
-                novel_phase=novel_phase,
-                novel_strength=(
-                    args.novel_strength
-                    if args.time_mode.startswith("bounded_novel")
-                    else 0.0
-                ),
-                outward_scale=args.outward_scale,
-                endpoint_overshoot=args.endpoint_overshoot,
-                look_mode=args.look_mode,
-            )
-            R, T = camera_from_eye_forward(eye, forward)
-            cam = Camera(
-                colmap_id=0,
-                R=R,
-                T=T,
-                FoVx=FoVx if not use_intrinsics else -1.0,
-                FoVy=FoVy if not use_intrinsics else -1.0,
-                image=torch.empty(0),
-                gt_alpha_mask=None,
-                image_name=f"bounded_novel_{idx:04d}",
-                uid=idx,
-                data_device="cuda",
-                timestamp=float(t_val),
-                cx=cx,
-                cy=cy,
-                fl_x=fl_x,
-                fl_y=fl_y,
-                resolution=(width, height),
-                meta_only=True,
-            ).cuda()
-            with torch.no_grad():
-                render_pkg = render(cam, gaussians, pipe, background)
-                image = (
-                    torch.clamp(render_pkg["render"], 0.0, 1.0)
-                    .permute(1, 2, 0)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-            image_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
-            writer.append_data(image_u8)
-            if save_png:
-                imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
-            if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
-                print(
-                    f"[{idx+1}/{args.frames}] t={t_val:.4f} u={u:.3f} novel_phase={novel_phase:.3f}"
-                )
-    finally:
-        writer.close()
-
-    info = out_dir / "render_info.txt"
-    info.write_text(
-        f"mode=bounded_novel\n"
-        f"checkpoint={ckpt_path}\n"
-        f"loaded_iter={loaded_iter}\n"
-        f"split={args.split}\n"
-        f"frames={args.frames}\n"
-        f"fps={args.fps}\n"
-        f"time_mode={args.time_mode}\n"
-        f"time_start={time_start}\n"
-        f"time_end={time_end}\n"
-        f"freeze_time={freeze_time}\n"
-        f"sweep_loops={args.sweep_loops}\n"
-        f"novel_loops={args.novel_loops}\n"
-        f"outward_scale={args.outward_scale}\n"
-        f"novel_strength={args.novel_strength}\n"
-        f"endpoint_overshoot={args.endpoint_overshoot}\n"
-        f"num_slots={path_data['num_slots']}\n"
-        f"median_spacing={path_data['median_spacing']}\n"
-    )
-    print(f"Wrote video to {video_path}")
-    if save_png:
-        print(f"Wrote frames to {frames_dir}")
+        render_bounded_mode(
+            args=args,
+            scene=scene,
+            render=render,
+            background=background,
+            gaussians=gaussians,
+            pipe=pipe,
+            Camera=Camera,
+            ckpt_path=ckpt_path,
+            loaded_iter=loaded_iter,
+            out_dir=out_dir,
+        )
 
 
 if __name__ == "__main__":
