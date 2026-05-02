@@ -72,6 +72,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
+        self.use_usplat = False
         self.sort_free_render = False
         self.random_dropout_prob = 0.0
         self.env_map_res = 0
@@ -121,7 +122,7 @@ class OptimizationParams(ParamGroup):
 
         self.lambda_key = 1.0
         self.lambda_non_key = 1.0
-        self.usplat_start_iter = 15000
+        self.usplat_start_iter = 500
         self.usplat_eta_c = 0.5
         self.usplat_phi = 1000000.0
 

@@ -45,6 +45,45 @@ def save_gaussian_args(model_path, gaussian_kwargs):
         f.write(str(Namespace(**gaussian_kwargs)))
 
 
+def rebuild_usplat_state(gaussians, training_dataset, pipe, background, opt, iteration):
+    print(f"[USplat4D] Rebuilding graph at iteration {iteration}...")
+    with torch.no_grad():
+        u_scalar = compute_uncertainty_all_frames(
+            gaussians=gaussians,
+            train_cameras=training_dataset,
+            pipe=pipe,
+            background=background,
+            device=background.device,
+            eta_c=opt.usplat_eta_c,
+            phi=opt.usplat_phi,
+        )
+        T_all = len(training_dataset)
+        G = gaussians.get_xyz.shape[0]
+        means_t_all = torch.zeros(G, T_all, 3, device=background.device)
+        for t_idx, (_, cam) in enumerate(training_dataset):
+            cam = cam.cuda(non_blocking=True, copy=False)
+            _, delta = gaussians.get_current_covariance_and_mean_offset(
+                1.0, cam.timestamp
+            )
+            means_t_all[:, t_idx] = gaussians.get_xyz + delta
+
+        graph = build_graph(
+            means_t=means_t_all,
+            u_scalar=u_scalar,
+            key_ratio=0.02,
+            spt_threshold=5,
+            knn_k=8,
+            device=background.device,
+        )
+        p_pretrained = gaussians.get_xyz.detach().clone()
+
+    print(
+        f"[USplat4D] Graph rebuilt: {graph.num_key} key nodes, "
+        f"{graph.num_nonkey} non-key nodes"
+    )
+    return u_scalar, graph, p_pretrained
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, isotropic_gaussians,
              use_usplat=False, usplat_start_iter=10000):
@@ -84,6 +123,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     graph = None
     p_pretrained = None
     u_scalar = None
+    usplat_state_dirty = False
     
     if checkpoint:
         model_params, first_iter = torch.load(checkpoint)
@@ -185,6 +225,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_visibility_filter = []
                 batch_radii = []
 
+            if use_usplat and iteration >= usplat_start_iter and (
+                graph is None or usplat_state_dirty
+            ):
+                u_scalar, graph, p_pretrained = rebuild_usplat_state(
+                    gaussians=gaussians,
+                    training_dataset=training_dataset,
+                    pipe=pipe,
+                    background=background,
+                    opt=opt,
+                    iteration=iteration,
+                )
+                usplat_state_dirty = False
+
             batch_Ll1 = torch.tensor(0.0, device="cuda")
             batch_Lssim = torch.tensor(0.0, device="cuda")
             batch_loss = torch.tensor(0.0, device="cuda")
@@ -256,43 +309,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         batch_Ldepth += Ldepth_i.detach()
                 ########################
                 
-                # --- Build graph once at usplat_start_iter ---
-                if use_usplat and graph is None and iteration == usplat_start_iter:
-                    print(f"[USplat4D] Building graph at iteration {iteration}...")
-                    with torch.no_grad():
-                        u_scalar = compute_uncertainty_all_frames(
-                            gaussians=gaussians,
-                            train_cameras=training_dataset,
-                            pipe=pipe,
-                            background=background,
-                            device=background.device,
-                            eta_c=opt.usplat_eta_c,
-                            phi=opt.usplat_phi,
-                        )
-                        T_all = len(training_dataset)
-                        G = gaussians.get_xyz.shape[0]
-                        means_t_all = torch.zeros(G, T_all, 3, device=background.device)
-                        for t_idx, (_, cam) in enumerate(training_dataset):
-                            cam = cam.cuda(non_blocking=True, copy=False)
-                            _, delta = gaussians.get_current_covariance_and_mean_offset(
-                                1.0, cam.timestamp
-                            )
-                            means_t_all[:, t_idx] = gaussians.get_xyz + delta
-
-                        graph = build_graph(
-                            means_t=means_t_all,
-                            u_scalar=u_scalar,
-                            key_ratio=0.02,
-                            spt_threshold=5,
-                            knn_k=8,
-                            device=background.device,
-                        )
-                        p_pretrained = gaussians.get_xyz.detach().clone()
-                        print(f"[USplat4D] Graph built: {graph.num_key} key nodes, "
-                            f"{graph.num_nonkey} non-key nodes")
-
-                # --- Compute USplat losses every iteration after graph is built ---
-                if use_usplat and graph is not None and iteration > usplat_start_iter:
+                # --- Compute USplat losses every iteration after graph state is ready ---
+                if use_usplat and graph is not None and iteration >= usplat_start_iter:
 
                     # Density control schedule
                     total_usplat = opt.iterations - usplat_start_iter
@@ -368,24 +386,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     )
 
                     # --- Non-key node loss ---
-                    Lnon_key = non_key_node_loss(
-                        pos_nk_t=pos_nk_t,
-                        quats_nk_t=quats_nk,
-                        transforms_nk_t=transforms_nk,
-                        pos_nk_pretrained=pos_nk_pre,
-                        u_nk=u_nk,
-                        R_wc_t=R_wc_t,
-                        pos_o_nk=pos_o_nk,
-                        R_key_t=R_key_t,
-                        t_key_t=t_key_t,
-                        pos_key_t=pos_key_t,
-                        quats_key_t=quats_key,
-                        transforms_key_t=transforms_key,
-                        pos_o_key=pos_o_key,
-                        nonkey_nbrs_local=graph.nonkey_nbrs,
-                        nonkey_nbr_weights=graph.nonkey_nbr_weights,
-                        nonkey_nbrs_global=graph.nonkey_nbrs,
-                    )
+                    if N_n > 0:
+                        Lnon_key = non_key_node_loss(
+                            pos_nk_t=pos_nk_t,
+                            quats_nk_t=quats_nk,
+                            transforms_nk_t=transforms_nk,
+                            pos_nk_pretrained=pos_nk_pre,
+                            u_nk=u_nk,
+                            R_wc_t=R_wc_t,
+                            pos_o_nk=pos_o_nk,
+                            R_key_t=R_key_t,
+                            t_key_t=t_key_t,
+                            pos_key_t=pos_key_t,
+                            quats_key_t=quats_key,
+                            transforms_key_t=transforms_key,
+                            pos_o_key=pos_o_key,
+                            nonkey_nbrs_local=graph.nonkey_nbrs,
+                            nonkey_nbr_weights=graph.nonkey_nbr_weights,
+                            nonkey_nbrs_global=graph.nonkey_nbrs,
+                        )
+                    else:
+                        Lnon_key = torch.tensor(0.0, device=background.device)
 
                     loss = loss + opt.lambda_key * Lkey + opt.lambda_non_key * Lnon_key
                 
@@ -611,6 +632,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             size_threshold,
                             opt.densify_grad_t_threshold,
                         )
+                        if use_usplat and iteration >= usplat_start_iter:
+                            graph = None
+                            p_pretrained = None
+                            u_scalar = None
+                            usplat_state_dirty = True
 
                     if iteration % opt.opacity_reset_interval == 0 or (
                         dataset.white_background and iteration == opt.densify_from_iter
@@ -664,6 +690,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             opt, "spatio_temporal_pruning_random", False
                         ),
                     )
+                    if use_usplat and iteration >= usplat_start_iter:
+                        graph = None
+                        p_pretrained = None
+                        u_scalar = None
+                        usplat_state_dirty = True
 
                 if should_final_st_prune:
                     print(
@@ -685,7 +716,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             opt, "spatio_temporal_pruning_random", False
                         ),
                     )
+                    if use_usplat and iteration >= usplat_start_iter:
+                        graph = None
+                        p_pretrained = None
+                        u_scalar = None
+                        usplat_state_dirty = True
                     scene.save(iteration)
+
+                if use_usplat and iteration >= usplat_start_iter and usplat_state_dirty:
+                    u_scalar, graph, p_pretrained = rebuild_usplat_state(
+                        gaussians=gaussians,
+                        training_dataset=training_dataset,
+                        pipe=pipe,
+                        background=background,
+                        opt=opt,
+                        iteration=iteration,
+                    )
+                    usplat_state_dirty = False
 
 
 def prepare_output_and_logger(args):
@@ -909,7 +956,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--exhaust_test", action="store_true")
-    parser.add_argument("--use_usplat", action="store_true")
     
     # First pass: only get --config
     pre_args, _ = parser.parse_known_args(sys.argv[1:])

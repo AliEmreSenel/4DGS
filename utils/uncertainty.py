@@ -26,136 +26,162 @@ with default [rx, ry, rz] = [1, 1, 0.01]  (depth axis down-weighted so that
 depth deviations are penalized 100x more in the Mahalanobis loss).
 """
 
+def _disk_max_error(
+    err_map: Tensor,   # (H, W)
+    px: Tensor,        # (N,)
+    py: Tensor,        # (N,)
+    radii: Tensor,     # (N,) integer radii
+    W: int,
+    H: int,
+    chunk_size: int = 4096,
+) -> Tensor:
+    """
+    For each center (px[i], py[i]) and radius radii[i], return:
+        max(err_map[y, x]) over all valid pixels inside the disk.
+    This is vectorized over each chunk of Gaussians.
+    """
+    if px.numel() == 0:
+        return err_map.new_empty((0,))
+
+    max_r = int(radii.max().item())
+    offs = torch.arange(-max_r, max_r + 1, device=err_map.device)
+
+    dy, dx = torch.meshgrid(offs, offs, indexing="ij")  # (Kside, Kside)
+    dx = dx.reshape(1, -1)                              # (1, K)
+    dy = dy.reshape(1, -1)                              # (1, K)
+    dist2 = dx.square() + dy.square()                   # (1, K)
+
+    err_flat = err_map.contiguous().view(-1)
+    out = err_map.new_empty((px.numel(),))
+    neg_inf = torch.tensor(float("-inf"), dtype=err_map.dtype, device=err_map.device)
+
+    for s in range(0, px.numel(), chunk_size):
+        e = min(s + chunk_size, px.numel())
+
+        px_c = px[s:e].unsqueeze(1)         # (B, 1)
+        py_c = py[s:e].unsqueeze(1)         # (B, 1)
+        r2 = radii[s:e].unsqueeze(1).square()  # (B, 1)
+
+        xx = px_c + dx                      # (B, K)
+        yy = py_c + dy                      # (B, K)
+
+        valid = (
+            (dist2 <= r2) &
+            (xx >= 0) & (xx < W) &
+            (yy >= 0) & (yy < H)
+        )
+
+        # Clamp only for safe indexing; invalid entries are removed by masking.
+        lin = (yy.clamp(0, H - 1) * W + xx.clamp(0, W - 1)).long()  # (B, K)
+        vals = err_flat[lin]                                         # (B, K)
+        vals = torch.where(valid, vals, neg_inf)
+
+        out[s:e] = vals.max(dim=1).values
+
+    return out
+
 
 @torch.no_grad()
 def compute_uncertainty_single_frame(
-    means_t: Tensor,       # (G, 3)  Gaussian positions in world space at frame t
-    opacities_raw: Tensor, # (G,)    pre-sigmoid opacities
-    w2c: Tensor,           # (4, 4)  world-to-camera
-    K: Tensor,             # (3, 3)  camera intrinsics
-    img_wh: Tuple[int, int],  # (W, H)
-    gt_img: Tensor,        # (H, W, 3)  ground-truth RGB in [0,1]
-    full_rendered_rgb: Tensor, # (H, W, 3) full scene rendered RGB in [0,1]
-    radii: Tensor,    
-    depth: Tensor,  
-    eta_c: float = 0.5,    # color-error threshold for convergence check
-    phi: float = 1e6,      # large constant for high-uncertainty Gaussians
-    depth_margin_rel: float = 0.05,  # relative depth margin for occlusion test
+    means_t: Tensor,           # (G, 3)
+    opacities_raw: Tensor,     # (G,)
+    w2c: Tensor,               # (4, 4)
+    K: Tensor,                 # (3, 3)
+    img_wh: Tuple[int, int],   # (W, H)
+    gt_img: Tensor,            # (H, W, 3)
+    full_rendered_rgb: Tensor, # (H, W, 3)
+    radii: Tensor,             # (G,)
+    depth: Tensor,             # (H, W)
+    eta_c: float = 0.5,
+    phi: float = 1e6,
+    depth_margin_rel: float = 0.05,
+    chunk_size: int = 4096,
 ) -> Tuple[Tensor, Tensor]:
-   
+
     device = means_t.device
     W, H = img_wh
     G = means_t.shape[0]
 
-    # ---------- 1. Render scene to get depth + RGB + per-Gaussian projections ----------
-    # Activate Gaussian parameters
-    alpha = torch.sigmoid(opacities_raw)          # (G,)
-   
-    # Project Gaussian centers to camera space analytically
-    means3D_h = torch.cat(
-        [means_t, torch.ones(G, 1, device=device)], dim=-1
-    )  # (G, 4)
-    means_cam = (w2c @ means3D_h.T).T  # (G, 4)
+    alpha = opacities_raw.sigmoid().flatten()  # (G,)
 
-    # Per-Gaussian camera-space depth
-    g_depths = means_cam[:, 2]  # (G,)
+    # Faster than homogeneous multiplication for rigid/affine camera transforms.
+    # If your w2c is not affine, revert to the homogeneous version.
+    R = w2c[:3, :3]
+    t = w2c[:3, 3]
+    means_cam = means_t @ R.T + t              # (G, 3)
 
-    # Per-Gaussian projected 2D pixel centers
+    g_depths = means_cam[:, 2]                 # (G,)
+    z = g_depths.clamp_min(1e-6)
+
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
-    z = means_cam[:, 2].clamp(min=1e-6)
-    g_means2d = torch.stack([
-        fx * means_cam[:, 0] / z + cx,
-        fy * means_cam[:, 1] / z + cy,
-    ], dim=-1)  # (G, 2)
+    g_means2d = torch.stack(
+        (
+            fx * means_cam[:, 0] / z + cx,
+            fy * means_cam[:, 1] / z + cy,
+        ),
+        dim=-1,
+    )  # (G, 2)
 
-    # radii and rendered_depth come from outside — pass them in as arguments
-    g_radii = radii           # (G,)  passed in
-    rendered_depth = depth    # (H, W) passed in
+    g_radii = radii.reshape(-1)
+    u = torch.full((G,), phi, dtype=alpha.dtype, device=device)
 
-    u = torch.full((G,), fill_value=phi, dtype=torch.float32, device=device)
+    visible_mask = g_radii > 0
+    vis_idx = visible_mask.nonzero(as_tuple=True)[0]
+    if vis_idx.numel() == 0:
+        return u, g_radii
 
-    # Gaussians with radii > 0 are within the camera frustum
-    visible_mask = g_radii > 0  # (G,)
+    vis_depths = g_depths[vis_idx]
+    vis_alpha = alpha[vis_idx]
+    vis_radii = g_radii[vis_idx]
 
-    if visible_mask.any():
-        vis_idx = visible_mask.nonzero(as_tuple=True)[0]  # (N_vis,)
+    # Keep raw rounded centers for convergence logic.
+    vis_px = g_means2d[vis_idx, 0].round().long()
+    vis_py = g_means2d[vis_idx, 1].round().long()
 
-        # Projected pixel coords (integer, clamped to image bounds)
-        px = g_means2d[vis_idx, 0].round().long().clamp(0, W - 1)  # (N_vis,)
-        py = g_means2d[vis_idx, 1].round().long().clamp(0, H - 1)  # (N_vis,)
+    # Use clamped centers only for depth lookup.
+    px_clamped = vis_px.clamp(0, W - 1)
+    py_clamped = vis_py.clamp(0, H - 1)
 
-        # Depth comparison for occlusion detection
-        d_gauss    = g_depths[vis_idx]                    # (N_vis,)
-        d_rendered = rendered_depth[py, px]               # (N_vis,)
-        margin     = depth_margin_rel * d_rendered.clamp(min=1e-3)
-        not_occluded = d_gauss <= d_rendered + margin     # (N_vis,)
+    d_rendered = depth[py_clamped, px_clamped]
+    margin = depth_margin_rel * d_rendered.clamp_min(1e-3)
+    not_occluded = vis_depths <= d_rendered + margin
 
-        # Projected 2D area × opacity² (approximation of sum_h (v_i^h)^2)
-        r = g_radii[vis_idx]                              # (N_vis,)
-        a = alpha[vis_idx]                                # (N_vis,)
-        area = math.pi * r.clamp(min=0.5) ** 2           # (N_vis,) at least 1px circle
-        inv_sum_sq_v = 1.0 / (a * a * area + 1e-8)       # (N_vis,)
+    area = torch.pi * vis_radii.clamp_min(0.5).square()
+    u_vis = 1.0 / (vis_alpha.square() * area + 1e-8)
 
-        # Apply large constant where occluded
-        u_vis = torch.where(not_occluded, inv_sum_sq_v,
-                            torch.full_like(inv_sum_sq_v, phi))
-        u[vis_idx] = u_vis
+    # Precompute per-pixel color error once.
+    err_map = (full_rendered_rgb - gt_img).abs().mean(dim=-1)  # (H, W)
 
+    # Match original behavior: integer footprint radius.
+    r_int = vis_radii.long()
 
-    # ---------- 3. Convergence filter (Eq. 6–7) ----------
-    # If any pixel covered by Gaussian i has color error > eta_c, set u_i = phi.
-    # We check all pixels within the Gaussian's 2D footprint (circle of radius r).
-    if visible_mask.any():
-        vis_idx = visible_mask.nonzero(as_tuple=True)[0]
-        px = g_means2d[vis_idx, 0].round().long()
-        py = g_means2d[vis_idx, 1].round().long()
-        radii_vis = g_radii[vis_idx].long()
+    # Original code only checked convergence when the rounded center was in-bounds.
+    center_in_bounds = (
+        (vis_px >= 0) & (vis_px < W) &
+        (vis_py >= 0) & (vis_py < H)
+    )
 
-        # Check convergence: for each Gaussian, check if ANY pixel in its footprint
-        # has color error > eta_c. If so, mark as unconverged.
-        not_converged = torch.zeros(len(vis_idx), dtype=torch.bool, device=device)
-        max_color_err = torch.zeros(len(vis_idx), device=device)
-        
-        for i in range(len(vis_idx)):
-            r = radii_vis[i].item()
-            if r <= 0:
-                continue
-            
-            # Get bounding box of Gaussian footprint
-            x_min = max(0, int(px[i].item()) - r)
-            x_max = min(W - 1, int(px[i].item()) + r)
-            y_min = max(0, int(py[i].item()) - r)
-            y_max = min(H - 1, int(py[i].item()) + r)
-            
-            # Check if Gaussian center is within image bounds
-            if x_min <= int(px[i].item()) <= x_max and y_min <= int(py[i].item()) <= y_max:
-                # Get all pixels within the circular footprint
-                yy, xx = torch.meshgrid(
-                    torch.arange(y_min, y_max + 1, device=device),
-                    torch.arange(x_min, x_max + 1, device=device),
-                    indexing='ij'
-                )
-                
-                # Check which pixels are within the circular radius
-                dist_sq = (xx.float() - px[i].float()) ** 2 + (yy.float() - py[i].float()) ** 2
-                in_circle = dist_sq <= (r ** 2)
-                
-                if in_circle.any():
-                    # Get color errors for pixels in the footprint
-                    pixels_in_circle = yy[in_circle], xx[in_circle]
-                    color_at_pixels = full_rendered_rgb[pixels_in_circle]  # (N_pixels, 3)
-                    gt_at_pixels = gt_img[pixels_in_circle]  # (N_pixels, 3)
-                    pixel_errors = (color_at_pixels - gt_at_pixels).abs().mean(dim=-1)  # (N_pixels,)
-                    
-                    # Mark as unconverged if ANY pixel exceeds threshold
-                    max_err = pixel_errors.max().item()
-                    max_color_err[i] = max_err
-                    not_converged[i] = max_err > eta_c
-        
-        u[vis_idx] = torch.where(not_converged, torch.full_like(u[vis_idx], phi), u[vis_idx])
+    # No reason to test convergence for already-occluded Gaussians.
+    to_check = center_in_bounds & not_occluded & (r_int > 0)
 
+    not_converged = torch.zeros_like(to_check)
+    if to_check.any():
+        max_err = _disk_max_error(
+            err_map=err_map,
+            px=vis_px[to_check],
+            py=vis_py[to_check],
+            radii=r_int[to_check],
+            W=W,
+            H=H,
+            chunk_size=chunk_size,
+        )
+        not_converged[to_check] = max_err > eta_c
 
+    keep = not_occluded & ~not_converged
+    u_vis = torch.where(keep, u_vis, torch.full_like(u_vis, phi))
+
+    u[vis_idx] = u_vis
     return u, g_radii
 
 @torch.no_grad()
