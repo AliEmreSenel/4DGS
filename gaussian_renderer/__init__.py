@@ -30,7 +30,10 @@ def render(
     
     Background tensor (bg_color) must be on GPU!
     """
- 
+
+    if pc.gaussian_dim != 4:
+        raise ValueError("Only 4D Gaussian models are supported by this renderer.")
+
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda")
     try:
@@ -94,7 +97,7 @@ def render(
             timestamp=viewpoint_camera.timestamp,
             time_duration=pc.time_duration[1]-pc.time_duration[0],
             rot_4d=pc.rot_4d,
-            gaussian_dim=pc.gaussian_dim,
+            gaussian_dim=4,
             force_sh_3d=pc.force_sh_3d,
             prefiltered=False,
             debug=pipe.debug
@@ -121,7 +124,7 @@ def render(
         scales = pc.get_scaling
         rotations = pc.get_rotation
 
-    if use_mobilegs_sort_free and pc.gaussian_dim == 4:
+    if use_mobilegs_sort_free:
         # Apply the temporal Gaussian marginal in the sort-free path as well.
         # rot_4d Gaussians also have a timestamp-dependent spatial mean/covariance;
         # non-rotated 4D Gaussians keep their spatial covariance and use the temporal
@@ -139,19 +142,17 @@ def render(
             means3D = means3D + delta_mean
         else:
             cov3D_precomp = pc.get_covariance(scaling_modifier)
-        if pc.gaussian_dim == 4:
-            marginal_t = pc.get_marginal_t(viewpoint_camera.timestamp)
-            opacity = opacity * marginal_t
+        marginal_t = pc.get_marginal_t(viewpoint_camera.timestamp)
+        opacity = opacity * marginal_t
     else:
         scales = pc.get_scaling
         rotations = pc.get_rotation
-        if pc.gaussian_dim == 4:
-            scales_t = pc.get_scaling_t
-            ts = pc.get_t
-            if pc.rot_4d:
-                rotations_r = pc.get_rotation_r
-            if pc.prefilter_var > 0.0:
-                prefilter_var = pc.prefilter_var
+        scales_t = pc.get_scaling_t
+        ts = pc.get_t
+        if pc.rot_4d:
+            rotations_r = pc.get_rotation_r
+        if pc.prefilter_var > 0.0:
+            prefilter_var = pc.prefilter_var
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -160,34 +161,34 @@ def render(
     if override_color is None:
         if pipe.convert_SHs_python:
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, pc.get_max_sh_channels)
-            if pipe.compute_cov3D_python or (use_mobilegs_sort_free and pc.gaussian_dim == 4):
-                dir_pp = (means3D - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)).detach()
-            else:
+            if pipe.compute_cov3D_python or use_mobilegs_sort_free:
+                sh_means = means3D
+            elif pc.rot_4d:
                 _, delta_mean = pc.get_current_covariance_and_mean_offset(scaling_modifier, viewpoint_camera.timestamp)
-                dir_pp = ((means3D + delta_mean) - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)).detach()
-            dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
-            if pc.gaussian_dim == 3 or pc.force_sh_3d:
+                sh_means = means3D + delta_mean
+            else:
+                sh_means = means3D
+            dir_pp = (sh_means - viewpoint_camera.camera_center.expand_as(sh_means)).detach()
+            dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
+            if pc.force_sh_3d:
                 sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
-            elif pc.gaussian_dim == 4:
+            else:
                 dir_t = (pc.get_t - viewpoint_camera.timestamp).detach()
                 sh2rgb = eval_shfs_4d(pc.active_sh_degree, pc.active_sh_degree_t, shs_view, dir_pp_normalized, dir_t, pc.time_duration[1] - pc.time_duration[0])
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
             shs = pc.get_features
-            if pc.gaussian_dim == 4 and ts is None:
+            if ts is None:
                 ts = pc.get_t
     else:
         colors_precomp = override_color
 
     if use_mobilegs_sort_free and colors_precomp is None:
         shs_view = pc.get_features.transpose(1, 2).view(-1, 3, pc.get_max_sh_channels)
-        if pc.gaussian_dim == 4:
-            dir_pp = (means3D - viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)).detach()
-        else:
-            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)).detach()
+        dir_pp = (means3D - viewpoint_camera.camera_center.expand_as(means3D)).detach()
         dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
 
-        if pc.gaussian_dim == 3 or pc.force_sh_3d:
+        if pc.force_sh_3d:
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
         else:
             dir_t = (pc.get_t - viewpoint_camera.timestamp).detach()
@@ -212,12 +213,12 @@ def render(
         dropout_mask = torch.rand(
             (means3D.shape[0],), device=means3D.device, dtype=torch.float32
         ) > dropout_prob
-        if not dropout_mask.any():
+        if dropout_mask.numel() > 0 and not dropout_mask.any():
             dropout_mask[torch.randint(dropout_mask.shape[0], (1,), device=dropout_mask.device)] = True
     
     mask = None
     # Prefilter
-    if pc.gaussian_dim == 4 and marginal_t is not None and not (return_gaussian_scores or return_gaussian_scores_sq):
+    if marginal_t is not None and not (return_gaussian_scores or return_gaussian_scores_sq):
         mask = marginal_t[:, 0] > 0.05
     if dropout_mask is not None:
         mask = dropout_mask if mask is None else (mask & dropout_mask)
@@ -248,96 +249,83 @@ def render(
             flow_2d = flow_2d[mask]
     
     gaussian_score_max_error = None
+    image_height = int(viewpoint_camera.image_height)
+    image_width = int(viewpoint_camera.image_width)
 
-    if use_mobilegs_sort_free:
-        image_height = int(viewpoint_camera.image_height)
-        image_width = int(viewpoint_camera.image_width)
+    if means3D.shape[0] == 0:
+        # The faithful image for an empty scene is black. Keep a zero-valued
+        # gradient anchor so training-time bookkeeping remains valid.
+        grad_anchor = screenspace_points.sum() * 0.0
+        if pc.get_t.numel() > 0:
+            grad_anchor = grad_anchor + pc.get_t.sum() * 0.0
+        rendered_image = means3D.new_zeros((3, image_height, image_width)) + grad_anchor
+        radii = torch.empty((0,), device=means3D.device, dtype=torch.int32)
+        depth = rendered_image.new_zeros((1, image_height, image_width))
+        alpha = rendered_image.new_zeros((1, image_height, image_width))
+        flow = rendered_image.new_zeros((2, image_height, image_width))
+        gaussian_scores = means3D.new_empty((0,)) if (return_gaussian_scores or return_gaussian_scores_sq) else None
+        gaussian_score_max_error = means3D.new_empty((0,)) if gaussian_score_error_map is not None else None
+    elif use_mobilegs_sort_free:
+        cam_center = viewpoint_camera.camera_center.expand_as(means3D)
+        dir_pp = (means3D - cam_center).detach()
+        dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
+        shs_mlp = pc.get_features
+        scales_mlp = pc.get_scaling
+        rotations_mlp = pc.get_rotation
+        if mask is not None:
+            # The raster inputs have already been masked above. Apply the same
+            # mask to the MLP inputs for dropout and temporal filtering so
+            # tensor lengths stay aligned.
+            shs_mlp = shs_mlp[mask]
+            scales_mlp = scales_mlp[mask]
+            rotations_mlp = rotations_mlp[mask]
 
-        if means3D.shape[0] == 0:
-            # A 4D timestamp can legitimately mask out every Gaussian. Return a
-            # background image, but keep it connected to the tensors that the
-            # training loop reads gradients from. Otherwise loss.backward() can
-            # succeed while gaussians._t.grad stays None, which breaks 4D
-            # densification immediately after the backward pass.
-            grad_anchor = screenspace_points.sum() * 0.0
-            if pc.gaussian_dim == 4 and pc.get_t.numel() > 0:
-                grad_anchor = grad_anchor + pc.get_t.sum() * 0.0
-            rendered_image = (
-                bg_color.reshape(3, 1, 1).expand(3, image_height, image_width).clone()
-                + grad_anchor
-            )
-            radii = torch.empty((0,), device=means3D.device, dtype=torch.int32)
-            depth = rendered_image.new_zeros((1, image_height, image_width))
-            alpha = rendered_image.new_zeros((1, image_height, image_width))
-            flow = rendered_image.new_zeros((2, image_height, image_width))
-            covs_com = means3D.new_zeros((0, 6))
-            gaussian_scores = means3D.new_empty((0,)) if (return_gaussian_scores or return_gaussian_scores_sq) else None
-            gaussian_score_max_error = means3D.new_empty((0,)) if gaussian_score_error_map is not None else None
+        t_values = pc.get_t
+        if mask is not None:
+            t_values = t_values[mask]
+            marginal_t_mlp = marginal_t[mask]
         else:
-            cam_center = viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
-            dir_pp = (means3D - cam_center).detach()
-            dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
-            shs_mlp = pc.get_features
-            scales_mlp = pc.get_scaling
-            rotations_mlp = pc.get_rotation
-            time_features = None
-            if mask is not None:
-                # The raster inputs have already been masked above. Apply the
-                # same mask to the MLP inputs for both 3D random-dropout and 4D
-                # temporal filtering so tensor lengths stay aligned.
-                shs_mlp = shs_mlp[mask]
-                scales_mlp = scales_mlp[mask]
-                rotations_mlp = rotations_mlp[mask]
+            # Do not replace the temporal marginal by ones here. The
+            # return_gaussian_scores path disables masking and still needs
+            # the true timestamp support for scoring/pruning.
+            marginal_t_mlp = marginal_t
+        time_span = max(float(pc.time_duration[1] - pc.time_duration[0]), 1e-6)
+        time_mid = 0.5 * float(pc.time_duration[0] + pc.time_duration[1])
+        t_norm = (t_values - time_mid) / time_span
+        time_features = torch.cat([
+            (float(viewpoint_camera.timestamp) - t_values) / time_span,
+            t_norm,
+            marginal_t_mlp,
+        ], dim=1)
 
-            if pc.gaussian_dim == 4:
-                t_values = pc.get_t
-                if mask is not None:
-                    t_values = t_values[mask]
-                    marginal_t_mlp = marginal_t[mask]
-                else:
-                    # Do not replace the temporal marginal by ones here. The
-                    # return_gaussian_scores path disables masking and still needs
-                    # the true timestamp support for 4D scoring/pruning.
-                    marginal_t_mlp = marginal_t
-                time_span = max(float(pc.time_duration[1] - pc.time_duration[0]), 1e-6)
-                time_mid = 0.5 * float(pc.time_duration[0] + pc.time_duration[1])
-                t_norm = (t_values - time_mid) / time_span
-                time_features = torch.cat([
-                    (float(viewpoint_camera.timestamp) - t_values) / time_span,
-                    t_norm,
-                    marginal_t_mlp,
-                ], dim=1)
+        phi, mlp_opacity = pc.get_mobilegs_opacity_phi(
+            shs_mlp,
+            scales_mlp,
+            dir_pp_normalized,
+            rotations_mlp,
+            time_features=time_features,
+        )
+        opacity = mlp_opacity * marginal_t_mlp
 
-            phi, mlp_opacity = pc.get_mobilegs_opacity_phi(
-                shs_mlp,
-                scales_mlp,
-                dir_pp_normalized,
-                rotations_mlp,
-                time_features=time_features,
-            )
-            opacity = mlp_opacity
-            if pc.gaussian_dim == 4:
-                opacity = opacity * marginal_t_mlp
-
-            rendered_image, radii, _kernel_time, transmittance, gaussian_scores, gaussian_score_max_error = rasterizer(
-                means3D=means3D,
-                means2D=means2D,
-                shs=shs,
-                colors_precomp=colors_precomp,
-                opacities=opacity,
-                theta=torch.zeros_like(phi),
-                phi=phi,
-                scales=scales,
-                rotations=rotations,
-                cov3D_precomp=cov3D_precomp,
-                compute_scores=(return_gaussian_scores or return_gaussian_scores_sq),
-                compute_score_squares=return_gaussian_scores_sq,
-                score_error_map=gaussian_score_error_map,
-            )
-            depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
-            alpha = (1.0 - transmittance).unsqueeze(0).clamp(0.0, 1.0)
-            flow = rendered_image.new_zeros((2, rendered_image.shape[1], rendered_image.shape[2]))
-            covs_com = means3D.new_zeros((means3D.shape[0], 6))
+        rendered_image, radii, _kernel_time, transmittance, gaussian_scores, gaussian_score_max_error = rasterizer(
+            means3D=means3D,
+            means2D=means2D,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacities=opacity,
+            theta=torch.zeros_like(phi),
+            phi=phi,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=cov3D_precomp,
+            compute_scores=(return_gaussian_scores or return_gaussian_scores_sq),
+            compute_score_squares=return_gaussian_scores_sq,
+            score_error_map=gaussian_score_error_map,
+        )
+        depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
+        alpha = (1.0 - transmittance).unsqueeze(0).clamp(0.0, 1.0)
+        flow = rendered_image.new_zeros((2, rendered_image.shape[1], rendered_image.shape[2]))
+        covs_com = means3D.new_zeros((means3D.shape[0], 6))
     else:
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii, depth, alpha, flow, covs_com, gaussian_scores, gaussian_score_max_error = rasterizer(

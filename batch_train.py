@@ -848,6 +848,8 @@ def load_generated_namespace(cfg_path: Path, repo_root: Path) -> argparse.Namesp
 
 
 def extract_final_gaussian_count(model_params: Any) -> int | None:
+    if isinstance(model_params, dict):
+        model_params = model_params.get("gaussians")
     if isinstance(model_params, (tuple, list)) and len(model_params) > 1:
         xyz = model_params[1]
         if hasattr(xyz, "shape") and len(xyz.shape) >= 1:
@@ -877,11 +879,14 @@ def evaluate_checkpoint(
     from gaussian_renderer import render
     from scene import Scene
     from scene.gaussian_model import GaussianModel
+    from utils.checkpoint_utils import checkpoint_args, load_checkpoint
     from utils.image_utils import psnr
     from utils.loss_utils import lpips as lpips_metric
     from utils.loss_utils import ssim
 
-    cfg_ns = load_generated_namespace(generated_config_path, repo_root)
+    map_location = "cuda" if torch.cuda.is_available() else "cpu"
+    checkpoint_payload = load_checkpoint(checkpoint_path, map_location)
+    cfg_ns = checkpoint_args(checkpoint_payload)
 
     dummy_parser = argparse.ArgumentParser()
     lp = ModelParams(dummy_parser)
@@ -895,25 +900,14 @@ def evaluate_checkpoint(
     dataset = lp.extract(merged)
     pipe = pp.extract(merged)
 
-    gaussian_dim = int(getattr(merged, "gaussian_dim", 3))
-    time_duration = list(getattr(merged, "time_duration", [-0.5, 0.5]))
-    rot_4d = bool(getattr(merged, "rot_4d", False))
-    force_sh_3d = bool(getattr(merged, "force_sh_3d", False))
-    isotropic_gaussians = bool(getattr(merged, "isotropic_gaussians", False))
+    gaussian_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
+    if int(gaussian_kwargs.get("gaussian_dim", 4)) != 4:
+        raise ValueError("Only 4D Gaussian checkpoints are supported.")
+    time_duration = list(gaussian_kwargs.get("time_duration", [-0.5, 0.5]))
     num_pts = int(getattr(merged, "num_pts", 100000))
     num_pts_ratio = float(getattr(merged, "num_pts_ratio", 1.0))
-    sh_degree_t = 2 if bool(getattr(pipe, "eval_shfs_4d", False)) else 0
 
-    gaussians = GaussianModel(
-        dataset.sh_degree,
-        gaussian_dim=gaussian_dim,
-        time_duration=time_duration,
-        rot_4d=rot_4d,
-        force_sh_3d=force_sh_3d,
-        sh_degree_t=sh_degree_t,
-        prefilter_var=dataset.prefilter_var,
-        isotropic_gaussians=isotropic_gaussians,
-    )
+    gaussians = GaussianModel(**gaussian_kwargs)
     scene = Scene(
         dataset,
         gaussians,
@@ -925,8 +919,8 @@ def evaluate_checkpoint(
         time_duration=time_duration,
     )
 
-    map_location = "cuda" if torch.cuda.is_available() else "cpu"
-    model_params, loaded_iter = robust_torch_load(torch, checkpoint_path, map_location)
+    model_params = checkpoint_payload["gaussians"]
+    loaded_iter = int(checkpoint_payload["iteration"])
     gaussians.restore(model_params, None)
     gaussians.active_sh_degree = gaussians.max_sh_degree
     if hasattr(gaussians, "active_sh_degree_t"):
@@ -993,7 +987,7 @@ def evaluate_checkpoint(
         if torch.cuda.is_available()
         else None
     )
-    metric_results["final_gaussian_count"] = extract_final_gaussian_count(model_params)
+    metric_results["final_gaussian_count"] = extract_final_gaussian_count(checkpoint_payload)
     metric_results["checkpoint_size_bytes"] = checkpoint_path.stat().st_size
     metric_results["checkpoint_path"] = str(checkpoint_path.resolve())
     return metric_results

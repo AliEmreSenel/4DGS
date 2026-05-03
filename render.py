@@ -10,124 +10,6 @@ import numpy as np
 import torch
 
 
-def load_saved_namespace(cfg_path: Path):
-    text = cfg_path.read_text().strip()
-    if not text:
-        raise ValueError(f"Empty cfg_args file: {cfg_path}")
-    safe_globals = {"__builtins__": {}}
-    safe_locals = {
-        "Namespace": argparse.Namespace,
-        "True": True,
-        "False": False,
-        "None": None,
-    }
-    obj = eval(text, safe_globals, safe_locals)
-    if isinstance(obj, argparse.Namespace):
-        return obj
-    if isinstance(obj, dict):
-        return argparse.Namespace(**obj)
-    raise ValueError(f"Unexpected cfg_args object type from {cfg_path}: {type(obj)!r}")
-
-
-def recursive_omegaconf_merge_into_namespace(ns, cfg):
-    from omegaconf.dictconfig import DictConfig
-
-    def rec(key, host):
-        if isinstance(host[key], DictConfig):
-            for key1 in host[key].keys():
-                rec(key1, host[key])
-        else:
-            setattr(ns, key, host[key])
-
-    for k in cfg.keys():
-        rec(k, cfg)
-
-
-def find_checkpoint(model_path: Path, which: str | None):
-    if which:
-        p = Path(which)
-        if not p.is_absolute():
-            p = model_path / which
-        if p.exists():
-            return p
-        raise FileNotFoundError(p)
-
-    best = model_path / "chkpnt_best.pth"
-    if best.exists():
-        return best
-    ckpts = sorted(model_path.glob("chkpnt*.pth"))
-    numeric = []
-    for p in ckpts:
-        stem = p.stem.replace("chkpnt", "")
-        if stem.isdigit():
-            numeric.append((int(stem), p))
-    if numeric:
-        return max(numeric)[1]
-    raise FileNotFoundError(f"No checkpoint found in {model_path}")
-
-
-def infer_checkpoint_layout(model_params):
-    info = {
-        "gaussian_dim": None,
-        "rot_4d": None,
-        "active_sh_degree_t": 0,
-        "time_duration": None,
-        "isotropic_gaussians": None,
-    }
-    if not isinstance(model_params, (tuple, list)):
-        return info
-
-    if len(model_params) in (19, 20):
-        info["gaussian_dim"] = 4
-        info["rot_4d"] = bool(model_params[16])
-        try:
-            scales = model_params[4]
-            rot_l = model_params[5]
-            rot_r = model_params[15]
-            info["isotropic_gaussians"] = (
-                hasattr(scales, "shape")
-                and scales.ndim == 2
-                and scales.shape[1] == 1
-                and hasattr(rot_l, "numel")
-                and rot_l.numel() == 0
-                and hasattr(rot_r, "numel")
-                and rot_r.numel() == 0
-            )
-        except Exception:
-            pass
-        try:
-            info["active_sh_degree_t"] = int(model_params[18])
-        except Exception:
-            info["active_sh_degree_t"] = 0
-        try:
-            tvals = model_params[13]
-            if hasattr(tvals, "detach"):
-                tvals = tvals.detach().cpu().numpy()
-            tmin = float(np.min(tvals))
-            tmax = float(np.max(tvals))
-            if np.isfinite(tmin) and np.isfinite(tmax):
-                pad = max(1e-4, 0.02 * (tmax - tmin + 1e-6))
-                info["time_duration"] = [tmin - pad, tmax + pad]
-        except Exception:
-            pass
-    elif len(model_params) in (12, 13):
-        info["gaussian_dim"] = 3
-        info["rot_4d"] = False
-        try:
-            scales = model_params[4]
-            rot_l = model_params[5]
-            info["isotropic_gaussians"] = (
-                hasattr(scales, "shape")
-                and scales.ndim == 2
-                and scales.shape[1] == 1
-                and hasattr(rot_l, "numel")
-                and rot_l.numel() == 0
-            )
-        except Exception:
-            pass
-    return info
-
-
 def normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     if n < 1e-8:
@@ -405,6 +287,45 @@ def select_bounded_cameras(train_cams, test_cams, split: str):
     return train_cams + test_cams
 
 
+
+class CheckpointScene:
+    def __init__(self, scene_metadata, Camera):
+        self.cameras_extent = float(scene_metadata["cameras_extent"])
+        self.white_background = bool(scene_metadata["white_background"])
+        self.train_cameras = {
+            1.0: [camera_from_metadata(Camera, cam) for cam in scene_metadata.get("train_cameras", [])]
+        }
+        self.test_cameras = {
+            1.0: [camera_from_metadata(Camera, cam) for cam in scene_metadata.get("test_cameras", [])]
+        }
+
+
+def camera_from_metadata(Camera, meta):
+    resolution = meta.get("resolution") or [int(meta["width"]), int(meta["height"])]
+    return Camera(
+        colmap_id=int(meta.get("colmap_id", meta.get("uid", 0))),
+        R=np.array(meta["R"], dtype=np.float32),
+        T=np.array(meta["T"], dtype=np.float32),
+        FoVx=float(meta["FoVx"]),
+        FoVy=float(meta["FoVy"]),
+        image=torch.empty((3, int(resolution[1]), int(resolution[0]))),
+        gt_alpha_mask=None,
+        image_name=str(meta.get("image_name", f"cam_{meta.get('uid', 0)}")),
+        uid=int(meta.get("uid", meta.get("colmap_id", 0))),
+        trans=np.array(meta.get("trans", [0.0, 0.0, 0.0]), dtype=np.float32),
+        scale=float(meta.get("scale", 1.0)),
+        data_device="cuda",
+        timestamp=float(meta.get("timestamp", 0.0)),
+        cx=float(meta.get("cx", -1)),
+        cy=float(meta.get("cy", -1)),
+        fl_x=float(meta.get("fl_x", -1)),
+        fl_y=float(meta.get("fl_y", -1)),
+        resolution=(int(resolution[0]), int(resolution[1])),
+        image_path=None,
+        meta_only=True,
+    )
+
+
 def select_orbit_cameras(train_cams, test_cams, split: str):
     if split == "train":
         return train_cams
@@ -476,7 +397,6 @@ def render_orbit_mode(
     scene,
     render,
     background,
-    dataset,
     gaussians,
     pipe,
     Camera,
@@ -518,7 +438,7 @@ def render_orbit_mode(
     time_end = default_time_end if args.time_end is None else args.time_end
 
     frames_dir = out_dir / "frames"
-    save_png = not args.skip_png
+    save_png = bool(args.save_png)
     if save_png:
         frames_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "orbit_time.mp4"
@@ -677,7 +597,7 @@ def render_bounded_mode(
 
     video_path = out_dir / "bounded_novel.mp4"
     frames_dir = out_dir / "frames"
-    save_png = not args.skip_png
+    save_png = bool(args.save_png)
     if save_png:
         frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -776,13 +696,10 @@ def render_bounded_mode(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Render videos from a trained 3D/4D Gaussian checkpoint"
+        description="Render videos from a self-contained 4D Gaussian checkpoint"
     )
     parser.add_argument("--repo_root", type=str, default=".")
-    parser.add_argument("--model_path", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--source_path", type=str, default=None)
+    parser.add_argument("--model_file", type=str, required=True)
     parser.add_argument("--frames", type=int, default=600)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--width", type=int, default=0)
@@ -801,7 +718,7 @@ def main():
             "bounded_novel_time",
             "bounded_novel_freeze",
         ],
-        default="bounded_novel_time",
+        default="orbit-time",
     )
     parser.add_argument("--split", choices=["train", "test", "all"], default="all")
     parser.add_argument("--sweep_loops", type=float, default=1.0)
@@ -834,119 +751,59 @@ def main():
     parser.add_argument("--look_at_offset_y", type=float, default=0.0)
     parser.add_argument("--orbit_start_deg", type=float, default=0.0)
     parser.add_argument("--orbit_end_deg", type=float, default=360.0)
-    parser.add_argument("--skip_png", action="store_true")
+    parser.add_argument("--save_png", action="store_true", help="Also write individual PNG frames next to the video")
     parser.add_argument("--out_dir", type=str, default=None)
-    parser.add_argument("--isotropic_gaussians", action="store_true")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    model_path = Path(args.model_path).resolve()
+    model_file = Path(args.model_file).resolve()
     orbit_modes = {"orbit-time", "orbit-only", "time-only"}
     default_subdir = "orbit_time" if args.time_mode in orbit_modes else "bounded_novel"
     out_dir = (
         Path(args.out_dir).resolve()
         if args.out_dir
-        else model_path / "renders" / default_subdir
+        else model_file.parent / "renders" / default_subdir
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(repo_root))
 
     from arguments import ModelParams, PipelineParams
+    from utils.checkpoint_utils import checkpoint_args, load_checkpoint
     from gaussian_renderer import render
-    from scene import Scene
     from scene.cameras import Camera
     from scene.gaussian_model import GaussianModel
 
+    map_location = "cuda" if torch.cuda.is_available() else "cpu"
+    checkpoint_payload = load_checkpoint(model_file, map_location=map_location)
+    loaded_iter = int(checkpoint_payload["iteration"])
+    ckpt_path = model_file
+
     dummy_parser = argparse.ArgumentParser()
-    lp = ModelParams(dummy_parser)
+    ModelParams(dummy_parser)
     pp = PipelineParams(dummy_parser)
     defaults = dummy_parser.parse_args([])
     resolved = argparse.Namespace(**vars(defaults))
+    vars(resolved).update(vars(checkpoint_args(checkpoint_payload)))
 
-    cfg_args_path = model_path / "cfg_args"
-    if cfg_args_path.exists():
-        saved = load_saved_namespace(cfg_args_path)
-        vars(resolved).update(vars(saved))
-    if args.config is not None:
-        from omegaconf import OmegaConf
+    run_config = checkpoint_payload.get("run_config", {})
+    gaussian_kwargs = dict(run_config.get("gaussian_kwargs", {}))
+    if int(gaussian_kwargs.get("gaussian_dim", 4)) != 4:
+        raise ValueError("Only 4D Gaussian checkpoints are supported.")
 
-        cfg = OmegaConf.load(args.config)
-        recursive_omegaconf_merge_into_namespace(resolved, cfg)
-
-    resolved.model_path = str(model_path)
-    if args.source_path is not None:
-        resolved.source_path = os.path.abspath(args.source_path)
-
-    ckpt_path = find_checkpoint(model_path, args.checkpoint)
-    map_location = "cuda" if torch.cuda.is_available() else "cpu"
-    model_params, loaded_iter = torch.load(
-        ckpt_path, map_location=map_location, weights_only=False
-    )
-    inferred = infer_checkpoint_layout(model_params)
-    if inferred["gaussian_dim"] is not None:
-        resolved.gaussian_dim = inferred["gaussian_dim"]
-    if inferred["rot_4d"] is not None:
-        resolved.rot_4d = inferred["rot_4d"]
-    if inferred["isotropic_gaussians"] is True:
-        resolved.isotropic_gaussians = True
-    if getattr(resolved, "time_duration", None) is None or list(
-        getattr(resolved, "time_duration", [-0.5, 0.5])
-    ) == [-0.5, 0.5]:
-        if inferred["time_duration"] is not None:
-            resolved.time_duration = inferred["time_duration"]
-    if args.isotropic_gaussians:
-        resolved.isotropic_gaussians = True
-
-    dataset = lp.extract(resolved)
     pipe = pp.extract(resolved)
-    gaussian_dim = getattr(resolved, "gaussian_dim", 3)
-    time_duration = getattr(resolved, "time_duration", [-0.5, 0.5])
-    rot_4d = getattr(resolved, "rot_4d", False)
-    force_sh_3d = getattr(resolved, "force_sh_3d", False)
-    isotropic_gaussians = getattr(resolved, "isotropic_gaussians", False)
-    num_pts = getattr(resolved, "num_pts", 100000)
-    num_pts_ratio = getattr(resolved, "num_pts_ratio", 1.0)
-    sh_degree_t = max(
-        inferred["active_sh_degree_t"], 2 if getattr(pipe, "eval_shfs_4d", False) else 0
-    )
-
-    if not os.path.exists(dataset.source_path):
-        raise FileNotFoundError(
-            f"Dataset source_path does not exist: {dataset.source_path}. "
-            f"Pass --source_path or --config configs/...yaml."
-        )
-
-    gaussians = GaussianModel(
-        dataset.sh_degree,
-        gaussian_dim=gaussian_dim,
-        time_duration=time_duration,
-        rot_4d=rot_4d,
-        force_sh_3d=force_sh_3d,
-        sh_degree_t=sh_degree_t,
-        prefilter_var=dataset.prefilter_var,
-        isotropic_gaussians=isotropic_gaussians,
-    )
-    scene = Scene(
-        dataset,
-        gaussians,
-        load_iteration=None,
-        shuffle=False,
-        resolution_scales=[1.0],
-        num_pts=num_pts,
-        num_pts_ratio=num_pts_ratio,
-        time_duration=time_duration,
-    )
-    gaussians.restore(model_params, None)
+    gaussians = GaussianModel(**gaussian_kwargs)
+    gaussians.restore(checkpoint_payload["gaussians"], None)
     gaussians.active_sh_degree = gaussians.max_sh_degree
     if hasattr(gaussians, "active_sh_degree_t"):
-        try:
-            gaussians.active_sh_degree_t = max(
-                gaussians.active_sh_degree_t, inferred["active_sh_degree_t"]
-            )
-        except Exception:
-            pass
+        gaussians.active_sh_degree_t = max(
+            gaussians.active_sh_degree_t,
+            int(gaussian_kwargs.get("sh_degree_t", 0)),
+        )
 
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    scene = CheckpointScene(checkpoint_payload["scene"], Camera)
+    time_duration = gaussian_kwargs.get("time_duration", gaussians.time_duration)
+
+    bg_color = [1, 1, 1] if scene.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     if args.time_mode in orbit_modes:
@@ -955,7 +812,6 @@ def main():
             scene=scene,
             render=render,
             background=background,
-            dataset=dataset,
             gaussians=gaussians,
             pipe=pipe,
             Camera=Camera,

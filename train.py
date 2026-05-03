@@ -32,6 +32,7 @@ from utils.uncertainty import compute_uncertainty_all_frames
 from utils.graph import build_graph, USplat4DGraph
 from utils.usplat_losses import key_node_loss, non_key_node_loss
 from utils.dqb import quat_to_rotmat, rotmat_to_quat
+from utils.checkpoint_utils import build_run_config, checkpoint_args, load_checkpoint
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -114,7 +115,7 @@ def _current_covariance_and_mean_offset(gaussians, timestamp, indices=None):
     scaling = _indexed_scaling(gaussians, indices)
     rotation = _indexed_rotation(gaussians, indices)
 
-    if getattr(gaussians, "gaussian_dim", 3) == 4 and getattr(gaussians, "rot_4d", False):
+    if getattr(gaussians, "gaussian_dim", 4) == 4 and getattr(gaussians, "rot_4d", False):
         scaling_xyzt = torch.cat([scaling, _indexed_scaling_t(gaussians, indices)], dim=1)
         rotation_r = _indexed_rotation(gaussians, indices, right=True)
         t_values = gaussians.get_t if indices is None else gaussians.get_t[indices]
@@ -181,7 +182,7 @@ def _current_means_and_quats_for_timestamps(
     chunk_size = max(1, int(quat_chunk_size))
     xyz_all = gaussians.get_xyz
     use_time_varying_rot = (
-        getattr(gaussians, "gaussian_dim", 3) == 4
+        getattr(gaussians, "gaussian_dim", 4) == 4
         and getattr(gaussians, "rot_4d", False)
         and not getattr(gaussians, "isotropic_gaussians", False)
     )
@@ -282,8 +283,11 @@ def rebuild_usplat_state(gaussians, training_dataset, pipe, background, opt, ite
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, isotropic_gaussians,
-             use_usplat=False, usplat_start_iter=10000):
+             use_usplat=False, usplat_start_iter=10000, run_config_args=None):
     
+    if gaussian_dim != 4:
+        raise ValueError("Only 4D Gaussian training is supported.")
+
     if dataset.frame_ratio > 1:
         time_duration = [
             time_duration[0] / dataset.frame_ratio,
@@ -312,6 +316,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         time_duration=time_duration,
     )
     save_gaussian_args(scene.model_path, gaussian_kwargs)
+    scene.checkpoint_run_config = build_run_config(run_config_args or Namespace(), gaussian_kwargs)
+    scene.checkpoint_include_mobilegs = bool(getattr(pipe, "sort_free_render", False))
 
     gaussians.training_setup(opt)
 
@@ -337,8 +343,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     usplat_state_dirty = False
     
     if checkpoint:
-        model_params, first_iter = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+        checkpoint_payload = load_checkpoint(checkpoint, map_location="cuda")
+        first_iter = int(checkpoint_payload["iteration"])
+        gaussians.restore(checkpoint_payload["gaussians"], opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -391,9 +398,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if final_prune_ratio > 1.0:
         final_prune_ratio = final_prune_ratio / 100.0
     final_prune_ratio = max(0.0, min(final_prune_ratio, 1.0))
-
-    if opt.final_prune_from_iter >= 0 and final_prune_ratio > 0.0 and gaussian_dim != 4:
-        raise ValueError("Final pruning is ST-pruning and requires gaussian_dim == 4")
 
     num_workers = 12 if dataset.dataloader else 0
     dataloader_kwargs = {
@@ -850,10 +854,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if test_psnr >= best_psnr:
                         best_psnr = test_psnr
                         print("\n[ITER {}] Saving best checkpoint".format(iteration))
-                        torch.save(
-                            (gaussians.capture(), iteration),
-                            scene.model_path + "/chkpnt_best.pth",
-                        )
+                        scene.save(iteration, filename="chkpnt_best.pth")
 
                 if iteration in saving_iterations:
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -888,11 +889,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         )
                         # In MobileGS/sort-free mode the learned per-Gaussian
                         # opacity used for rendering comes from the MobileGS MLP,
-                        # not from GaussianModel._opacity. The legacy 3DGS opacity
-                        # prune would therefore prune by a stale/untrained tensor
-                        # and can delete the entire scene after opacity resets. Keep
-                        # densification and size pruning, but disable this legacy
-                        # opacity criterion for sort-free runs.
+                        # not from GaussianModel._opacity. The stored opacity tensor
+                        # would therefore be stale/untrained and can delete the entire
+                        # scene after opacity resets. Keep densification and size
+                        # pruning, but disable that opacity criterion here.
                         min_opacity_for_prune = (
                             0.0 if getattr(pipe, "sort_free_render", False)
                             else opt.thresh_opa_prune
@@ -915,8 +915,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                     # The sort-free renderer predicts opacity with the MobileGS
                     # MLP. Resetting GaussianModel._opacity is not used by the
-                    # sort-free forward pass and makes the legacy opacity-pruning
-                    # signal misleading, so skip it in this mode.
+                    # sort-free forward pass and makes the opacity-pruning signal
+                    # misleading, so skip it in this mode.
                     if (
                         not getattr(pipe, "sort_free_render", False)
                         and (
@@ -1252,7 +1252,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000, 10_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--start_checkpoint", type=str, default=None)
-    parser.add_argument("--gaussian_dim", type=int, default=3)
+    parser.add_argument("--gaussian_dim", type=int, default=4, choices=[4])
     parser.add_argument("--time_duration", nargs=2, type=float, default=[-0.5, 0.5])
     parser.add_argument("--num_pts", type=int, default=100_000)
     parser.add_argument("--num_pts_ratio", type=float, default=1.0)
@@ -1267,8 +1267,11 @@ if __name__ == "__main__":
     # First pass: only get --config
     pre_args, _ = parser.parse_known_args(sys.argv[1:])
 
-    # Load config and use it as parser defaults
-    if pre_args.config is not None:
+    # Load config and use it as parser defaults. Resume checkpoints carry an
+    # immutable run config, so external config files are ignored for resumed runs.
+    if pre_args.start_checkpoint:
+        pass
+    elif pre_args.config is not None:
         cfg = OmegaConf.load(pre_args.config)
         cfg_defaults = flatten_cfg(cfg)
 
@@ -1280,7 +1283,14 @@ if __name__ == "__main__":
 
     # Second pass: real parse, CLI now overrides config
     args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
+    if args.start_checkpoint:
+        resume_checkpoint = args.start_checkpoint
+        checkpoint_payload = load_checkpoint(resume_checkpoint, map_location="cpu")
+        args = checkpoint_args(checkpoint_payload)
+        args.start_checkpoint = resume_checkpoint
+        print(f"Loaded immutable run config from checkpoint: {resume_checkpoint}")
+    if args.iterations not in args.save_iterations:
+        args.save_iterations.append(args.iterations)
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [
             i for i in range(0, args.iterations, 500)
@@ -1297,6 +1307,6 @@ if __name__ == "__main__":
 
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
              args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.isotropic_gaussians,
-             args.use_usplat, args.usplat_start_iter)
+             args.use_usplat, args.usplat_start_iter, args)
 
     print("\nTraining complete.")

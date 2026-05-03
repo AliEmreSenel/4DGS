@@ -24,7 +24,7 @@ with default [rx, ry, rz] = [1, 1, 0.01].
 
 
 def _current_covariance_and_mean_offset(gaussians, timestamp):
-    if getattr(gaussians, "gaussian_dim", 3) == 4 and getattr(gaussians, "rot_4d", False):
+    if getattr(gaussians, "gaussian_dim", 4) == 4 and getattr(gaussians, "rot_4d", False):
         return gaussians.get_current_covariance_and_mean_offset(1.0, float(timestamp))
     cov = gaussians.get_covariance(1.0)
     delta = torch.zeros_like(gaussians.get_xyz)

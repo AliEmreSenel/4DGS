@@ -19,6 +19,7 @@ from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from utils.data_utils import CameraDataset
+from utils.checkpoint_utils import build_checkpoint, scene_to_metadata, save_checkpoint
 
 class Scene:
 
@@ -32,6 +33,8 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
         self.white_background = args.white_background
+        self.checkpoint_run_config = None
+        self.checkpoint_include_mobilegs = False
 
         if load_iteration:
             if load_iteration == -1:
@@ -88,8 +91,19 @@ class Scene:
             else:
                 self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
-    def save(self, iteration):
-        torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt" + str(iteration) + ".pth")
+    def save(self, iteration, filename=None):
+        if self.checkpoint_run_config is None:
+            raise RuntimeError("Scene.checkpoint_run_config must be set before saving checkpoints.")
+        checkpoint = build_checkpoint(
+            gaussians=self.gaussians,
+            iteration=iteration,
+            run_config=self.checkpoint_run_config,
+            scene_metadata=scene_to_metadata(self),
+            include_mobilegs=self.checkpoint_include_mobilegs,
+        )
+        if filename is None:
+            filename = "chkpnt" + str(iteration) + ".pth"
+        save_checkpoint(os.path.join(self.model_path, filename), checkpoint)
 
     def getTrainCameras(self, scale=1.0):
         return CameraDataset(self.train_cameras[scale].copy(), self.white_background)

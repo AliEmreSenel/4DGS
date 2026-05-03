@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from scene.gaussian_model import GaussianModel
+from utils.checkpoint_utils import load_checkpoint
 from utils.gpcc_utils import calculate_morton_order
 
 import argparse
@@ -72,184 +73,27 @@ def reduction(before, after):
     return ratio, pct
 
 
-def split_checkpoint_payload(model_params):
-    if not isinstance(model_params, (tuple, list)):
-        raise TypeError(f"Expected tuple/list, got {type(model_params)}")
-
-    aux_tail = None
-    core = model_params
-
-    if len(model_params) == 20 and isinstance(model_params[-1], dict):
-        tail = model_params[-1]
-        if "model" in tail and "optimizer" in tail:
-            aux_tail = tail
-            core = model_params[:-1]
-
-    return tuple(core), aux_tail
-
-
-def load_gaussian_args(ckpt_path):
-    gaussian_args_path = os.path.join(os.path.dirname(os.path.abspath(ckpt_path)), "gaussian_args")
-    if not os.path.exists(gaussian_args_path):
-        return None
-
-    with open(gaussian_args_path, "r", encoding="utf-8") as f:
-        gaussian_args = json.load(f)
-
-    if not isinstance(gaussian_args, dict):
-        raise ValueError(f"Expected JSON object in {gaussian_args_path}, got {type(gaussian_args)}")
-
-    return gaussian_args
-
-
-def resolve_model_kwargs(ckpt_path, core_params, model_overrides=None):
+def load_gaussians_from_checkpoint(
+    ckpt_path,
+    device="auto",
+    model_overrides=None,
+):
+    device = resolve_device(device)
     model_overrides = model_overrides or {}
+    checkpoint = load_checkpoint(ckpt_path, map_location=device)
+    model_kwargs = dict(checkpoint["run_config"].get("gaussian_kwargs", {}))
+    model_kwargs.update(model_overrides)
+    if int(model_kwargs.get("gaussian_dim", 4)) != 4:
+        raise ValueError("Only 4D Gaussian checkpoints are supported.")
 
-    gaussian_args = load_gaussian_args(ckpt_path)
-    if gaussian_args is not None:
-        kwargs = dict(gaussian_args)
-        kwargs.update(model_overrides)
-        return kwargs
-
-    return infer_model_kwargs(core_params, model_overrides=model_overrides)
-
-
-def infer_model_kwargs(core_params, model_overrides=None):
-    model_overrides = model_overrides or {}
-
-    if len(core_params) == 12:
-        active_sh_degree = int(core_params[0])
-        rotation = core_params[5]
-        isotropic_gaussians = bool(torch.is_tensor(rotation) and rotation.numel() == 0)
-
-        kwargs = {
-            "sh_degree": active_sh_degree,
-            "gaussian_dim": 3,
-            "time_duration": [-0.5, 0.5],
-            "rot_4d": False,
-            "force_sh_3d": False,
-            "sh_degree_t": 0,
-            "prefilter_var": -1.0,
-            "isotropic_gaussians": isotropic_gaussians,
-        }
-    elif len(core_params) == 19:
-        active_sh_degree = int(core_params[0])
-        rotation = core_params[5]
-        isotropic_gaussians = bool(torch.is_tensor(rotation) and rotation.numel() == 0)
-        rot_4d = bool(core_params[16])
-        active_sh_degree_t = int(core_params[18])
-
-        kwargs = {
-            "sh_degree": active_sh_degree,
-            "gaussian_dim": 4,
-            "time_duration": [-0.5, 0.5],
-            "rot_4d": rot_4d,
-            "force_sh_3d": False,
-            "sh_degree_t": active_sh_degree_t,
-            "prefilter_var": -1.0,
-            "isotropic_gaussians": isotropic_gaussians,
-        }
-    else:
-        raise ValueError(f"Unsupported core checkpoint tuple length: {len(core_params)}")
-
-    kwargs.update(model_overrides)
-    return kwargs
-
-
-def load_gaussians_from_core_tuple(gaussians, core_params, device="cpu"):
-    device = torch.device(device)
-
-    if len(core_params) == 12:
-        (
-            gaussians.active_sh_degree,
-            xyz,
-            features_dc,
-            features_rest,
-            scaling,
-            rotation,
-            opacity,
-            max_radii2D,
-            xyz_gradient_accum,
-            denom,
-            _opt_dict,
-            spatial_lr_scale,
-        ) = core_params
-
-        gaussians._xyz = nn.Parameter(xyz.to(device).contiguous().requires_grad_(True))
-        gaussians._features_dc = nn.Parameter(features_dc.to(device).contiguous().requires_grad_(True))
-        gaussians._features_rest = nn.Parameter(features_rest.to(device).contiguous().requires_grad_(True))
-        gaussians._scaling = nn.Parameter(scaling.to(device).contiguous().requires_grad_(True))
-        if gaussians.isotropic_gaussians:
-            gaussians._rotation = torch.empty((0, 4), device=device, dtype=gaussians._xyz.dtype)
-        else:
-            gaussians._rotation = nn.Parameter(rotation.to(device).contiguous().requires_grad_(True))
-        gaussians._opacity = nn.Parameter(opacity.to(device).contiguous().requires_grad_(True))
-
-        gaussians.max_radii2D = max_radii2D.to(device)
-        gaussians.xyz_gradient_accum = xyz_gradient_accum.to(device)
-        gaussians.denom = denom.to(device)
-        gaussians.spatial_lr_scale = float(spatial_lr_scale)
-        gaussians.optimizer = None
-
-    elif len(core_params) == 19:
-        (
-            gaussians.active_sh_degree,
-            xyz,
-            features_dc,
-            features_rest,
-            scaling,
-            rotation,
-            opacity,
-            max_radii2D,
-            xyz_gradient_accum,
-            t_gradient_accum,
-            denom,
-            _opt_dict,
-            spatial_lr_scale,
-            t,
-            scaling_t,
-            rotation_r,
-            rot_4d,
-            env_map,
-            active_sh_degree_t,
-        ) = core_params
-
-        gaussians._xyz = nn.Parameter(xyz.to(device).contiguous().requires_grad_(True))
-        gaussians._features_dc = nn.Parameter(features_dc.to(device).contiguous().requires_grad_(True))
-        gaussians._features_rest = nn.Parameter(features_rest.to(device).contiguous().requires_grad_(True))
-        gaussians._scaling = nn.Parameter(scaling.to(device).contiguous().requires_grad_(True))
-        if gaussians.isotropic_gaussians:
-            gaussians._rotation = torch.empty((0, 4), device=device, dtype=gaussians._xyz.dtype)
-        else:
-            gaussians._rotation = nn.Parameter(rotation.to(device).contiguous().requires_grad_(True))
-        gaussians._opacity = nn.Parameter(opacity.to(device).contiguous().requires_grad_(True))
-
-        gaussians.max_radii2D = max_radii2D.to(device)
-        gaussians.xyz_gradient_accum = xyz_gradient_accum.to(device)
-        gaussians.t_gradient_accum = t_gradient_accum.to(device)
-        gaussians.denom = denom.to(device)
-        gaussians.spatial_lr_scale = float(spatial_lr_scale)
-
-        gaussians._t = nn.Parameter(t.to(device).contiguous().requires_grad_(True))
-        gaussians._scaling_t = nn.Parameter(scaling_t.to(device).contiguous().requires_grad_(True))
-
-        if gaussians.rot_4d and not gaussians.isotropic_gaussians:
-            gaussians._rotation_r = nn.Parameter(rotation_r.to(device).contiguous().requires_grad_(True))
-        else:
-            gaussians._rotation_r = torch.empty((0, 4), device=device, dtype=gaussians._xyz.dtype)
-
-        gaussians.rot_4d = bool(rot_4d)
-        gaussians.env_map = env_map
-        gaussians.active_sh_degree_t = int(active_sh_degree_t)
-        gaussians.optimizer = None
-
-    else:
-        raise ValueError(f"Unsupported core checkpoint tuple length: {len(core_params)}")
-
-    return gaussians
+    gaussians = GaussianModel(**model_kwargs)
+    gaussians.restore(checkpoint["gaussians"], training_args=None)
+    return gaussians, int(checkpoint["iteration"]), checkpoint, model_kwargs
 
 
 def build_raw_gaussian_payload(gaussians):
+    if gaussians.gaussian_dim != 4:
+        raise ValueError("Only 4D Gaussian payloads are supported.")
     return {
         "format": "gaussian-raw-v1",
         "meta": {
@@ -289,11 +133,10 @@ def collect_model_tensors(gaussians, sort_idx=None):
     }
     if not gaussians.isotropic_gaussians:
         out["rotation"] = take(gaussians._rotation)
-    if gaussians.gaussian_dim == 4:
-        out["t"] = take(gaussians._t)
-        out["scaling_t"] = take(gaussians._scaling_t)
-        if gaussians.rot_4d and not gaussians.isotropic_gaussians:
-            out["rotation_r"] = take(gaussians._rotation_r)
+    out["t"] = take(gaussians._t)
+    out["scaling_t"] = take(gaussians._scaling_t)
+    if gaussians.rot_4d and not gaussians.isotropic_gaussians:
+        out["rotation_r"] = take(gaussians._rotation_r)
     return out
 
 
@@ -398,26 +241,21 @@ def load_gaussians_from_memory(
 ):
     device = resolve_device(device)
     model_overrides = model_overrides or {}
+    if not isinstance(ckpt_obj, dict) or "gaussians" not in ckpt_obj:
+        raise ValueError("Expected a self-contained 4DGS checkpoint dictionary.")
 
-    model_params, iteration = ckpt_obj
-    core_params, aux_tail = split_checkpoint_payload(model_params)
-
-    if ckpt_path is not None:
-        model_kwargs = resolve_model_kwargs(
-            ckpt_path,
-            core_params,
-            model_overrides=model_overrides,
-        )
-    else:
-        model_kwargs = infer_model_kwargs(
-            core_params,
-            model_overrides=model_overrides,
-        )
-
+    model_kwargs = dict(ckpt_obj["run_config"].get("gaussian_kwargs", {}))
+    model_kwargs.update(model_overrides)
     gaussians = GaussianModel(**model_kwargs)
-    gaussians = load_gaussians_from_core_tuple(gaussians, core_params, device=device)
+    gaussians.restore(ckpt_obj["gaussians"], training_args=None)
+    if device != "cpu":
+        # Checkpoints loaded with map_location=device already hold device tensors.
+        # This function keeps CPU-loaded dicts on CPU to avoid silently migrating
+        # optimizer-sized payloads outside the explicit load path.
+        pass
+    aux_tail = ckpt_obj["gaussians"][-1]
+    return gaussians, int(ckpt_obj["iteration"]), aux_tail, model_kwargs
 
-    return gaussians, iteration, aux_tail, model_kwargs
 
 def load_original_and_reconstructed(
     ckpt_path,
@@ -431,14 +269,10 @@ def load_original_and_reconstructed(
     device = resolve_device(device)
     model_overrides = model_overrides or {}
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    model_params, iteration = ckpt
-
-    core_params, aux_tail = split_checkpoint_payload(model_params)
-    model_kwargs = resolve_model_kwargs(ckpt_path, core_params, model_overrides=model_overrides)
-
-    original = GaussianModel(**model_kwargs)
-    original = load_gaussians_from_core_tuple(original, core_params, device=device)
+    original, iteration, aux_tail, model_kwargs = load_gaussians_from_checkpoint(
+        ckpt_path, device=device, model_overrides=model_overrides
+    )
+    ckpt = load_checkpoint(ckpt_path, map_location=device)
 
     compressed = original.capture_compressed(attr_bits=attr_bits)
 
@@ -501,17 +335,12 @@ def main(
 
     file_size = os.path.getsize(ckpt_path)
 
-    # Use this only if you trust the checkpoint source
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
-    model_params, iteration = ckpt
+    ckpt = load_checkpoint(ckpt_path, map_location=device)
+    gaussians, iteration, aux_tail, model_kwargs = load_gaussians_from_memory(
+        ckpt, ckpt_path=ckpt_path, device=device, model_overrides=model_overrides
+    )
+    model_params = ckpt["gaussians"]
     ram_size = tensor_bytes(ckpt)
-
-    core_params, aux_tail = split_checkpoint_payload(model_params)
-    model_kwargs = resolve_model_kwargs(ckpt_path, core_params, model_overrides=model_overrides)
-
-    gaussians = GaussianModel(**model_kwargs)
-    gaussians = load_gaussians_from_core_tuple(gaussians, core_params, device=device)
 
     raw_payload = build_raw_gaussian_payload(gaussians)
     raw_payload_disk_size = serialized_bytes(raw_payload)
@@ -546,9 +375,8 @@ def main(
     print("iteration:", iteration)
     print("device:", device)
     print("attr_bits:", attr_bits)
-    print("full tuple length:", len(model_params))
-    print("core tuple length:", len(core_params))
-    print("has aux tail:", aux_tail is not None)
+    print("gaussian tuple length:", len(model_params))
+    print("has MobileGS state:", aux_tail is not None)
     print("model kwargs:", model_kwargs)
 
     print("\nraw checkpoint:")

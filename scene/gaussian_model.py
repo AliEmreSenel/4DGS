@@ -129,7 +129,7 @@ class GaussianModel:
     def __init__(
         self,
         sh_degree: int,
-        gaussian_dim: int = 3,
+        gaussian_dim: int = 4,
         time_duration: list = [-0.5, 0.5],
         rot_4d: bool = False,
         force_sh_3d: bool = False,
@@ -152,7 +152,9 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
 
-        self.gaussian_dim = gaussian_dim
+        if gaussian_dim != 4:
+            raise ValueError("Only 4D Gaussian models are supported.")
+        self.gaussian_dim = 4
         self._t = torch.empty(0)
         self._scaling_t = torch.empty(0)
         self.time_duration = time_duration
@@ -161,8 +163,6 @@ class GaussianModel:
         self._rotation_r = torch.empty(0)
         self.force_sh_3d = force_sh_3d
         self.t_gradient_accum = torch.empty(0)
-        if self.rot_4d or self.force_sh_3d:
-            assert self.gaussian_dim == 4
         self.env_map = torch.empty(0)
 
         self.active_sh_degree_t = 0
@@ -192,9 +192,14 @@ class GaussianModel:
             shs, scales, viewdirs, rotations, time_features
         )
 
-    def capture(self):
+    def capture(self, include_mobilegs: bool = False):
         mobilegs_state = None
-        if self.mobilegs_opacity_phi_nn is not None:
+        if include_mobilegs:
+            if self.mobilegs_opacity_phi_nn is None:
+                raise RuntimeError(
+                    "sort_free_render checkpoints require the MobileGS opacity/phi MLP, "
+                    "but it has not been initialized yet."
+                )
             mobilegs_state = {
                 "model": self.mobilegs_opacity_phi_nn.state_dict(),
                 "optimizer": (
@@ -204,127 +209,57 @@ class GaussianModel:
                 ),
             }
 
-        if self.gaussian_dim == 3:
-            return (
-                self.active_sh_degree,
-                self._xyz,
-                self._features_dc,
-                self._features_rest,
-                self._scaling,
-                self._rotation,
-                self._opacity,
-                self.max_radii2D,
-                self.xyz_gradient_accum,
-                self.denom,
-                self.optimizer.state_dict(),
-                self.spatial_lr_scale,
-                mobilegs_state,
-            )
-        elif self.gaussian_dim == 4:
-            return (
-                self.active_sh_degree,
-                self._xyz,
-                self._features_dc,
-                self._features_rest,
-                self._scaling,
-                self._rotation,
-                self._opacity,
-                self.max_radii2D,
-                self.xyz_gradient_accum,
-                self.t_gradient_accum,
-                self.denom,
-                self.optimizer.state_dict(),
-                self.spatial_lr_scale,
-                self._t,
-                self._scaling_t,
-                self._rotation_r,
-                self.rot_4d,
-                self.env_map,
-                self.active_sh_degree_t,
-                mobilegs_state,
+        return (
+            self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            self.xyz_gradient_accum,
+            self.t_gradient_accum,
+            self.denom,
+            self.optimizer.state_dict() if self.optimizer is not None else None,
+            self.spatial_lr_scale,
+            self._t,
+            self._scaling_t,
+            self._rotation_r,
+            self.rot_4d,
+            self.env_map,
+            self.active_sh_degree_t,
+            mobilegs_state,
+        )
+
+    def restore(self, model_args, training_args=None):
+        if len(model_args) != 20:
+            raise ValueError(
+                "Unsupported checkpoint layout; regenerate the checkpoint with this 4D-only codebase."
             )
 
-    def restore(self, model_args, training_args):
-        t_gradient_accum = None
-        mobilegs_state = None
-        if self.gaussian_dim == 3:
-            if len(model_args) >= 13:
-                (
-                    self.active_sh_degree,
-                    self._xyz,
-                    self._features_dc,
-                    self._features_rest,
-                    self._scaling,
-                    self._rotation,
-                    self._opacity,
-                    self.max_radii2D,
-                    xyz_gradient_accum,
-                    denom,
-                    opt_dict,
-                    self.spatial_lr_scale,
-                    mobilegs_state,
-                ) = model_args[:13]
-            else:
-                (
-                    self.active_sh_degree,
-                    self._xyz,
-                    self._features_dc,
-                    self._features_rest,
-                    self._scaling,
-                    self._rotation,
-                    self._opacity,
-                    self.max_radii2D,
-                    xyz_gradient_accum,
-                    denom,
-                    opt_dict,
-                    self.spatial_lr_scale,
-                ) = model_args
-        elif self.gaussian_dim == 4:
-            if len(model_args) >= 20:
-                (
-                    self.active_sh_degree,
-                    self._xyz,
-                    self._features_dc,
-                    self._features_rest,
-                    self._scaling,
-                    self._rotation,
-                    self._opacity,
-                    self.max_radii2D,
-                    xyz_gradient_accum,
-                    t_gradient_accum,
-                    denom,
-                    opt_dict,
-                    self.spatial_lr_scale,
-                    self._t,
-                    self._scaling_t,
-                    self._rotation_r,
-                    self.rot_4d,
-                    self.env_map,
-                    self.active_sh_degree_t,
-                    mobilegs_state,
-                ) = model_args[:20]
-            else:
-                (
-                    self.active_sh_degree,
-                    self._xyz,
-                    self._features_dc,
-                    self._features_rest,
-                    self._scaling,
-                    self._rotation,
-                    self._opacity,
-                    self.max_radii2D,
-                    xyz_gradient_accum,
-                    t_gradient_accum,
-                    denom,
-                    opt_dict,
-                    self.spatial_lr_scale,
-                    self._t,
-                    self._scaling_t,
-                    self._rotation_r,
-                    self.rot_4d,
-                    self.env_map,
-                    self.active_sh_degree_t,
-                ) = model_args
+        (
+            self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            t_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale,
+            self._t,
+            self._scaling_t,
+            self._rotation_r,
+            self.rot_4d,
+            self.env_map,
+            self.active_sh_degree_t,
+            mobilegs_state,
+        ) = model_args
 
         if mobilegs_state is not None and mobilegs_state.get("model") is not None:
             if self.mobilegs_opacity_phi_nn is None:
@@ -334,29 +269,20 @@ class GaussianModel:
         if training_args is not None:
             self.training_setup(training_args)
             self.xyz_gradient_accum = xyz_gradient_accum
-            if self.gaussian_dim == 4:
-                self.t_gradient_accum = t_gradient_accum
+            self.t_gradient_accum = t_gradient_accum
             self.denom = denom
-            try:
+            if opt_dict is not None:
                 self.optimizer.load_state_dict(opt_dict)
-            except ValueError as exc:
-                print(
-                    f"Warning: optimizer state is incompatible with current Gaussian parameterization, continuing with fresh optimizer state. Details: {exc}"
-                )
 
             if (
                 mobilegs_state is not None
                 and mobilegs_state.get("optimizer") is not None
                 and self.mobilegs_opacity_phi_optimizer is not None
             ):
-                try:
-                    self.mobilegs_opacity_phi_optimizer.load_state_dict(
-                        mobilegs_state["optimizer"]
-                    )
-                except ValueError as exc:
-                    print(
-                        f"Warning: MobileGS MLP optimizer state is incompatible, continuing with fresh state. Details: {exc}"
-                    )
+                self.mobilegs_opacity_phi_optimizer.load_state_dict(
+                    mobilegs_state["optimizer"]
+                )
+
 
     @property
     def get_scaling(self):
@@ -410,7 +336,7 @@ class GaussianModel:
         self._rotation = torch.empty(
             (0, 4), device=self._scaling.device, dtype=self._scaling.dtype
         )
-        if self.gaussian_dim == 4 and self.rot_4d:
+        if self.rot_4d:
             self._rotation_r = torch.empty(
                 (0, 4), device=self._scaling.device, dtype=self._scaling.dtype
             )
@@ -439,12 +365,11 @@ class GaussianModel:
 
     @property
     def get_max_sh_channels(self):
-        if self.gaussian_dim == 3 or self.force_sh_3d:
+        if self.force_sh_3d:
             return (self.max_sh_degree + 1) ** 2
-        elif self.gaussian_dim == 4 and self.max_sh_degree_t == 0:
+        if self.max_sh_degree_t == 0:
             return sh_channels_4d[self.max_sh_degree]
-        elif self.gaussian_dim == 4 and self.max_sh_degree_t > 0:
-            return (self.max_sh_degree + 1) ** 2 * (self.max_sh_degree_t + 1)
+        return (self.max_sh_degree + 1) ** 2 * (self.max_sh_degree_t + 1)
 
     def get_cov_t(self, scaling_modifier=1):
         if self.rot_4d:
@@ -497,8 +422,7 @@ class GaussianModel:
         )
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
-        if self.gaussian_dim == 4:
-            if pcd.time is None:
+        if pcd.time is None:
                 fused_times = (
                     torch.rand(fused_point_cloud.shape[0], 1, device="cuda") * 1.2 - 0.1
                 ) * (
@@ -506,8 +430,8 @@ class GaussianModel:
                 ) + self.time_duration[
                     0
                 ]
-            else:
-                fused_times = torch.from_numpy(pcd.time).cuda().float()
+        else:
+            fused_times = torch.from_numpy(pcd.time).cuda().float()
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -520,16 +444,15 @@ class GaussianModel:
             scales = scales.repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
-        if self.gaussian_dim == 4:
-            # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
-            dist_t = (
+        # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
+        dist_t = (
                 torch.zeros_like(fused_times, device="cuda")
                 + (self.time_duration[1] - self.time_duration[0]) / 5
-            )
-            scales_t = torch.log(torch.sqrt(dist_t))
-            if self.rot_4d:
-                rots_r = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-                rots_r[:, 0] = 1
+        )
+        scales_t = torch.log(torch.sqrt(dist_t))
+        if self.rot_4d:
+            rots_r = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+            rots_r[:, 0] = 1
 
         opacities = inverse_sigmoid(
             0.1
@@ -553,17 +476,16 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-        if self.gaussian_dim == 4:
-            self._t = nn.Parameter(fused_times.requires_grad_(True))
-            self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
-            if self.rot_4d:
-                if self.isotropic_gaussians:
-                    self._rotation_r = torch.empty((0, 4), device="cuda")
-                else:
-                    self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
+        self._t = nn.Parameter(fused_times.requires_grad_(True))
+        self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
+        if self.rot_4d:
+            if self.isotropic_gaussians:
+                self._rotation_r = torch.empty((0, 4), device="cuda")
+            else:
+                self._rotation_r = nn.Parameter(rots_r.requires_grad_(True))
 
     def create_from_pth(self, path, spatial_lr_scale):
-        assert self.gaussian_dim == 4 and self.rot_4d
+        assert self.rot_4d
         self.spatial_lr_scale = spatial_lr_scale
         init_4d_gaussian = torch.load(path)
         fused_point_cloud = init_4d_gaussian["xyz"].cuda()

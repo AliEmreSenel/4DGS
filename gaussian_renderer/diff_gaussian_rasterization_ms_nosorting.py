@@ -259,9 +259,10 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_scales,
             grad_rotations,
             grad_cov3Ds_precomp,
-            None,
-            None,
-            None,
+            None,  # raster_settings
+            None,  # compute_scores
+            None,  # compute_score_squares
+            None,  # score_error_map
         )
         return grads
 
