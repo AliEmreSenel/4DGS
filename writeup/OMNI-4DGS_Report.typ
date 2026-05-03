@@ -42,12 +42,12 @@
 #show link: underline
 
 // TODO add link to github
- 
+
 // TODO add references to why each technique is picked per-technique (ie. memory vs compute vs accuracy constraints)
 
 = Introduction
 
-Gaussian Splatting has been used extensively in the task of scene reconstruction from videos, thanks to its relative small training requirements. In the 4D setting (4DGS), frames from a video are used to train a machine learning model to "learn" a scene in space. This representation can then be used to produce novel camera views as a function of time, position, orientation, and space. \ 
+Gaussian Splatting has been used extensively in the task of scene reconstruction from videos, thanks to its relative small training requirements. In the 4D setting (4DGS), frames from a video are used to train a machine learning model to "learn" a scene in space. This representation can then be used to produce novel camera views as a function of time, position, orientation, and space. \
 
 In a 4DGS model, the building blocks of the scene are a vast number of Gaussian Distributions in space, and are being parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing for diagonal deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of the gaussian, encoded from a fixed number of Spherical Harmonic (SH) coefficients, which can approximate uniformly any color distribution. Compared to having a constant color, SH coefficients allow smooth coloring over the surface, where expressiveness depends on the number of coefficients. Both the use of Covariance+Rotation and SH reduce the number of gaussians needed, since they allow for greater range of behavior, at the cost of a higher number of variables. Training involves the iterated reconstruction of ground truth images from the dataset by rendering the gaussians. Multiple similarity metrics are used to steer each gaussian features in the correct direction, balancing color fidelity with a known depth map, or a structural similarity metric. The final output consists of the list of gaussians, which can be projected to a camera plane and rasterized to obtain a reconstructed image. During inference, camera position is fixed, and a pixel color is obtained by integrating the scene through the view-pixel ray: each gaussian color contribution is added, while accounting for opacity, distance, and leftover un-occluded light, crossing the gaussians in the correct order. Naturally, this allows for the generation of new camera angles. \ \
 
@@ -89,8 +89,8 @@ $
 $
 
 $
-  C_p(t, v) = sum_(i=1)^N T_i (p, t) &alpha_i (p, t) c_i (v, t) \
-  &+ T_(N+1)(p, t) c_("bg")
+  C_p(t, v) = sum_(i=1)^N T_i (p, t) & alpha_i (p, t) c_i (v, t) \
+                                     & + T_(N+1)(p, t) c_("bg")
 $
 
 *Sort-Free Rendering*, first proposed in @Hou2024SortFreeGS, computes color directly through a sum, where the weighing of each color contribution is computed by multiple small Multilayer Perceptrons (MLP). The MLP "compresses" information from the gaussians, resulting in smaller storage requirements and faster inference. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. We picked @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, with computing pixel color and gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
@@ -165,7 +165,7 @@ Specific Loss for 4DGS + Loss variations (see USPLAT)
 
 == At-Rest Compression
 
-The complete model is stored as the combination of compression MLPs, and lossy codebook approximations @du2026_mobilegs. 
+The complete model is stored as the combination of compression MLPs, and lossy codebook approximations @du2026_mobilegs.
 
 *Compression MLPs*  stored in memory as weights, and are evaluated during inference to render each image.
 
@@ -179,11 +179,11 @@ Several techniques have been developed to improve the known limitations of GS, b
 
 = Model Parametrization
 
-We combine the papers into a single architecture, which can be studied through ablations. We start from the 4DGS-Native Architecture, adding features from available implementations @yang2024_4dgs @luo2025_instant4d @du2026_mobilegs, and re-implementing the missing structures from the others @yuan2025_4dgs1k @guo2026uncertaintymattersdynamicgaussian. 
+We combine the papers into a single architecture, which can be studied through ablations. We start from the 4DGS-Native Architecture, adding features from available implementations @yang2024_4dgs @luo2025_instant4d @du2026_mobilegs, and re-implementing the missing structures from the others @yuan2025_4dgs1k @guo2026uncertaintymattersdynamicgaussian.
 
 *Initialization* of gaussian position can be random, or be provided from a point cloud model such as MegaSAM in @luo2025_instant4d. Good initializations massively reducing training time and produce better results. We experiment with the addition of a pruning-densify schedule to improve the robustness of our results over a reduced training time.
 
-*Isotropy* involves choosing between Isotropic gaussians @luo2025_instant4d and Anisotropic Gaussians @yang2024_4dgs, corresponding to a tradeoff between faster training, stemming from a reduced number of variables, and more expressive Gaussians. 
+*Isotropy* involves choosing between Isotropic gaussians @luo2025_instant4d and Anisotropic Gaussians @yang2024_4dgs, corresponding to a tradeoff between faster training, stemming from a reduced number of variables, and more expressive Gaussians.
 
 *Rotation* encoding relies on two quaternions per-gaussian to learn and encode rotation. Quaternions are preferred to rotation matrices because of their simpler implementation smaller number of parameters, which avoids and reduces the number of variables
 
@@ -201,6 +201,206 @@ We combine the papers into a single architecture, which can be studied through a
 
 *Storage* reduction techniques consist of Neural Vector Quantization (NVQ), used in conjunction with MLP compression @du2026_mobilegs.
 
+#place(
+  top + right,
+  float: true,
+  clearance: 0.8em,
+)[
+  #let thick = 1.8pt
+  #let base = 0.6pt
+
+  #let soft-thick = 0.8pt + black
+  #let soft-green = rgb("#5f9f6e")
+  #let light-blue = rgb("#eaf3ff")
+  #let light-orange = rgb("#fff1e6")
+
+  #let C(body, bg: none) = table.cell(align: center + horizon, fill: bg)[#body]
+  #let L(body, bg: none) = table.cell(align: left + horizon, fill: bg)[#body]
+  #let X = table.cell(align: center + horizon, fill: rgb("#dff3df"))[
+    #text(fill: black, weight: "bold")[×]
+  ]
+  #let E = table.cell(align: center + horizon)[]
+
+  #let VH(body) = table.cell(align: center + horizon)[
+    #rotate(-90deg, reflow: true)[#body]
+  ]
+
+  #let SEC(rows, body) = table.cell(
+    rowspan: rows,
+    align: center + horizon,
+  )[#rotate(-90deg, reflow: true)[#body]]
+
+  #let MGL(rows, body, bg: none) = table.cell(
+    rowspan: rows,
+    align: center + horizon,
+    stroke: soft-thick,
+    fill: bg,
+  )[#body]
+
+  #let MGO(body, bg: none) = table.cell(align: left + horizon, fill: bg)[#body]
+
+  #table(
+    columns: (12pt, 52pt, 74pt, 11.1pt, 11.1pt, 11.1pt, 11.1pt, 11.1pt, 11.1pt),
+    stroke: base,
+    align: center + horizon,
+    inset: (x: 3pt, y: 3pt),
+    fill: (x, y) => if (y == 0 and x >= 3) or (x == 0 and y > 0) { luma(230) } else { none },
+
+    table.cell(
+      colspan: 3,
+      inset: (x: 5pt, y: 3pt),
+      stroke: none,
+      align: left + horizon,
+    )[
+      #par(justify: false)[
+        Implementations available in each architecture, including our combined codebase. Costly or obsolete features were dropped.
+      ]
+    ],
+
+    VH([*4DGS-Nat.*]),
+    VH([*1000FPS*]),
+    VH([*Instant4D*]),
+    VH([*MobileGS*]),
+    VH([*Usplat4D*]),
+    VH([*Omni-4DGS*]),
+
+    SEC(9, [*Gaussians*]),
+
+    MGL(2, [Gaussians], bg: light-blue),
+    MGO([4D], bg: light-blue),
+    X, X, X, E, X, X,
+
+    MGO([3D], bg: light-blue),
+    E, E, E, X, E, E,
+
+    MGL(2, [Rotation], bg: light-orange),
+    MGO([Quaternion], bg: light-orange),
+    X, X, X, E, X, X,
+
+    MGO([Rotation Matrix], bg: light-orange),
+    E, E, E, X, E, E,
+
+    MGL(2, [Shape], bg: light-blue),
+    MGO([Isotropic], bg: light-blue),
+    E, E, X, E, E, X,
+
+    MGO([Anisotropic], bg: light-blue),
+    X, X, E, X, X, X,
+
+    MGL(3, [Color \ Basis], bg: light-orange),
+    MGO([RGB], bg: light-orange),
+    E, E, X, E, E, X,
+
+    MGO([SH(1)], bg: light-orange),
+    E, E, E, X, E, X,
+
+    MGO([SH(3)], bg: light-orange),
+    X, X, E, X, X, X,
+
+    SEC(3, [*Init*]),
+
+    MGL(2, [Point \ Cloud], bg: light-blue),
+    MGO([Random], bg: light-blue),
+    X, X, E, E, E, X,
+
+    MGO([MegaSAM], bg: light-blue),
+    E, E, X, E, E, E,
+
+    C([Confidence], bg: light-orange),
+    L([Uncertainty], bg: light-orange),
+    E, E, E, E, X, X,
+
+    SEC(3, [*Compress*]),
+
+    C([SH], bg: light-blue),
+    L([MLP Distillation], bg: light-blue),
+    E, E, E, X, E, X,
+
+    table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Quantize],
+    L([K-means ], bg: light-orange),
+    E, E, E, X, E, X,
+
+    L([Spatial GPCC], bg: light-orange),
+    E, E, E, X, E, X,
+
+    SEC(3, [*Train*]),
+    C([Weighting], bg: light-blue),
+    L([Uncertainty], bg: light-blue),
+    E, E, E, E, X, X,
+
+    C([Sampling], bg: light-orange),
+    L([Batch in Time], bg: light-orange),
+    X, X, E, E, E, X,
+
+    C([Grid \ Reliance], bg: light-blue),
+    L([Voxelization], bg: light-blue),
+    E, E, X, X, X, X,
+
+    SEC(8, [*Prune*]),
+
+    table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Criterion],
+    L([Contribution], bg: light-orange),
+    X, E, E, X, E, E,
+
+    L([Gradient Loss], bg: light-orange),
+    X, E, E, E, E, X,
+
+    table.cell(rowspan: 2, align: center + horizon, fill: light-blue)[Quantile Filter],
+    L([Spatio-Temporal], bg: light-blue),
+    E, E, X, E, X, X,
+
+    L([Opacity], bg: light-blue),
+    E, E, X, E, E, X,
+
+    table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Strategy],
+    L([One-shot], bg: light-orange),
+    E, X, X, E, X, X,
+
+    L([Scheduled], bg: light-orange),
+    E, E, E, E, E, X,
+
+    C([Increase], bg: light-blue),
+    L([Densify], bg: light-blue),
+    X, E, E, E, E, X,
+
+    C([Dropout], bg: light-orange),
+    L([Dropout], bg: light-orange),
+    E, E, E, E, E, X,
+
+    SEC(3, [*Render*]),
+
+    C([Loading], bg: light-blue),
+    L([Visibility Mask], bg: light-blue),
+    E, X, E, E, E, X,
+
+    MGL(2, [Raster], bg: light-orange),
+    MGO([Sort-based], bg: light-orange),
+    X, X, X, E, X, X,
+
+    MGO([Sort-free], bg: light-orange),
+    E, E, E, X, E, X,
+    // Inner-table outline.
+    table.hline(y: 1, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 29, start: 1, end: 9, stroke: soft-thick),
+    table.vline(x: 1, start: 1, end: 29, stroke: soft-thick),
+    table.vline(x: 9, start: 1, end: 29, stroke: soft-thick),
+
+    // Extended mutually-exclusive group boundaries.
+    table.hline(y: 3, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 5, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 7, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 10, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 12, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 26, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 28, start: 1, end: 9, stroke: soft-thick),
+
+    // Thin red outline around the rightmost column.
+    table.vline(x: 8, start: 0, end: 30, stroke: luma(100) + thick),
+    table.vline(x: 9, start: 0, end: 30, stroke: luma(100) + thick),
+    table.hline(y: 0, start: 8, end: 9, stroke: luma(100) + thick),
+    table.hline(y: 30, start: 8, end: 9, stroke: luma(100) + thick),
+  )
+]
 == Loss
 
 As all our reference papers except USPLAT rely on the _L1_ and _DSSIM_ metrics to train, with a $0.80 - 0.20$ weighing, we start from this prior and introduce the USPLAT loss components.
