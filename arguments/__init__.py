@@ -152,6 +152,10 @@ class OptimizationParams(ParamGroup):
         # defaults favor robustness over throughput; increase them on larger GPUs.
         self.usplat_nonkey_loss_chunk_size = 1000000000000000000000
         self.usplat_quat_chunk_size = 819200000000000000000
+        # Relative eigengap threshold for covariance-derived quaternions.
+        # If a covariance is nearly isotropic, its eigenvectors are ambiguous;
+        # USplat then falls back to the learned/base Gaussian rotation.
+        self.usplat_cov_eigengap_eps = 1e-4
 
         super().__init__(parser, "Optimization Parameters")
 

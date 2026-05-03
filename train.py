@@ -86,6 +86,10 @@ def _identity_quat(n, device, dtype):
     return quat
 
 
+def _normalize_quat(quat, eps=1e-8):
+    return quat / quat.norm(dim=-1, keepdim=True).clamp_min(eps)
+
+
 def _indexed_rotation(gaussians, indices=None, right=False):
     """Return activated quaternion(s) without normalizing the whole model."""
     xyz = _indexed_xyz(gaussians, indices)
@@ -144,20 +148,47 @@ def _cov6_to_matrix(cov6):
     return cov
 
 
-def _covariance_quat_from_cov6(cov6, reference_quat):
-    """Estimate a time-varying orientation from the current 3D covariance."""
+def _covariance_quat_from_cov6(cov6, reference_quat, eigengap_eps=1e-4):
+    """Estimate a time-varying orientation from the current 3D covariance.
+
+    4DGS does not expose an explicit per-frame quaternion. We therefore infer
+    one from the covariance eigenbasis, but that basis is undefined when two
+    eigenvalues are nearly equal. In those cases eigendecomposition can produce
+    arbitrary axis flips across frames, which then destabilizes USplat rotation
+    and DQB losses. Fall back to the learned/base rotation whenever the
+    covariance is too close to isotropic or has an ambiguous adjacent eigengap.
+    """
+    reference_quat = _normalize_quat(reference_quat)
     cov = _cov6_to_matrix(cov6)
     evals, evecs = torch.linalg.eigh(cov)
     order = evals.argsort(dim=-1, descending=True)
+    sorted_evals = torch.gather(evals, dim=-1, index=order)
+
     gather_idx = order.unsqueeze(-2).expand(*order.shape[:-1], 3, 3)
     R = torch.gather(evecs, dim=-1, index=gather_idx)
     det = torch.linalg.det(R)
     flip = torch.where(det < 0, -torch.ones_like(det), torch.ones_like(det))
     R = R.clone()
     R[..., :, 2] = R[..., :, 2] * flip.unsqueeze(-1)
-    quat = rotmat_to_quat(R)
+
+    quat = _normalize_quat(rotmat_to_quat(R))
     align = (quat * reference_quat).sum(dim=-1, keepdim=True) < 0
-    return torch.where(align, -quat, quat)
+    quat = torch.where(align, -quat, quat)
+
+    # Relative adjacent eigengap. If either gap is tiny, the corresponding
+    # eigenspace is ambiguous and the eigenvectors should not define rotation.
+    scale = sorted_evals[..., :2].abs().clamp_min(1e-12)
+    adjacent_gap = (sorted_evals[..., :2] - sorted_evals[..., 1:]).abs() / scale
+    anisotropy = (
+        (sorted_evals[..., 0] - sorted_evals[..., 2]).abs()
+        / sorted_evals[..., 0].abs().clamp_min(1e-12)
+    )
+    finite = torch.isfinite(sorted_evals).all(dim=-1) & torch.isfinite(quat).all(dim=-1)
+    ambiguous = (adjacent_gap.min(dim=-1).values < float(eigengap_eps)) | (
+        anisotropy < float(eigengap_eps)
+    ) | (~finite)
+
+    return torch.where(ambiguous.unsqueeze(-1), reference_quat, quat)
 
 
 def _current_means_and_quats_for_timestamps(
@@ -165,6 +196,7 @@ def _current_means_and_quats_for_timestamps(
     timestamps,
     indices=None,
     quat_chunk_size=64,
+    cov_eigengap_eps=1e-4,
 ):
     """Return differentiable positions and quaternions for selected timestamps.
 
@@ -202,7 +234,11 @@ def _current_means_and_quats_for_timestamps(
             mean_chunks.append(xyz_all[idx] + delta)
             ref_quat = _indexed_rotation(gaussians, idx)
             if use_time_varying_rot:
-                quat_chunks.append(_covariance_quat_from_cov6(cov, ref_quat))
+                quat_chunks.append(
+                    _covariance_quat_from_cov6(
+                        cov, ref_quat, eigengap_eps=cov_eigengap_eps
+                    )
+                )
             else:
                 quat_chunks.append(ref_quat)
             del cov, delta
@@ -550,6 +586,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     )
                     timestamps_window = usplat_timestamps[frame_idx]
                     quat_chunk_size = max(1, int(getattr(opt, "usplat_quat_chunk_size", 64)))
+                    cov_eigengap_eps = max(
+                        0.0,
+                        float(getattr(opt, "usplat_cov_eigengap_eps", 1e-4)),
+                    )
                     nonkey_chunk_size = max(
                         1,
                         int(getattr(opt, "usplat_nonkey_loss_chunk_size", 64)),
@@ -567,6 +607,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         timestamps_window,
                         indices=graph.key_idx,
                         quat_chunk_size=quat_chunk_size,
+                        cov_eigengap_eps=cov_eigengap_eps,
                     )
 
                     pos_key_pre = p_pretrained_t[graph.key_idx][:, frame_idx]
@@ -601,6 +642,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                                 timestamps_window,
                                 indices=nk_global_idx,
                                 quat_chunk_size=quat_chunk_size,
+                                cov_eigengap_eps=cov_eigengap_eps,
                             )
                             pos_nk_pre = p_pretrained_t[nk_global_idx][:, frame_idx]
                             pos_o_nk = p_pretrained_base[nk_global_idx]
@@ -928,6 +970,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         )
                     ):
                         gaussians.reset_opacity()
+                        if use_usplat and iteration >= usplat_start_iter:
+                            # USplat uncertainty/key selection depends on opacity via
+                            # alpha-transmittance blending weights. After an opacity
+                            # reset the cached uncertainty and graph are stale, so force
+                            # a rebuild before the next USplat loss is evaluated.
+                            graph = None
+                            p_pretrained_base = None
+                            p_pretrained_t = None
+                            usplat_w2cs = None
+                            usplat_timestamps = None
+                            u_scalar = None
+                            usplat_state_dirty = True
 
                 # Optimizer step
                 if iteration < opt.iterations:
