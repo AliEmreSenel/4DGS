@@ -347,7 +347,7 @@ We combine the papers into a single architecture, which can be studied through a
 
     table.cell(rowspan: 2, align: center + horizon, fill: light-blue)[Quantile Filter],
     L([Spatio-Temporal], bg: light-blue),
-    E, E, X, E, X, X,
+    E, E, X, X, E, X,
 
     L([Opacity], bg: light-blue),
     E, E, X, E, E, X,
