@@ -100,6 +100,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                     binningBuffer,
                     imgBuffer,
                     w_fg,
+                    transmittance,
                     gaussian_scores,
                 ) = _C.rasterize_gaussians(*args)
             except Exception as ex:
@@ -118,6 +119,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 binningBuffer,
                 imgBuffer,
                 w_fg,
+                transmittance,
                 gaussian_scores,
             ) = _C.rasterize_gaussians(*args)
 
@@ -142,11 +144,18 @@ class _RasterizeGaussians(torch.autograd.Function):
             imgBuffer,
             gaussian_scores,
         )
-        return color, radii, kernel_time, gaussian_scores
+        return color, radii, kernel_time, transmittance, gaussian_scores
 
     @staticmethod
-    def backward(ctx, grad_out_color, grad_radii, grad_kernel_time, grad_gaussian_scores):
-        del grad_radii, grad_kernel_time, grad_gaussian_scores
+    def backward(
+        ctx,
+        grad_out_color,
+        grad_radii,
+        grad_kernel_time,
+        grad_transmittance,
+        grad_gaussian_scores,
+    ):
+        del grad_radii, grad_kernel_time, grad_transmittance, grad_gaussian_scores
 
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings

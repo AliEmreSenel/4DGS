@@ -37,6 +37,12 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     use_mobilegs_sort_free = bool(getattr(pipe, "sort_free_render", False))
 
+    if use_mobilegs_sort_free and getattr(pipe, "env_map_res", 0):
+        raise ValueError(
+            "sort_free_render does not support env_map_res yet because the no-sort "
+            "rasterizer only returns a detached transmittance/alpha proxy."
+        )
+
     if use_mobilegs_sort_free:
         if (not torch.is_grad_enabled()) and pc.mobilegs_opacity_phi_nn is None:
             raise RuntimeError(
@@ -109,12 +115,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         rotations = pc.get_rotation
 
     if use_mobilegs_sort_free and pc.gaussian_dim == 4:
-        if not pc.rot_4d:
-            raise ValueError("MobileGS sort-free ablation requires rot_4d=True for 4D Gaussians")
-        cov3D_precomp, delta_mean = pc.get_current_covariance_and_mean_offset(scaling_modifier, viewpoint_camera.timestamp)
-        means3D = means3D + delta_mean
+        # Apply the temporal Gaussian marginal in the sort-free path as well.
+        # rot_4d Gaussians also have a timestamp-dependent spatial mean/covariance;
+        # non-rotated 4D Gaussians keep their spatial covariance and use the temporal
+        # marginal as an opacity gate.
         marginal_t = pc.get_marginal_t(viewpoint_camera.timestamp)
         opacity = opacity * marginal_t
+        if pc.rot_4d:
+            cov3D_precomp, delta_mean = pc.get_current_covariance_and_mean_offset(
+                scaling_modifier, viewpoint_camera.timestamp
+            )
+            means3D = means3D + delta_mean
     elif pipe.compute_cov3D_python:
         if pc.rot_4d:
             cov3D_precomp, delta_mean = pc.get_current_covariance_and_mean_offset(scaling_modifier, viewpoint_camera.timestamp)
@@ -230,62 +241,91 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             flow_2d = flow_2d[mask]
     
     if use_mobilegs_sort_free:
-        cam_center = viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
-        dir_pp = (means3D - cam_center).detach()
-        dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
-        shs_mlp = pc.get_features
-        time_features = None
-        if pc.gaussian_dim == 4 and mask is not None:
-            shs_mlp = shs_mlp[mask]
+        image_height = int(viewpoint_camera.image_height)
+        image_width = int(viewpoint_camera.image_width)
 
-        scales_mlp = pc.get_scaling
-        rotations_mlp = pc.get_rotation
-        if pc.gaussian_dim == 4 and mask is not None:
-            scales_mlp = scales_mlp[mask]
-            rotations_mlp = rotations_mlp[mask]
-
-        if pc.gaussian_dim == 4:
-            t_values = pc.get_t
+        if means3D.shape[0] == 0:
+            # A 4D timestamp can legitimately mask out every Gaussian. Return a
+            # background image, but keep it connected to the tensors that the
+            # training loop reads gradients from. Otherwise loss.backward() can
+            # succeed while gaussians._t.grad stays None, which breaks 4D
+            # densification immediately after the backward pass.
+            grad_anchor = screenspace_points.sum() * 0.0
+            if pc.gaussian_dim == 4 and pc.get_t.numel() > 0:
+                grad_anchor = grad_anchor + pc.get_t.sum() * 0.0
+            rendered_image = (
+                bg_color.reshape(3, 1, 1).expand(3, image_height, image_width).clone()
+                + grad_anchor
+            )
+            radii = torch.empty((0,), device=means3D.device, dtype=torch.int32)
+            depth = rendered_image.new_zeros((1, image_height, image_width))
+            alpha = rendered_image.new_zeros((1, image_height, image_width))
+            flow = rendered_image.new_zeros((2, image_height, image_width))
+            covs_com = means3D.new_zeros((0, 6))
+            gaussian_scores = means3D.new_empty((0,)) if return_gaussian_scores else None
+        else:
+            cam_center = viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
+            dir_pp = (means3D - cam_center).detach()
+            dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
+            shs_mlp = pc.get_features
+            scales_mlp = pc.get_scaling
+            rotations_mlp = pc.get_rotation
+            time_features = None
             if mask is not None:
-                t_values = t_values[mask]
-                marginal_t_mlp = marginal_t[mask]
-            else:
-                marginal_t_mlp = torch.ones((t_values.shape[0], 1), device=t_values.device, dtype=t_values.dtype)
-            time_span = max(float(pc.time_duration[1] - pc.time_duration[0]), 1e-6)
-            time_mid = 0.5 * float(pc.time_duration[0] + pc.time_duration[1])
-            t_norm = (t_values - time_mid) / time_span
-            cam_t_norm = torch.full_like(t_norm, (float(viewpoint_camera.timestamp) - time_mid) / time_span)
-            time_features = torch.cat([
-                (float(viewpoint_camera.timestamp) - t_values) / time_span,
-                t_norm,
-                marginal_t_mlp,
-            ], dim=1)
+                # The raster inputs have already been masked above. Apply the
+                # same mask to the MLP inputs for both 3D random-dropout and 4D
+                # temporal filtering so tensor lengths stay aligned.
+                shs_mlp = shs_mlp[mask]
+                scales_mlp = scales_mlp[mask]
+                rotations_mlp = rotations_mlp[mask]
 
-        phi, opacity = pc.get_mobilegs_opacity_phi(
-            shs_mlp,
-            scales_mlp,
-            dir_pp_normalized,
-            rotations_mlp,
-            time_features=time_features,
-        )
+            if pc.gaussian_dim == 4:
+                t_values = pc.get_t
+                if mask is not None:
+                    t_values = t_values[mask]
+                    marginal_t_mlp = marginal_t[mask]
+                else:
+                    # Do not replace the temporal marginal by ones here. The
+                    # return_gaussian_scores path disables masking and still needs
+                    # the true timestamp support for 4D scoring/pruning.
+                    marginal_t_mlp = marginal_t
+                time_span = max(float(pc.time_duration[1] - pc.time_duration[0]), 1e-6)
+                time_mid = 0.5 * float(pc.time_duration[0] + pc.time_duration[1])
+                t_norm = (t_values - time_mid) / time_span
+                time_features = torch.cat([
+                    (float(viewpoint_camera.timestamp) - t_values) / time_span,
+                    t_norm,
+                    marginal_t_mlp,
+                ], dim=1)
 
-        rendered_image, radii, _kernel_time, gaussian_scores = rasterizer(
-            means3D=means3D,
-            means2D=means2D,
-            shs=shs,
-            colors_precomp=colors_precomp,
-            opacities=opacity,
-            theta=torch.zeros_like(phi),
-            phi=phi,
-            scales=scales,
-            rotations=rotations,
-            cov3D_precomp=cov3D_precomp,
-            compute_scores=return_gaussian_scores,
-        )
-        depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
-        alpha = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
-        flow = rendered_image.new_zeros((2, rendered_image.shape[1], rendered_image.shape[2]))
-        covs_com = means3D.new_zeros((means3D.shape[0], 6))
+            phi, mlp_opacity = pc.get_mobilegs_opacity_phi(
+                shs_mlp,
+                scales_mlp,
+                dir_pp_normalized,
+                rotations_mlp,
+                time_features=time_features,
+            )
+            opacity = mlp_opacity
+            if pc.gaussian_dim == 4:
+                opacity = opacity * marginal_t_mlp
+
+            rendered_image, radii, _kernel_time, transmittance, gaussian_scores = rasterizer(
+                means3D=means3D,
+                means2D=means2D,
+                shs=shs,
+                colors_precomp=colors_precomp,
+                opacities=opacity,
+                theta=torch.zeros_like(phi),
+                phi=phi,
+                scales=scales,
+                rotations=rotations,
+                cov3D_precomp=cov3D_precomp,
+                compute_scores=return_gaussian_scores,
+            )
+            depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
+            alpha = (1.0 - transmittance).unsqueeze(0).clamp(0.0, 1.0)
+            flow = rendered_image.new_zeros((2, rendered_image.shape[1], rendered_image.shape[2]))
+            covs_com = means3D.new_zeros((means3D.shape[0], 6))
     else:
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii, depth, alpha, flow, covs_com, gaussian_scores = rasterizer(

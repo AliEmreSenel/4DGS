@@ -56,11 +56,24 @@ class MobileOpacityPhiNN(nn.Module):
             self.opacity_head.bias, inverse_sigmoid(torch.tensor(0.1)).item()
         )
 
-    def forward(self, shs, scales, viewdirs, rotations, time_features):
-        shs = shs.view(shs.shape[0], -1)
+    def forward(self, shs, scales, viewdirs, rotations, time_features=None):
+        # ``view(N, -1)`` is ambiguous for an empty masked batch. ``flatten(1)``
+        # preserves the known feature dimensions and works for N == 0.
+        shs = shs.flatten(start_dim=1)
+        if shs.shape[0] == 0:
+            empty = shs.new_empty((0, 1))
+            return empty, empty
+
         shs = F.normalize(shs, dim=1)
-        scales = F.normalize(scales, dim=1)
+        # Preserve absolute scale magnitude for the Mobile-GS visibility MLP.
+        # L2-normalizing scales makes isotropic Gaussians indistinguishable by
+        # size and removes a signal the paper explicitly conditions on.
+        scales = torch.log(scales.clamp_min(1e-8))
         rotations = F.normalize(rotations, dim=1)
+        if time_features is None:
+            time_features = torch.zeros(
+                (shs.shape[0], 3), device=shs.device, dtype=shs.dtype
+            )
 
         feat = torch.cat([shs, viewdirs, scales, rotations, time_features], dim=1)
         feat = self.backbone(feat)
@@ -165,7 +178,14 @@ class GaussianModel:
         input_dim = 3 * self.get_max_sh_channels + 3 + 3 + 4 + 3
         return MobileOpacityPhiNN(input_dim).cuda()
 
-    def get_mobilegs_opacity_phi(self, shs, scales, viewdirs, rotations, time_features):
+    def get_mobilegs_opacity_phi(self, shs, scales, viewdirs, rotations, time_features=None):
+        if shs.shape[0] == 0:
+            empty = shs.new_empty((0, 1))
+            return empty, empty
+        if time_features is None:
+            time_features = torch.zeros(
+                (shs.shape[0], 3), device=shs.device, dtype=shs.dtype
+            )
         if self.mobilegs_opacity_phi_nn is None:
             self.mobilegs_opacity_phi_nn = self._build_mobilegs_opacity_phi_nn()
         return self.mobilegs_opacity_phi_nn(
@@ -734,7 +754,19 @@ class GaussianModel:
         return optimizable_tensors
 
     def prune_points(self, mask):
+        if mask.numel() == 0:
+            return
         valid_points_mask = ~mask
+        if valid_points_mask.sum().item() == 0:
+            # Never allow a pruning pass to remove the whole scene. This can
+            # happen when a legacy pruning criterion is invalid for the active
+            # renderer or when a user-specified pruning ratio is too aggressive.
+            keep_idx = torch.argmax(self.get_opacity.squeeze())
+            valid_points_mask[keep_idx] = True
+            mask = ~valid_points_mask
+            print(
+                "[WARN] Pruning would remove all Gaussians; keeping the highest-opacity Gaussian."
+            )
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
@@ -810,18 +842,27 @@ class GaussianModel:
 
     @torch.no_grad()
     def prune_with_spatio_temporal_score(
-        self, scores, pruning_ratio, reset_optimizer_state=True, probabilistic=False
+        self,
+        scores,
+        pruning_ratio,
+        reset_optimizer_state=True,
+        probabilistic=False,
+        min_remaining_points=1,
     ):
         if scores.numel() == 0:
             return
 
         num_points = scores.shape[0]
+        min_remaining_points = int(max(1, min(min_remaining_points, num_points)))
         num_to_prune = int(num_points * pruning_ratio)
         if num_to_prune <= 0:
             return
 
-        # Ensure we always keep at least one point
-        num_to_prune = min(num_to_prune, max(num_points - 1, 0))
+        # Ensure iterative pruning never deletes the whole scene and optionally
+        # respects a user-provided safety floor.
+        num_to_prune = min(num_to_prune, max(num_points - min_remaining_points, 0))
+        if num_to_prune <= 0:
+            return
 
         if not probabilistic:
             num_to_keep = max(num_points - num_to_prune, 1)
@@ -1109,12 +1150,25 @@ class GaussianModel:
             self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t)
             self.densify_and_split(grads, max_grad, extent, grads_t, max_grad_t)
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if self.get_xyz.shape[0] == 0:
+            return
+        if min_opacity is not None and min_opacity > 0.0:
+            prune_mask = (self.get_opacity < min_opacity).squeeze()
+        else:
+            prune_mask = torch.zeros(
+                (self.get_xyz.shape[0],), dtype=torch.bool, device=self.get_xyz.device
+            )
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
+            )
+        if prune_mask.numel() > 0 and prune_mask.all():
+            keep_idx = torch.argmax(self.get_opacity.squeeze())
+            prune_mask[keep_idx] = False
+            print(
+                "[WARN] densify_and_prune would remove all Gaussians; keeping the highest-opacity Gaussian."
             )
         self.prune_points(prune_mask)
 

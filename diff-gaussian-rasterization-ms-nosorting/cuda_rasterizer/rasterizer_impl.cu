@@ -469,7 +469,10 @@ __global__ void __launch_bounds__(256) renderTileOIT(
             c[2] += col.z * alpha;
 
 			if (gaussian_scores != nullptr) {
-				atomicAdd(&gaussian_scores[p_idx], alpha * __expf(Ts_acc));
+				// Sort-free rendering should use an order-independent score. The
+				// previous alpha * transmittance proxy depended on arbitrary tile-list
+				// traversal order and corrupted pruning scores for 4D scenes.
+				atomicAdd(&gaussian_scores[p_idx], alpha * w.z);
 			}
             
             w_fg_acc += alpha * w.z;

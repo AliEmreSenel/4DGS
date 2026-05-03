@@ -122,6 +122,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     save_gaussian_args(scene.model_path, gaussian_kwargs)
 
     gaussians.training_setup(opt)
+
+    if getattr(pipe, "sort_free_render", False):
+        if getattr(opt, "lambda_depth", 0.0) > 0.0:
+            raise ValueError(
+                "lambda_depth is not supported with sort_free_render: the MobileGS "
+                "sort-free rasterizer currently returns only a zero depth placeholder."
+            )
+        if getattr(opt, "lambda_opa_mask", 0.0) > 0.0:
+            raise ValueError(
+                "lambda_opa_mask is not supported with sort_free_render: the MobileGS "
+                "sort-free alpha output is a detached transmittance proxy."
+            )
     
     # USplat4D setup
     graph = None
@@ -508,7 +520,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
 
                     if gaussians.gaussian_dim == 4:
-                        batch_t_grad = gaussians._t.grad.clone()[:, 0].detach()
+                        t_grad = gaussians._t.grad
+                        if t_grad is None:
+                            # Sort-free 4D rendering can legitimately produce a
+                            # constant background frame when all Gaussians are
+                            # outside the timestamp support, or a frame whose
+                            # visible contribution does not touch t. Densification
+                            # still expects a dense per-Gaussian temporal gradient.
+                            t_grad = torch.zeros_like(gaussians._t)
+                        batch_t_grad = t_grad[:, 0].detach().clone()
                         batch_t_grad[visibility_filter] = (
                             batch_t_grad[visibility_filter]
                             * batch_size
@@ -517,7 +537,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         batch_t_grad = batch_t_grad.unsqueeze(1)
                 else:
                     if gaussians.gaussian_dim == 4:
-                        batch_t_grad = gaussians._t.grad.clone().detach()
+                        t_grad = gaussians._t.grad
+                        if t_grad is None:
+                            t_grad = torch.zeros_like(gaussians._t)
+                        batch_t_grad = t_grad.detach().clone()
 
             loss_dict = {"Ll1": Ll1, "Lssim": Lssim}
             if opt.lambda_depth > 0:
@@ -629,9 +652,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         size_threshold = (
                             20 if iteration > opt.opacity_reset_interval else None
                         )
+                        # In MobileGS/sort-free mode the learned per-Gaussian
+                        # opacity used for rendering comes from the MobileGS MLP,
+                        # not from GaussianModel._opacity. The legacy 3DGS opacity
+                        # prune would therefore prune by a stale/untrained tensor
+                        # and can delete the entire scene after opacity resets. Keep
+                        # densification and size pruning, but disable this legacy
+                        # opacity criterion for sort-free runs.
+                        min_opacity_for_prune = (
+                            0.0 if getattr(pipe, "sort_free_render", False)
+                            else opt.thresh_opa_prune
+                        )
                         gaussians.densify_and_prune(
                             opt.densify_grad_threshold,
-                            opt.thresh_opa_prune,
+                            min_opacity_for_prune,
                             scene.cameras_extent,
                             size_threshold,
                             opt.densify_grad_t_threshold,
@@ -642,8 +676,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             u_scalar = None
                             usplat_state_dirty = True
 
-                    if iteration % opt.opacity_reset_interval == 0 or (
-                        dataset.white_background and iteration == opt.densify_from_iter
+                    # The sort-free renderer predicts opacity with the MobileGS
+                    # MLP. Resetting GaussianModel._opacity is not used by the
+                    # sort-free forward pass and makes the legacy opacity-pruning
+                    # signal misleading, so skip it in this mode.
+                    if (
+                        not getattr(pipe, "sort_free_render", False)
+                        and (
+                            iteration % opt.opacity_reset_interval == 0
+                            or (
+                                dataset.white_background
+                                and iteration == opt.densify_from_iter
+                            )
+                        )
                     ):
                         gaussians.reset_opacity()
 
@@ -693,6 +738,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         probabilistic=getattr(
                             opt, "spatio_temporal_pruning_random", False
                         ),
+                        min_remaining_points=getattr(
+                            opt, "spatio_temporal_pruning_min_points", 1
+                        ),
                     )
                     if use_usplat and iteration >= usplat_start_iter:
                         graph = None
@@ -718,6 +766,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         reset_optimizer_state=True,
                         probabilistic=getattr(
                             opt, "spatio_temporal_pruning_random", False
+                        ),
+                        min_remaining_points=getattr(
+                            opt, "spatio_temporal_pruning_min_points", 1
                         ),
                     )
                     if use_usplat and iteration >= usplat_start_iter:
@@ -784,9 +835,11 @@ def training_report(
             "total_points", scene.gaussians.get_xyz.shape[0], iteration
         )
         if iteration % 500 == 0:
-            tb_writer.add_histogram(
-                "scene/opacity_histogram", scene.gaussians.get_opacity, iteration
-            )
+            opacity_values = scene.gaussians.get_opacity
+            if opacity_values.numel() > 0:
+                tb_writer.add_histogram(
+                    "scene/opacity_histogram", opacity_values, iteration
+                )
         if loss_dict is not None:
             if "Lrigid" in loss_dict:
                 tb_writer.add_scalar(
