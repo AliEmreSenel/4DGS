@@ -855,6 +855,11 @@ def extract_final_gaussian_count(model_params: Any) -> int | None:
     return None
 
 
+def scalar_float(value: Any) -> float:
+    """Accept either a scalar tensor or a Python numeric metric value."""
+    return float(value.item()) if hasattr(value, "item") else float(value)
+
+
 def evaluate_checkpoint(
     repo_root: Path,
     generated_config_path: Path,
@@ -952,9 +957,9 @@ def evaluate_checkpoint(
             viewpoint = viewpoint.cuda(non_blocking=True, copy=False)
             render_pkg = render(viewpoint, scene.gaussians, pipe, background)
             image = torch.clamp(render_pkg["render"], 0.0, 1.0)
-            totals["psnr"] += float(psnr(image, gt_image).mean().item())
-            totals["ssim"] += float(ssim(image, gt_image).mean().item())
-            totals["lpips"] += float(lpips_metric(image[None].cpu(), gt_image[None].cpu()).item())
+            totals["psnr"] += scalar_float(psnr(image, gt_image).mean())
+            totals["ssim"] += scalar_float(ssim(image, gt_image).mean())
+            totals["lpips"] += scalar_float(lpips_metric(image[None].cpu(), gt_image[None].cpu()))
 
     count = float(len(camera_items))
     metric_results = {

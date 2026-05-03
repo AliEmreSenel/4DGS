@@ -23,6 +23,36 @@ class USplat4DGraph:
     def num_nonkey(self) -> int:
         return self.nonkey_idx.shape[0]
 
+
+def _safe_quantile(
+    values: Tensor,
+    q: float,
+    max_samples: int = 1_000_000,
+) -> Tensor:
+    """Compute an approximate quantile without feeding huge tensors to torch.quantile.
+
+    Some PyTorch builds fail for very large inputs with:
+        RuntimeError: quantile() input tensor is too large
+
+    U-Splat uses quantiles only as robust thresholds, so a random sample is
+    sufficient and avoids the hard failure for large G x T uncertainty tensors.
+    """
+    values = values.reshape(-1)
+    values = values[values.isfinite()]
+    if values.numel() == 0:
+        raise RuntimeError("All values are non-finite; check graph inputs.")
+
+    if values.numel() > max_samples:
+        sample_idx = torch.randint(
+            values.numel(),
+            (max_samples,),
+            device=values.device,
+        )
+        values = values[sample_idx]
+
+    return torch.quantile(values, q)
+
+
 def build_graph(
     means_t: Tensor,      # (G, T, 3)   per-Gaussian per-frame world positions
     u_scalar: Tensor,     # (G, T)      per-Gaussian per-frame uncertainties
@@ -32,6 +62,9 @@ def build_graph(
     knn_k: int = 8,                # number of key-key neighbors per key node
     u_tau_percentile: float = 0.50, # uncertainty percentile below which a Gaussian is "low-u"
     device: Optional[torch.device] = None,
+    max_key_nodes: int = 2000,
+    assignment_chunk_size: int = 16,
+    key_assignment_chunk_size: int = 512,
 ) -> USplat4DGraph:
 
     if device is None:
@@ -45,7 +78,7 @@ def build_graph(
     finite_u = u_scalar[u_scalar.isfinite()]
     if finite_u.numel() == 0:
         raise RuntimeError("All uncertainties are non-finite; check rendering output.")
-    tau = torch.quantile(finite_u, u_tau_percentile).item()
+    tau = _safe_quantile(finite_u, u_tau_percentile).item()
     
     
     low_u_mask = u_scalar < tau  # (G, T)  True where Gaussian is reliable
@@ -59,8 +92,8 @@ def build_graph(
         # Aim for approximately G * key_ratio voxels, spread over the scene extent
         target_n_voxels = G * key_ratio * 5   # slightly larger to account for empty voxels
         # Robust scene range using 2nd and 98th percentiles to ignore outliers
-        p2 = torch.quantile(means_canon, 0.02, dim=0)
-        p98 = torch.quantile(means_canon, 0.98, dim=0)
+        p2 = torch.stack([_safe_quantile(means_canon[:, dim], 0.02) for dim in range(3)])
+        p98 = torch.stack([_safe_quantile(means_canon[:, dim], 0.98) for dim in range(3)])
         scene_range = (p98 - p2).clamp(min=1e-3)
         scene_vol = scene_range.prod().item()
         voxel_size = float((scene_vol / max(target_n_voxels, 1)) ** (1.0 / 3.0))
@@ -115,7 +148,7 @@ def build_graph(
         )
 
     # Keep at most G * key_ratio key nodes (top-confidence)
-    max_key = max(int(G * key_ratio), 1)
+    max_key = min(max(int(G * key_ratio), 1), max(int(max_key_nodes), 1))
     if candidates.numel() > max_key:
         # Rank primarily by reliable frame count (descending = most stable anchors first)
         # Tie-break using lowest mean uncertainty across all frames
@@ -176,22 +209,42 @@ def build_graph(
     nk_means_all = means_t[nonkey_idx]   # (N_n, T, 3)
     nk_u_all     = u_scalar[nonkey_idx]  # (N_n, T)
 
-    # Compute aggregated distance: sum over time of Mahalanobis distance
-    # dist[i, j] = sum_t (||nk_means_all[i,t] - key_means_all[j,t]||^2 / (nk_u[i,t] + key_u[j,t]))
-    # Full (N_n, N_k, T) computation — may be large; process in chunks for memory
-    CHUNK = 512
-    agg_dist = torch.zeros(N_n, N_k, device=device)
+    # Compute aggregated distance in nested non-key/key chunks to bound peak memory.
+    # This is mathematically identical to the full distance matrix argmin:
+    #   argmin_j sum_t ||p_i,t - p_j,t||^2 / (u_i,t + u_j,t)
+    CHUNK = max(int(assignment_chunk_size), 1)
+    KEY_CHUNK = max(int(key_assignment_chunk_size), 1)
+    nonkey_key_local = torch.empty(N_n, dtype=torch.long, device=device)
+
     for start in range(0, N_n, CHUNK):
         end = min(start + CHUNK, N_n)
-        # diff: (chunk, N_k, T, 3)
-        d = (nk_means_all[start:end, None, :, :]       # (chunk, 1, T, 3)
-            - key_means_all[None, :, :, :])            # (1, N_k, T, 3)
-        d_sq = (d ** 2).sum(dim=-1)                    # (chunk, N_k, T)
-        u_s = (nk_u_all[start:end, None, :]            # (chunk, 1, T)
-            + key_u_all[None, :, :] + 1e-8)         # (1, N_k, T)
-        agg_dist[start:end] = (d_sq / u_s).sum(dim=-1) # (chunk, N_k)
+        best_dist = torch.full((end - start,), float("inf"), device=device)
+        best_key = torch.zeros((end - start,), dtype=torch.long, device=device)
 
-    nonkey_key_local = agg_dist.argmin(dim=-1)   # (N_n,)  index into key_idx
+        nk_means_chunk = nk_means_all[start:end]
+        nk_u_chunk = nk_u_all[start:end]
+
+        for key_start in range(0, N_k, KEY_CHUNK):
+            key_end = min(key_start + KEY_CHUNK, N_k)
+
+            d = (
+                nk_means_chunk[:, None, :, :]
+                - key_means_all[None, key_start:key_end, :, :]
+            )
+            d_sq = (d * d).sum(dim=-1)
+            u_s = (
+                nk_u_chunk[:, None, :]
+                + key_u_all[None, key_start:key_end, :]
+                + 1e-8
+            )
+            dist_chunk = (d_sq / u_s).sum(dim=-1)
+            local_dist, local_key = dist_chunk.min(dim=-1)
+
+            update = local_dist < best_dist
+            best_dist[update] = local_dist[update]
+            best_key[update] = local_key[update] + key_start
+
+        nonkey_key_local[start:end] = best_key
 
     # Non-key inherits assigned key node's edges + the key node itself (ε_i = ε_j ∪ {j})
     assigned_key_nbrs = key_nbr_local[nonkey_key_local]  # (N_n, K) neighbors of assigned key

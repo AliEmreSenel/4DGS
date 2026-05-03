@@ -795,7 +795,7 @@ class GaussianModel:
         temporal_variation = torch.zeros_like(mu_t)
         for timestamp in unique_timestamps:
             diff = timestamp - mu_t
-            p_i_t = torch.exp(-0.5 * (diff / sigma_t) ** 2)
+            p_i_t = torch.exp(-0.5 * (diff ** 2) / sigma_t)
             second_derivative = (((diff**2) / (sigma_t**2)) - (1.0 / sigma_t)) * p_i_t
             temporal_variation = temporal_variation + 1.0 / (
                 0.5 * torch.tanh(torch.abs(second_derivative)) + 0.5

@@ -125,6 +125,13 @@ class OptimizationParams(ParamGroup):
         self.usplat_start_iter = 500
         self.usplat_eta_c = 0.5
         self.usplat_phi = 1000000.0
+        self.usplat_key_ratio = 0.02
+        self.usplat_spt_threshold = 5
+        self.usplat_knn_k = 8
+        self.usplat_u_tau_percentile = 0.50
+        self.usplat_max_key_nodes = 2000
+        self.usplat_assignment_chunk_size = 16
+        self.usplat_key_assignment_chunk_size = 512
 
         super().__init__(parser, "Optimization Parameters")
         

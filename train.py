@@ -70,9 +70,13 @@ def rebuild_usplat_state(gaussians, training_dataset, pipe, background, opt, ite
         graph = build_graph(
             means_t=means_t_all,
             u_scalar=u_scalar,
-            key_ratio=0.02,
-            spt_threshold=5,
-            knn_k=8,
+            key_ratio=getattr(opt, "usplat_key_ratio", 0.02),
+            spt_threshold=getattr(opt, "usplat_spt_threshold", 5),
+            knn_k=getattr(opt, "usplat_knn_k", 8),
+            u_tau_percentile=getattr(opt, "usplat_u_tau_percentile", 0.50),
+            max_key_nodes=getattr(opt, "usplat_max_key_nodes", 2000),
+            assignment_chunk_size=getattr(opt, "usplat_assignment_chunk_size", 128),
+            key_assignment_chunk_size=getattr(opt, "usplat_key_assignment_chunk_size", 512),
             device=background.device,
         )
         p_pretrained = gaussians.get_xyz.detach().clone()
