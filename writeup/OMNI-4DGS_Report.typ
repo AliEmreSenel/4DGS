@@ -51,7 +51,7 @@ Gaussian Splatting has been used extensively in the task of scene reconstruction
 
 In a 4DGS model, the building blocks of the scene are a vast number of Gaussian Distributions in space, and are being parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing for diagonal deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of the gaussian, encoded from a fixed number of Spherical Harmonic (SH) coefficients, which can approximate uniformly any color distribution. Compared to having a constant color, SH coefficients allow smooth coloring over the surface, where expressiveness depends on the number of coefficients. Both the use of Covariance+Rotation and SH reduce the number of gaussians needed, since they allow for greater range of behavior, at the cost of a higher number of variables. Training involves the iterated reconstruction of ground truth images from the dataset by rendering the gaussians. Multiple similarity metrics are used to steer each gaussian features in the correct direction, balancing color fidelity with a known depth map, or a structural similarity metric. The final output consists of the list of gaussians, which can be projected to a camera plane and rasterized to obtain a reconstructed image. During inference, camera position is fixed, and a pixel color is obtained by integrating the scene through the view-pixel ray: each gaussian color contribution is added, while accounting for opacity, distance, and leftover un-occluded light, crossing the gaussians in the correct order. Naturally, this allows for the generation of new camera angles. \ \
 
-Extending the task from static scenes to dynamic scenes, where the objects move or change shape and color, the state of the art (SOTA)architecture is Native 4D Gaussian Splatting (4DGS-Native) @yang2024_4dgs. This model extends the gaussian features by adding a time scalar to position, centering the gaussians in time, and time covariance components, allowing some movement of each gaussian. With this extension, rendering must first condition the gaussians with respect to time, before being able to render them as in the 3D setting. All mentions of 4D Gussian Splatting refer to the native representation. \ \
+Extending the task from static scenes to dynamic scenes, where the objects move or change shape and color, the state of the art (SOTA) architecture is Native 4D Gaussian Splatting (4DGS-Native) @yang2024_4dgs. This model extends the gaussian features by adding a time scalar to position, centering the gaussians in time, and time covariance components, allowing some movement of each gaussian. With this extension, rendering must first condition the gaussians with respect to time, before being able to render them as in the 3D setting. All mentions of 4D Gussian Splatting refer to the native representation. \ \
 
 Although the field of dynamic scene reconstruction has attracted a lot of interest and produced impressive results, many problems persist with the current models: scenes are affected by a high number of low-importance Gaussians, which drastically increase training time; rendering techniques are limited by costly sorting algorithms; and initialization or training strategies are non-obvious. In this paper, we combine several 4DGS-Native improvements into a unified architecture, verifying their performance through ablations.
 
@@ -133,12 +133,26 @@ $
 
 Other optimizations have also been developed for the rendering (inference) operation: following @du2026_mobilegs, gaussians with opacity smaller than a threshold are dropped. Visibility masks are also an option for selectively loading gaussians at render time: @yuan2025_4dgs1k proposes binary labellings of the gaussians every 5 frames, so the rendering step loads only gaussians that are visible just before or just after. Both of these techniques result in faster inference time, since they drastically reduce memory loading and reducing the problem size.
 
+*SH MLP Compression* encodes the view-dependent color of the Gaussians into latent vectors: #box[$(h_d, h_v) = ("view", "diffuse")$], which isolate the information between gaussian-specific and perspective specific @du2026_mobilegs. To learn the split, while training "view", the diffuse component is fixed but camera angle changes. The opposite holds for "diffuse", where the view component is fixed. During inference, the MLPs are used to recover color.
+
+*Teacher-Student SH Compression* works by training an MLP to compress existing high-order harmonic colors to lower order through a faithful mapping. The operation identifies the set of mappings that minimizes the color loss between the original representation and the lower-order one.
+
 == Training
 
-Standard Backpropagation is used in the model to train the best parameters for scene fidelity, while loss can be measured using image similarity metrics. To reduce training instability, Adam Optimizer and Batch training are used, while the choice of loss depends on the architectural components.
+Standard Backpropagation is used in the model to train the best parameters for scene fidelity, while loss can be measured using image similarity metrics. To reduce training instability, Adam Optimizer and Batch training are used @yang2024_4dgs, while loss choice depends on the architectural components.
+
+Custom CUDA kernels are used to compute pixel operations on the GPU directly, though it limits compatibility across codebases. For this reason, we opted for a mixed pruning-densify schedule, as opposed to MegaSAM @luo2025_instant4d.
+
+
+[In-training Pruning: Spatio-Temporal, Opacity]
+
+[Densification]
+
+== USPLAT Algorithm
 
 == Loss
 
+Multiple metrics exist for image reconstruction tasks.
 [Reconstruction Error]
 
 [SSIM metrics]
@@ -149,33 +163,19 @@ Standard Backpropagation is used in the model to train the best parameters for s
 
 Specific Loss for 4DGS + Loss variations (see USPLAT)
 
-Training involves compilation of CUDA kernel, which limits compatibility across codebases, for this reason, we did not implement MegaSAM initialization @luo2025_instant4d.
+== At-Rest Compression
 
-[In-training Pruning]
+The complete model is stored as the combination of compression MLPs, and lossy codebook approximations @du2026_mobilegs. 
 
-[Densification]
+*Compression MLPs*  stored in memory as weights, and are evaluated during inference to render each image.
 
-== Compression
+*Codebook Compression* is applied to gaussian features by splitting the complete vector of features into sub-vectors, which are replaced with the K-means nearest centroids to obtain a lossy compression of similar vectors. The corresponding index for each gaussian is stored using Huffman Encoding. This technique is referred to as Neural Vector Quantization (NVQ).
 
-[Pruning]
-
-[Render-time MLPs]
-
-[Codebook compression, K-means and GPCC]
+*GPCC Compression* is used to encode gaussian positions by first voxelizing the space, then sorting them by Morton Order and storing them in PLY format. The algorithm is implemented in C++ as a single-threaded utility.
 
 == Points of Improvement
 
-Several techniques have been developed to improve the known limitations of GS: poor initialization, slow training, high-memory usage, inconsistent reconstruction, unstable training, expensive rendering.
-
-[Explain each of them, citing the paper for each]
-
-These architectural changes have produces incredible improvements, but they have not been tested individually in a unified system.
-
-We compare reconstruction loss, training time, storage size, and render speed, to identify the best combination of techniques.
-
-[Examples of orders of magnitude of each term]
-
-[Mention difficulty with one thing giving an improvement at the cost of another aspect, which is why we do ablations]
+Several techniques have been developed to improve the known limitations of GS, but any addition may negate the contribution of another. For example, Isotropic Gaussians allow for faster training and smaller memory footprint, but reduce the model's capacity. We propose a shared parametrization model to test each architectural component in relation to the others, in a unified system.
 
 = Model Parametrization
 
@@ -200,8 +200,6 @@ We combine the papers into a single architecture, which can be studied through a
 *Distillation* can be used to effectively reduce the storage size of the SH coefficients, by training a MLP to effectively compress color through a teacher-student model.
 
 *Storage* reduction techniques consist of Neural Vector Quantization (NVQ), used in conjunction with MLP compression @du2026_mobilegs.
-
-The addition of each component may negate the contribution of another: eg. Isotropic Gaussians allow for faster training and smaller memory footprint, but reduce the model's capacity.
 
 == Loss
 
