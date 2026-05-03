@@ -53,6 +53,9 @@ namespace CudaRasterizer
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
         	float* gaussian_scores,
+			const bool compute_score_squares,
+			const float* score_error_map,
+			float* gaussian_score_max_error,
 			float* out_color,
 
 			float* accum_weights_ptr,

@@ -26,6 +26,8 @@ def rasterize_gaussians(
     cov3Ds_precomp,
     raster_settings,
     compute_scores=False,
+    compute_score_squares=False,
+    score_error_map=None,
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -40,6 +42,8 @@ def rasterize_gaussians(
         cov3Ds_precomp,
         raster_settings,
         compute_scores,
+        compute_score_squares,
+        score_error_map,
     )
 
 
@@ -59,6 +63,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         cov3Ds_precomp,
         raster_settings,
         compute_scores,
+        compute_score_squares,
+        score_error_map,
     ):
         args = (
             raster_settings.bg,
@@ -82,6 +88,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.campos,
             raster_settings.prefiltered,
             compute_scores,
+            compute_score_squares,
+            score_error_map,
             raster_settings.debug,
         )
 
@@ -102,6 +110,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                     w_fg,
                     transmittance,
                     gaussian_scores,
+                    gaussian_score_max_error,
                 ) = _C.rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_ms_nosort_fw.dump")
@@ -121,6 +130,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 w_fg,
                 transmittance,
                 gaussian_scores,
+                gaussian_score_max_error,
             ) = _C.rasterize_gaussians(*args)
 
         del accum_weights_ptr, accum_weights_count, accum_max_count
@@ -144,7 +154,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             imgBuffer,
             gaussian_scores,
         )
-        return color, radii, kernel_time, transmittance, gaussian_scores
+        return color, radii, kernel_time, transmittance, gaussian_scores, gaussian_score_max_error
 
     @staticmethod
     def backward(
@@ -154,8 +164,9 @@ class _RasterizeGaussians(torch.autograd.Function):
         grad_kernel_time,
         grad_transmittance,
         grad_gaussian_scores,
+        grad_gaussian_score_max_error,
     ):
-        del grad_radii, grad_kernel_time, grad_transmittance, grad_gaussian_scores
+        del grad_radii, grad_kernel_time, grad_transmittance, grad_gaussian_scores, grad_gaussian_score_max_error
 
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
@@ -250,6 +261,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_cov3Ds_precomp,
             None,
             None,
+            None,
         )
         return grads
 
@@ -297,6 +309,8 @@ class GaussianRasterizer(nn.Module):
         rotations=None,
         cov3D_precomp=None,
         compute_scores=False,
+        compute_score_squares=False,
+        score_error_map=None,
     ):
         if (shs is None and colors_precomp is None) or (
             shs is not None and colors_precomp is not None
@@ -319,6 +333,8 @@ class GaussianRasterizer(nn.Module):
             rotations = empty
         if cov3D_precomp is None:
             cov3D_precomp = empty
+        if score_error_map is None:
+            score_error_map = empty
 
         return rasterize_gaussians(
             means3D,
@@ -333,4 +349,6 @@ class GaussianRasterizer(nn.Module):
             cov3D_precomp,
             self.raster_settings,
             compute_scores,
+            compute_score_squares,
+            score_error_map,
         )

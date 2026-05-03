@@ -34,6 +34,8 @@ def rasterize_gaussians(
     prefilter_var,
     raster_settings,
     compute_scores=False,
+    compute_score_squares=False,
+    score_error_map=None,
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -51,6 +53,8 @@ def rasterize_gaussians(
         prefilter_var,
         raster_settings,
         compute_scores,
+        compute_score_squares,
+        score_error_map,
     )
 
 class _RasterizeGaussians(torch.autograd.Function):
@@ -72,6 +76,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         prefilter_var,
         raster_settings,
         compute_scores,
+        compute_score_squares,
+        score_error_map,
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -106,6 +112,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.force_sh_3d,
             raster_settings.prefiltered,
             compute_scores,
+            compute_score_squares,
+            score_error_map,
             raster_settings.debug,
         )
 
@@ -113,13 +121,13 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, color, flow, depth, T, radii, geomBuffer, binningBuffer, imgBuffer, covs_com, out_means3D, gaussian_scores = _C.rasterize_gaussians(*args)
+                num_rendered, color, flow, depth, T, radii, geomBuffer, binningBuffer, imgBuffer, covs_com, out_means3D, gaussian_scores, gaussian_score_max_error = _C.rasterize_gaussians(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, color, flow, depth, T, radii, geomBuffer, binningBuffer, imgBuffer, covs_com, out_means3D, gaussian_scores = _C.rasterize_gaussians(*args)
+            num_rendered, color, flow, depth, T, radii, geomBuffer, binningBuffer, imgBuffer, covs_com, out_means3D, gaussian_scores, gaussian_score_max_error = _C.rasterize_gaussians(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
@@ -128,10 +136,11 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx.save_for_backward(colors_precomp, means3D, out_means3D, scales, rotations, cov3Ds_precomp, radii, sh, 
                                 flow_2d, opacities, ts, scales_t, rotations_r,
                                 geomBuffer, binningBuffer, imgBuffer)
-        return color, radii, depth, 1-T, flow, covs_com, gaussian_scores
+        return color, radii, depth, 1-T, flow, covs_com, gaussian_scores, gaussian_score_max_error
 
     @staticmethod
-    def backward(ctx, grad_out_color, grad_radii, grad_depth, grad_alpha, grad_flow, grad_covs_com, grad_gaussian_scores):
+    def backward(ctx, grad_out_color, grad_radii, grad_depth, grad_alpha, grad_flow, grad_covs_com, grad_gaussian_scores, grad_gaussian_score_max_error):
+        del grad_gaussian_scores, grad_gaussian_score_max_error
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
@@ -212,6 +221,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
         )
 
         return grads
@@ -257,7 +268,9 @@ class GaussianRasterizer(nn.Module):
                 rotations = None, rotations_r=None, 
                 cov3D_precomp = None,
                 prefilter_var = -1.0,
-                compute_scores = False):
+                compute_scores = False,
+                compute_score_squares = False,
+                score_error_map = None):
     
         raster_settings = self.raster_settings
 
@@ -292,6 +305,8 @@ class GaussianRasterizer(nn.Module):
             rotations_r = empty
         if cov3D_precomp is None:
             cov3D_precomp = empty
+        if score_error_map is None:
+            score_error_map = empty
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(
@@ -310,5 +325,7 @@ class GaussianRasterizer(nn.Module):
             prefilter_var,
             raster_settings,
             compute_scores=compute_scores,
+            compute_score_squares=compute_score_squares,
+            score_error_map=score_error_map,
         )
 

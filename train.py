@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 from utils.uncertainty import compute_uncertainty_all_frames
 from utils.graph import build_graph, USplat4DGraph
 from utils.usplat_losses import key_node_loss, non_key_node_loss
+from utils.dqb import quat_to_rotmat, rotmat_to_quat
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -43,6 +44,194 @@ except ImportError:
 def save_gaussian_args(model_path, gaussian_kwargs):
     with open(os.path.join(model_path, "gaussian_args"), "w") as f:
         f.write(str(Namespace(**gaussian_kwargs)))
+
+
+def _indexed_xyz(gaussians, indices=None):
+    if indices is None:
+        return gaussians.get_xyz
+    indices = indices.to(device=gaussians.get_xyz.device, dtype=torch.long)
+    return gaussians.get_xyz[indices]
+
+
+def _indexed_scaling(gaussians, indices=None):
+    """Return activated spatial scaling without materializing all Gaussians."""
+    if indices is None:
+        scaling_param = gaussians._scaling
+    else:
+        indices = indices.to(device=gaussians.get_xyz.device, dtype=torch.long)
+        scaling_param = gaussians._scaling[indices]
+    scaling = gaussians.scaling_activation(scaling_param)
+    if (
+        getattr(gaussians, "isotropic_gaussians", False)
+        and scaling.numel() > 0
+        and scaling.shape[-1] == 1
+    ):
+        scaling = scaling.repeat(1, 3)
+    return scaling
+
+
+def _indexed_scaling_t(gaussians, indices=None):
+    if indices is None:
+        scaling_t_param = gaussians._scaling_t
+    else:
+        indices = indices.to(device=gaussians.get_xyz.device, dtype=torch.long)
+        scaling_t_param = gaussians._scaling_t[indices]
+    return gaussians.scaling_activation(scaling_t_param)
+
+
+def _identity_quat(n, device, dtype):
+    quat = torch.zeros((n, 4), device=device, dtype=dtype)
+    quat[:, 0] = 1.0
+    return quat
+
+
+def _indexed_rotation(gaussians, indices=None, right=False):
+    """Return activated quaternion(s) without normalizing the whole model."""
+    xyz = _indexed_xyz(gaussians, indices)
+    if getattr(gaussians, "isotropic_gaussians", False):
+        return _identity_quat(xyz.shape[0], xyz.device, xyz.dtype)
+
+    rot_param = gaussians._rotation_r if right else gaussians._rotation
+    if rot_param.numel() == 0:
+        return _identity_quat(xyz.shape[0], xyz.device, xyz.dtype)
+    if indices is not None:
+        indices = indices.to(device=gaussians.get_xyz.device, dtype=torch.long)
+        rot_param = rot_param[indices]
+    return gaussians.rotation_activation(rot_param)
+
+
+def _current_covariance_and_mean_offset(gaussians, timestamp, indices=None):
+    """Return current covariance and mean offset for every ablation.
+
+    If ``indices`` is provided, only those Gaussians are evaluated. This avoids
+    materializing activated scaling/rotation for the full scene when USplat
+    computes full-sequence losses on small key/non-key chunks.
+    """
+    if indices is not None:
+        indices = indices.to(device=gaussians.get_xyz.device, dtype=torch.long)
+
+    xyz = _indexed_xyz(gaussians, indices)
+    scaling = _indexed_scaling(gaussians, indices)
+    rotation = _indexed_rotation(gaussians, indices)
+
+    if getattr(gaussians, "gaussian_dim", 3) == 4 and getattr(gaussians, "rot_4d", False):
+        scaling_xyzt = torch.cat([scaling, _indexed_scaling_t(gaussians, indices)], dim=1)
+        rotation_r = _indexed_rotation(gaussians, indices, right=True)
+        t_values = gaussians.get_t if indices is None else gaussians.get_t[indices]
+        return gaussians.covariance_activation(
+            scaling_xyzt,
+            1.0,
+            rotation,
+            rotation_r,
+            dt=float(timestamp) - t_values,
+        )
+
+    cov = gaussians.covariance_activation(scaling, 1.0, rotation)
+    delta = torch.zeros_like(xyz)
+    return cov, delta
+
+
+def _cov6_to_matrix(cov6):
+    """Convert symmetric 3D covariance stored as xx,xy,xz,yy,yz,zz to matrices."""
+    cov = cov6.new_zeros(cov6.shape[:-1] + (3, 3))
+    cov[..., 0, 0] = cov6[..., 0]
+    cov[..., 0, 1] = cov[..., 1, 0] = cov6[..., 1]
+    cov[..., 0, 2] = cov[..., 2, 0] = cov6[..., 2]
+    cov[..., 1, 1] = cov6[..., 3]
+    cov[..., 1, 2] = cov[..., 2, 1] = cov6[..., 4]
+    cov[..., 2, 2] = cov6[..., 5]
+    return cov
+
+
+def _covariance_quat_from_cov6(cov6, reference_quat):
+    """Estimate a time-varying orientation from the current 3D covariance."""
+    cov = _cov6_to_matrix(cov6)
+    evals, evecs = torch.linalg.eigh(cov)
+    order = evals.argsort(dim=-1, descending=True)
+    gather_idx = order.unsqueeze(-2).expand(*order.shape[:-1], 3, 3)
+    R = torch.gather(evecs, dim=-1, index=gather_idx)
+    det = torch.linalg.det(R)
+    flip = torch.where(det < 0, -torch.ones_like(det), torch.ones_like(det))
+    R = R.clone()
+    R[..., :, 2] = R[..., :, 2] * flip.unsqueeze(-1)
+    quat = rotmat_to_quat(R)
+    align = (quat * reference_quat).sum(dim=-1, keepdim=True) < 0
+    return torch.where(align, -quat, quat)
+
+
+def _current_means_and_quats_for_timestamps(
+    gaussians,
+    timestamps,
+    indices=None,
+    quat_chunk_size=64,
+):
+    """Return differentiable positions and quaternions for selected timestamps.
+
+    The function is index-aware and internally chunked. Full-sequence USplat
+    loss usually touches tens of thousands of non-key Gaussians; constructing
+    covariance/eigen tensors for the whole scene at once is not viable on
+    commodity GPUs.
+    """
+    device = gaussians.get_xyz.device
+    if indices is None:
+        indices = torch.arange(gaussians.get_xyz.shape[0], device=device)
+    else:
+        indices = indices.to(device=device, dtype=torch.long)
+
+    chunk_size = max(1, int(quat_chunk_size))
+    xyz_all = gaussians.get_xyz
+    use_time_varying_rot = (
+        getattr(gaussians, "gaussian_dim", 3) == 4
+        and getattr(gaussians, "rot_4d", False)
+        and not getattr(gaussians, "isotropic_gaussians", False)
+    )
+
+    means_by_t = []
+    quats_by_t = []
+    for timestamp in timestamps:
+        mean_chunks = []
+        quat_chunks = []
+        for start in range(0, indices.numel(), chunk_size):
+            idx = indices[start:start + chunk_size]
+            cov, delta = _current_covariance_and_mean_offset(
+                gaussians,
+                float(timestamp),
+                indices=idx,
+            )
+            mean_chunks.append(xyz_all[idx] + delta)
+            ref_quat = _indexed_rotation(gaussians, idx)
+            if use_time_varying_rot:
+                quat_chunks.append(_covariance_quat_from_cov6(cov, ref_quat))
+            else:
+                quat_chunks.append(ref_quat)
+            del cov, delta
+        means_by_t.append(torch.cat(mean_chunks, dim=0))
+        quats_by_t.append(torch.cat(quat_chunks, dim=0))
+        del mean_chunks, quat_chunks
+
+    return torch.stack(means_by_t, dim=1), torch.stack(quats_by_t, dim=1)
+
+
+def _make_rigid_transforms(pos_t, pos_o, quats_t):
+    """Build canonical-to-current SE(3) transforms."""
+    N, B = pos_t.shape[:2]
+    R = quat_to_rotmat(quats_t.reshape(-1, 4)).reshape(N, B, 3, 3)
+    Rp0 = (R @ pos_o[:, None, :, None]).squeeze(-1)
+    t = pos_t - Rp0
+    T_mat = torch.zeros(N, B, 3, 4, device=pos_t.device, dtype=pos_t.dtype)
+    T_mat[..., :3, :3] = R
+    T_mat[..., 3] = t
+    return T_mat
+
+
+def _select_usplat_frame_indices(center_timestamp, timestamps, window):
+    T = timestamps.numel()
+    if int(window) <= 0 or int(window) >= T:
+        return torch.arange(T, device=timestamps.device)
+    window = max(1, int(window))
+    center = torch.argmin(torch.abs(timestamps - float(center_timestamp))).item()
+    start = max(0, min(center - window // 2, T - window))
+    return torch.arange(start, start + window, device=timestamps.device)
 
 
 def rebuild_usplat_state(gaussians, training_dataset, pipe, background, opt, iteration):
@@ -60,33 +249,36 @@ def rebuild_usplat_state(gaussians, training_dataset, pipe, background, opt, ite
         T_all = len(training_dataset)
         G = gaussians.get_xyz.shape[0]
         means_t_all = torch.zeros(G, T_all, 3, device=background.device)
+        w2cs_all = torch.zeros(T_all, 4, 4, device=background.device)
+        timestamps_all = torch.zeros(T_all, device=background.device)
         for t_idx, (_, cam) in enumerate(training_dataset):
             cam = cam.cuda(non_blocking=True, copy=False)
-            _, delta = gaussians.get_current_covariance_and_mean_offset(
-                1.0, cam.timestamp
-            )
+            _, delta = _current_covariance_and_mean_offset(gaussians, cam.timestamp)
             means_t_all[:, t_idx] = gaussians.get_xyz + delta
+            w2cs_all[t_idx] = cam.world_view_transform
+            timestamps_all[t_idx] = float(cam.timestamp)
 
         graph = build_graph(
             means_t=means_t_all,
             u_scalar=u_scalar,
+            w2cs=w2cs_all,
             key_ratio=getattr(opt, "usplat_key_ratio", 0.02),
             spt_threshold=getattr(opt, "usplat_spt_threshold", 5),
             knn_k=getattr(opt, "usplat_knn_k", 8),
-            u_tau_percentile=getattr(opt, "usplat_u_tau_percentile", 0.50),
+            u_tau_percentile=getattr(opt, "usplat_u_tau_percentile", -1.0),
             max_key_nodes=getattr(opt, "usplat_max_key_nodes", 2000),
             assignment_chunk_size=getattr(opt, "usplat_assignment_chunk_size", 128),
             key_assignment_chunk_size=getattr(opt, "usplat_key_assignment_chunk_size", 512),
             device=background.device,
         )
-        p_pretrained = gaussians.get_xyz.detach().clone()
+        p_pretrained_base = gaussians.get_xyz.detach().clone()
+        p_pretrained_t = means_t_all.detach().clone()
 
     print(
         f"[USplat4D] Graph rebuilt: {graph.num_key} key nodes, "
         f"{graph.num_nonkey} non-key nodes"
     )
-    return u_scalar, graph, p_pretrained
-
+    return u_scalar, graph, p_pretrained_base, p_pretrained_t, w2cs_all, timestamps_all
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, isotropic_gaussians,
@@ -137,7 +329,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     
     # USplat4D setup
     graph = None
-    p_pretrained = None
+    p_pretrained_base = None
+    p_pretrained_t = None
+    usplat_w2cs = None
+    usplat_timestamps = None
     u_scalar = None
     usplat_state_dirty = False
     
@@ -244,7 +439,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if use_usplat and iteration >= usplat_start_iter and (
                 graph is None or usplat_state_dirty
             ):
-                u_scalar, graph, p_pretrained = rebuild_usplat_state(
+                (
+                    u_scalar,
+                    graph,
+                    p_pretrained_base,
+                    p_pretrained_t,
+                    usplat_w2cs,
+                    usplat_timestamps,
+                ) = rebuild_usplat_state(
                     gaussians=gaussians,
                     training_dataset=training_dataset,
                     pipe=pipe,
@@ -325,6 +527,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         batch_Ldepth += Ldepth_i.detach()
                 ########################
                 
+                usplat_loss_for_log = torch.tensor(0.0, device=background.device)
+
                 # --- Compute USplat losses every iteration after graph state is ready ---
                 if use_usplat and graph is not None and iteration >= usplat_start_iter:
 
@@ -335,103 +539,133 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if in_first_10 or in_last_20:
                         should_densify = False
 
-                    with torch.no_grad():
-                        _, delta = gaussians.get_current_covariance_and_mean_offset(
-                            1.0, viewpoint_cam.timestamp
-                        )
-                        means_current = gaussians.get_xyz + delta  # (G, 3)
+                    frame_idx = _select_usplat_frame_indices(
+                        viewpoint_cam.timestamp,
+                        usplat_timestamps,
+                        getattr(opt, "usplat_motion_window", -1),
+                    )
+                    timestamps_window = usplat_timestamps[frame_idx]
+                    quat_chunk_size = max(1, int(getattr(opt, "usplat_quat_chunk_size", 64)))
+                    nonkey_chunk_size = max(
+                        1,
+                        int(getattr(opt, "usplat_nonkey_loss_chunk_size", 64)),
+                    )
 
                     N_k = graph.num_key
                     N_n = graph.num_nonkey
 
-                    # Current positions — shape (N, B, 3) with B=1
-                    pos_key_t = means_current[graph.key_idx].unsqueeze(1)      # (N_k, 1, 3)
-                    pos_nk_t  = means_current[graph.nonkey_idx].unsqueeze(1)   # (N_n, 1, 3)
-
-                    # Pretrained positions — same shape
-                    pos_key_pre = p_pretrained[graph.key_idx].unsqueeze(1)     # (N_k, 1, 3)
-                    pos_nk_pre  = p_pretrained[graph.nonkey_idx].unsqueeze(1)  # (N_n, 1, 3)
-
-                    # Canonical positions (no time dim)
-                    pos_o_key = p_pretrained[graph.key_idx]                    # (N_k, 3)
-                    pos_o_nk  = p_pretrained[graph.nonkey_idx]                 # (N_n, 3)
-
-                    # Identity quaternions for isotropic Gaussians
-                    quats_key = torch.zeros(N_k, 1, 4, device=background.device)
-                    quats_key[..., 0] = 1.0
-                    quats_nk  = torch.zeros(N_n, 1, 4, device=background.device)
-                    quats_nk[..., 0] = 1.0
-
-                    # SE(3) transforms: identity rotation + current position as translation
-                    def make_transforms(pos):
-                        # pos: (N, 1, 3) → transforms: (N, 1, 3, 4)
-                        N = pos.shape[0]
-                        T_mat = torch.zeros(N, 1, 3, 4, device=background.device)
-                        T_mat[:, :, 0, 0] = 1.0
-                        T_mat[:, :, 1, 1] = 1.0
-                        T_mat[:, :, 2, 2] = 1.0
-                        T_mat[:, :, :, 3] = pos[:, :, :]
-                        return T_mat
-
-                    transforms_key = make_transforms(pos_key_t)   # (N_k, 1, 3, 4)
-                    transforms_nk  = make_transforms(pos_nk_t)    # (N_n, 1, 3, 4)
-
-                    # Uncertainty — mean over time, shape (N, 1)
-                    u_key = u_scalar[graph.key_idx].mean(dim=1, keepdim=True)    # (N_k, 1)
-                    u_nk  = u_scalar[graph.nonkey_idx].mean(dim=1, keepdim=True) # (N_n, 1)
-
-                    # Camera rotation — shape (B, 3, 3) with B=1
-                    w2c = viewpoint_cam.world_view_transform        # (4, 4)
-                    R_wc_t = w2c[:3, :3].T.unsqueeze(0)            # (1, 3, 3)
-
-                    # Key rotations and translations for DQB — shape (N_k, B, 3, 3) and (N_k, B, 3)
-                    R_key_t = transforms_key[:, :, :, :3]          # (N_k, 1, 3, 3)
-                    t_key_t = transforms_key[:, :, :, 3]           # (N_k, 1, 3)
-
-                    # --- Key node loss ---
-                    Lkey = key_node_loss(
-                        pos_key_t=pos_key_t,
-                        quats_key_t=quats_key,
-                        transforms_key_t=transforms_key,
-                        pos_key_pretrained=pos_key_pre,
-                        u_key=u_key,
-                        R_wc_t=R_wc_t,
-                        pos_o=pos_o_key,
-                        key_nbrs_local=graph.key_nbrs,
-                        key_nbr_weights=graph.key_nbr_weights,
+                    # Key nodes are few enough to evaluate over the selected temporal
+                    # sequence. Non-key nodes are streamed below and backpropagated per
+                    # chunk, so their graphs are freed immediately instead of being kept
+                    # for all 49k+ nodes until the image backward pass.
+                    pos_key_t, quats_key = _current_means_and_quats_for_timestamps(
+                        gaussians,
+                        timestamps_window,
+                        indices=graph.key_idx,
+                        quat_chunk_size=quat_chunk_size,
                     )
 
-                    # --- Non-key node loss ---
-                    if N_n > 0:
-                        Lnon_key = non_key_node_loss(
-                            pos_nk_t=pos_nk_t,
-                            quats_nk_t=quats_nk,
-                            transforms_nk_t=transforms_nk,
-                            pos_nk_pretrained=pos_nk_pre,
-                            u_nk=u_nk,
-                            R_wc_t=R_wc_t,
-                            pos_o_nk=pos_o_nk,
-                            R_key_t=R_key_t,
-                            t_key_t=t_key_t,
-                            pos_key_t=pos_key_t,
-                            quats_key_t=quats_key,
-                            transforms_key_t=transforms_key,
-                            pos_o_key=pos_o_key,
-                            nonkey_nbrs_local=graph.nonkey_nbrs,
-                            nonkey_nbr_weights=graph.nonkey_nbr_weights,
-                            nonkey_nbrs_global=graph.nonkey_nbrs,
-                        )
+                    pos_key_pre = p_pretrained_t[graph.key_idx][:, frame_idx]
+                    pos_o_key = p_pretrained_base[graph.key_idx]
+                    transforms_key = _make_rigid_transforms(pos_key_t, pos_o_key, quats_key)
+
+                    u_key = u_scalar[graph.key_idx][:, frame_idx]
+                    R_wc_t = usplat_w2cs[frame_idx, :3, :3].transpose(-1, -2)
+
+                    R_key_t = transforms_key[:, :, :, :3]
+                    t_key_t = transforms_key[:, :, :, 3]
+
+                    # --- Non-key node loss, exact selected sequence but memory streamed ---
+                    if N_n > 0 and opt.lambda_non_key > 0:
+                        Lnon_key_accum = torch.tensor(0.0, device=background.device)
+                        # Non-key losses use key motion as a target/neighbor scaffold.
+                        # Detaching key tensors avoids retaining and replaying the key
+                        # graph for every non-key chunk, which is the source of the OOM.
+                        R_key_target = R_key_t.detach()
+                        t_key_target = t_key_t.detach()
+                        pos_key_target = pos_key_t.detach()
+                        quats_key_target = quats_key.detach()
+                        transforms_key_target = transforms_key.detach()
+
+                        for nk_start in range(0, N_n, nonkey_chunk_size):
+                            nk_end = min(nk_start + nonkey_chunk_size, N_n)
+                            nk_global_idx = graph.nonkey_idx[nk_start:nk_end]
+                            nk_count = nk_end - nk_start
+
+                            pos_nk_t, quats_nk = _current_means_and_quats_for_timestamps(
+                                gaussians,
+                                timestamps_window,
+                                indices=nk_global_idx,
+                                quat_chunk_size=quat_chunk_size,
+                            )
+                            pos_nk_pre = p_pretrained_t[nk_global_idx][:, frame_idx]
+                            pos_o_nk = p_pretrained_base[nk_global_idx]
+                            transforms_nk = _make_rigid_transforms(pos_nk_t, pos_o_nk, quats_nk)
+                            u_nk = u_scalar[nk_global_idx][:, frame_idx]
+
+                            Lnon_key_chunk = non_key_node_loss(
+                                pos_nk_t=pos_nk_t,
+                                quats_nk_t=quats_nk,
+                                transforms_nk_t=transforms_nk,
+                                pos_nk_pretrained=pos_nk_pre,
+                                u_nk=u_nk,
+                                R_wc_t=R_wc_t,
+                                pos_o_nk=pos_o_nk,
+                                R_key_t=R_key_target,
+                                t_key_t=t_key_target,
+                                pos_key_t=pos_key_target,
+                                quats_key_t=quats_key_target,
+                                transforms_key_t=transforms_key_target,
+                                pos_o_key=pos_o_key,
+                                nonkey_nbrs_local=graph.nonkey_nbrs[nk_start:nk_end],
+                                nonkey_nbr_weights=graph.nonkey_nbr_weights[nk_start:nk_end],
+                                nonkey_nbrs_global=graph.nonkey_nbrs[nk_start:nk_end],
+                            )
+                            chunk_weight = float(nk_count) / float(N_n)
+                            (opt.lambda_non_key * chunk_weight * Lnon_key_chunk / batch_size).backward()
+                            Lnon_key_accum = Lnon_key_accum + Lnon_key_chunk.detach() * nk_count
+
+                            del (
+                                pos_nk_t,
+                                quats_nk,
+                                pos_nk_pre,
+                                pos_o_nk,
+                                transforms_nk,
+                                u_nk,
+                                Lnon_key_chunk,
+                            )
+
+                        Lnon_key = Lnon_key_accum / float(N_n)
+                        usplat_loss_for_log = usplat_loss_for_log + opt.lambda_non_key * Lnon_key.detach()
                     else:
                         Lnon_key = torch.tensor(0.0, device=background.device)
 
-                    loss = loss + opt.lambda_key * Lkey + opt.lambda_non_key * Lnon_key
+                    # --- Key node loss ---
+                    if opt.lambda_key > 0:
+                        Lkey = key_node_loss(
+                            pos_key_t=pos_key_t,
+                            quats_key_t=quats_key,
+                            transforms_key_t=transforms_key,
+                            pos_key_pretrained=pos_key_pre,
+                            u_key=u_key,
+                            R_wc_t=R_wc_t,
+                            pos_o=pos_o_key,
+                            key_nbrs_local=graph.key_nbrs,
+                            key_nbr_weights=graph.key_nbr_weights,
+                        )
+                        (opt.lambda_key * Lkey / batch_size).backward()
+                        usplat_loss_for_log = usplat_loss_for_log + opt.lambda_key * Lkey.detach()
+                    else:
+                        Lkey = torch.tensor(0.0, device=background.device)
+
+                    del pos_key_t, quats_key, transforms_key, R_key_t, t_key_t
                 
                 batch_Ll1 += Ll1_i.detach()
                 batch_Lssim += Lssim_i.detach()
                 batch_psnr += psnr(image, gt_image).mean().detach()
 
                 loss = loss / batch_size
-                batch_loss += loss.detach()
+                batch_loss += loss.detach() + usplat_loss_for_log / batch_size
                 loss.backward()
                 if should_densify:
                     batch_point_grad.append(
@@ -672,7 +906,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         )
                         if use_usplat and iteration >= usplat_start_iter:
                             graph = None
-                            p_pretrained = None
+                            p_pretrained_base = None
+                            p_pretrained_t = None
+                            usplat_w2cs = None
+                            usplat_timestamps = None
                             u_scalar = None
                             usplat_state_dirty = True
 
@@ -744,7 +981,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     )
                     if use_usplat and iteration >= usplat_start_iter:
                         graph = None
-                        p_pretrained = None
+                        p_pretrained_base = None
+                        p_pretrained_t = None
+                        usplat_w2cs = None
+                        usplat_timestamps = None
                         u_scalar = None
                         usplat_state_dirty = True
 
@@ -773,13 +1013,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     )
                     if use_usplat and iteration >= usplat_start_iter:
                         graph = None
-                        p_pretrained = None
+                        p_pretrained_base = None
+                        p_pretrained_t = None
+                        usplat_w2cs = None
+                        usplat_timestamps = None
                         u_scalar = None
                         usplat_state_dirty = True
                     scene.save(iteration)
 
                 if use_usplat and iteration >= usplat_start_iter and usplat_state_dirty:
-                    u_scalar, graph, p_pretrained = rebuild_usplat_state(
+                    (
+                        u_scalar,
+                        graph,
+                        p_pretrained_base,
+                        p_pretrained_t,
+                        usplat_w2cs,
+                        usplat_timestamps,
+                    ) = rebuild_usplat_state(
                         gaussians=gaussians,
                         training_dataset=training_dataset,
                         pipe=pipe,

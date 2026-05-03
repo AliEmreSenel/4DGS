@@ -70,6 +70,9 @@ namespace FORWARD
 		uint32_t* n_contrib,
 		const float* bg_color,
 		float* gaussian_scores,
+		const bool compute_score_squares,
+		const float* score_error_map,
+		float* gaussian_score_max_error,
 		float* out_color,
 		float* out_flow,
 		float* out_depth);

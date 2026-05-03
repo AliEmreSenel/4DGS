@@ -39,6 +39,8 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const bool compute_scores,
+	const bool compute_score_squares,
+	const torch::Tensor& score_error_map,
 	const bool debug);
 
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, 

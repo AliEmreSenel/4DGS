@@ -16,6 +16,13 @@
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
+__device__ inline void atomicMaxFloatNonnegative(float* address, float val)
+{
+	// Error values are non-negative finite floats, so their IEEE-754 bit pattern
+	// preserves numeric ordering under unsigned integer atomicMax.
+	atomicMax(reinterpret_cast<unsigned int*>(address), __float_as_uint(val));
+}
+
 // Forward method for converting the input spherical harmonics
 // coefficients of each Gaussian to a simple RGB color.
 __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
@@ -514,6 +521,9 @@ renderCUDA(
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ gaussian_scores,
+	const bool compute_score_squares,
+	const float* __restrict__ score_error_map,
+	float* __restrict__ gaussian_score_max_error,
 	float* __restrict__ out_color,
 	float* __restrict__ out_flow,
 	float* __restrict__ out_depth)
@@ -591,13 +601,26 @@ renderCUDA(
 			float alpha = min(0.99f, con_o.w * exp(power));
 			if (alpha < 1.0f / 255.0f)
 				continue;
-			if (gaussian_scores != nullptr)
-				atomicAdd(&gaussian_scores[collected_id[j]], alpha * T);
 			float test_T = T * (1 - alpha);
+			if (!compute_score_squares && gaussian_scores != nullptr)
+			{
+				// Preserve the legacy linear visibility score used by spatio-temporal pruning.
+				atomicAdd(&gaussian_scores[collected_id[j]], alpha * T);
+			}
 			if (test_T < 0.0001f)
 			{
 				done = true;
 				continue;
+			}
+			if (compute_score_squares && gaussian_scores != nullptr)
+			{
+				// USplat Eq. (3): accumulate only actual contributing pixels.
+				const float blend_weight = alpha * T;
+				atomicAdd(&gaussian_scores[collected_id[j]], blend_weight * blend_weight);
+			}
+			if (gaussian_score_max_error != nullptr && score_error_map != nullptr)
+			{
+				atomicMaxFloatNonnegative(&gaussian_score_max_error[collected_id[j]], score_error_map[pix_id]);
 			}
 
 			// Eq. (3) from 3D Gaussian splatting paper.
@@ -643,6 +666,9 @@ void FORWARD::render(
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* gaussian_scores,
+	const bool compute_score_squares,
+	const float* score_error_map,
+	float* gaussian_score_max_error,
 	float* out_color,
 	float* out_flow,
 	float* out_depth)
@@ -661,6 +687,9 @@ void FORWARD::render(
 		n_contrib,
 		bg_color,
 		gaussian_scores,
+		compute_score_squares,
+		score_error_map,
+		gaussian_score_max_error,
 		out_color,
 		out_flow,
 		out_depth);

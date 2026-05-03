@@ -17,7 +17,14 @@ from .diff_gaussian_rasterization import GaussianRasterizer as SortedGaussianRas
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, return_gaussian_scores = False, apply_random_dropout = False):
+def render(
+    viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+    scaling_modifier = 1.0, override_color = None,
+    return_gaussian_scores = False,
+    return_gaussian_scores_sq = False,
+    gaussian_score_error_map = None,
+    apply_random_dropout = False,
+):
     """
     Render the scene. 
     
@@ -200,7 +207,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     dropout_prob = float(getattr(pipe, "random_dropout_prob", 0.0))
     dropout_mask = None
-    if apply_random_dropout and dropout_prob > 0.0 and not return_gaussian_scores:
+    if apply_random_dropout and dropout_prob > 0.0 and not (return_gaussian_scores or return_gaussian_scores_sq):
         dropout_prob = min(dropout_prob, 1.0)
         dropout_mask = torch.rand(
             (means3D.shape[0],), device=means3D.device, dtype=torch.float32
@@ -210,7 +217,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     
     mask = None
     # Prefilter
-    if pc.gaussian_dim == 4 and marginal_t is not None and not return_gaussian_scores:
+    if pc.gaussian_dim == 4 and marginal_t is not None and not (return_gaussian_scores or return_gaussian_scores_sq):
         mask = marginal_t[:, 0] > 0.05
     if dropout_mask is not None:
         mask = dropout_mask if mask is None else (mask & dropout_mask)
@@ -240,6 +247,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         if flow_2d is not None:
             flow_2d = flow_2d[mask]
     
+    gaussian_score_max_error = None
+
     if use_mobilegs_sort_free:
         image_height = int(viewpoint_camera.image_height)
         image_width = int(viewpoint_camera.image_width)
@@ -262,7 +271,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             alpha = rendered_image.new_zeros((1, image_height, image_width))
             flow = rendered_image.new_zeros((2, image_height, image_width))
             covs_com = means3D.new_zeros((0, 6))
-            gaussian_scores = means3D.new_empty((0,)) if return_gaussian_scores else None
+            gaussian_scores = means3D.new_empty((0,)) if (return_gaussian_scores or return_gaussian_scores_sq) else None
+            gaussian_score_max_error = means3D.new_empty((0,)) if gaussian_score_error_map is not None else None
         else:
             cam_center = viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
             dir_pp = (means3D - cam_center).detach()
@@ -309,7 +319,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             if pc.gaussian_dim == 4:
                 opacity = opacity * marginal_t_mlp
 
-            rendered_image, radii, _kernel_time, transmittance, gaussian_scores = rasterizer(
+            rendered_image, radii, _kernel_time, transmittance, gaussian_scores, gaussian_score_max_error = rasterizer(
                 means3D=means3D,
                 means2D=means2D,
                 shs=shs,
@@ -320,7 +330,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 scales=scales,
                 rotations=rotations,
                 cov3D_precomp=cov3D_precomp,
-                compute_scores=return_gaussian_scores,
+                compute_scores=(return_gaussian_scores or return_gaussian_scores_sq),
+                compute_score_squares=return_gaussian_scores_sq,
+                score_error_map=gaussian_score_error_map,
             )
             depth = rendered_image.new_zeros((1, rendered_image.shape[1], rendered_image.shape[2]))
             alpha = (1.0 - transmittance).unsqueeze(0).clamp(0.0, 1.0)
@@ -328,7 +340,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             covs_com = means3D.new_zeros((means3D.shape[0], 6))
     else:
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
-        rendered_image, radii, depth, alpha, flow, covs_com, gaussian_scores = rasterizer(
+        rendered_image, radii, depth, alpha, flow, covs_com, gaussian_scores, gaussian_score_max_error = rasterizer(
             means3D = means3D,
             means2D = means2D,
             shs = shs,
@@ -342,7 +354,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             rotations_r = rotations_r,
             cov3D_precomp = cov3D_precomp,
             prefilter_var = prefilter_var,
-            compute_scores = return_gaussian_scores)
+            compute_scores=(return_gaussian_scores or return_gaussian_scores_sq),
+            compute_score_squares=return_gaussian_scores_sq,
+            score_error_map=gaussian_score_error_map)
     
     if pipe.env_map_res:
         assert pc.env_map is not None
@@ -374,4 +388,5 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "depth": depth,
             "alpha": alpha,
             "flow": flow,
-            "gaussian_scores": gaussian_scores if return_gaussian_scores else None}
+            "gaussian_scores": gaussian_scores if (return_gaussian_scores or return_gaussian_scores_sq) else None,
+            "gaussian_score_max_error": gaussian_score_max_error}

@@ -29,6 +29,15 @@ from utils.uncertainty import mahalanobis_sq
 from utils.dqb import apply_dqb_to_batch
 
 
+def quaternion_chordal_loss(q: Tensor, target: Tensor) -> Tensor:
+    """Hemisphere-invariant unit-quaternion L2 loss."""
+    q = F.normalize(q, p=2, dim=-1)
+    target = F.normalize(target, p=2, dim=-1)
+    same = (q - target).square().sum(dim=-1)
+    flipped = (q + target).square().sum(dim=-1)
+    return torch.minimum(same, flipped).mean()
+
+
 # --------------------------------------------------------------------------- #
 #  Motion losses (Appendix A.2.1, Eqs. S8–S13)
 # --------------------------------------------------------------------------- #
@@ -43,7 +52,7 @@ def isometry_loss(
 ) -> Tensor:
     """Isometry loss L_iso (Eq. S8): canonical distances should be preserved over time.
 
-    L_iso = 1/(K*N) * sum_t sum_i sum_j w_{ij} * (||p^o_j - p^o_i||^2 - ||p_{j,t} - p_{i,t}||^2)
+    L_iso = 1/(K*N) * sum_t sum_i sum_j w_{ij} * (||p^o_j - p^o_i||_2 - ||p_{j,t} - p_{i,t}||_2)
     
     If pos_nbr_t/pos_o_nbr provided, use for neighbors (mixed center/neighbor case).
     """
@@ -52,19 +61,17 @@ def isometry_loss(
     if pos_o_nbr is None:
         pos_o_nbr = pos_o
     
-    # Canonical pairwise distances squared
     p_i_o = pos_o.unsqueeze(1)                   # (N, 1, 3)
     p_j_o = pos_o_nbr[nbr_idx]                   # (N, K, 3)
-    dist_o_sq = ((p_i_o - p_j_o) ** 2).sum(-1)  # (N, K)
+    dist_o = torch.linalg.norm(p_i_o - p_j_o, dim=-1)  # (N, K)
 
     # Time-varying pairwise distances squared
     # pos_nbr_t[nbr_idx]: (N, K, B, 3)  (fancy index on first dim)
     p_j_t = pos_nbr_t[nbr_idx].permute(0, 2, 1, 3)  # (N, B, K, 3)
     p_i_t = pos_t.unsqueeze(2)                      # (N, B, 1, 3)
-    dist_t_sq = ((p_i_t - p_j_t) ** 2).sum(-1)     # (N, B, K)
+    dist_t = torch.linalg.norm(p_i_t - p_j_t, dim=-1)  # (N, B, K)
 
-    # (dist_o^2 - dist_t^2)  shape: need to broadcast dist_o_sq (N, K) → (N, 1, K)
-    diff = dist_o_sq.unsqueeze(1) - dist_t_sq             # (N, B, K)
+    diff = dist_o.unsqueeze(1) - dist_t                   # (N, B, K)
     loss = (weights.unsqueeze(1) * diff).abs().mean()
     return loss
 
@@ -382,7 +389,7 @@ def key_node_loss(
     # R_wc_t: (B, 3, 3) → expand to (N_k, B, 3, 3)
     R_wc = R_wc_t.unsqueeze(0).expand(N_k, -1, -1, -1)  # (N_k, B, 3, 3)
     mah = mahalanobis_sq(delta, u_key, R_wc, r_scale)    # (N_k, B)
-    pos_dev_loss = mah.mean()
+    pos_dev_loss = torch.sqrt(mah + 1e-8).mean()
 
     # --- Motion loss ---
     mot = motion_loss_key(
@@ -444,15 +451,16 @@ def non_key_node_loss(
     delta_pre = pos_nk_t - pos_nk_pretrained          # (N_n, B, 3)
     R_wc = R_wc_t.unsqueeze(0).expand(N_n, -1, -1, -1)
     mah_pre = mahalanobis_sq(delta_pre, u_nk, R_wc, r_scale)  # (N_n, B)
-    loss_pre = mah_pre.mean()
+    loss_pre = torch.sqrt(mah_pre + 1e-8).mean()
 
     # --- Mahalanobis deviation from DQB interpolation ---
-    # Compute DQB positions for each sampled frame
+    # Compute DQB position and rotation targets for each sampled frame.
     pos_dqb_list = []
+    quat_dqb_list = []
     for b in range(B):
         R_k_b = R_key_t[:, b]   # (N_k, 3, 3)
         t_k_b = t_key_t[:, b]   # (N_k, 3)
-        p_dqb_b, _ = apply_dqb_to_batch(
+        p_dqb_b, q_dqb_b = apply_dqb_to_batch(
             R_key_t=R_k_b,
             t_key_t=t_k_b,
             p_canon=pos_o_nk,
@@ -460,11 +468,14 @@ def non_key_node_loss(
             nonkey_nbr_weights=nonkey_nbr_weights,
         )
         pos_dqb_list.append(p_dqb_b)
+        quat_dqb_list.append(q_dqb_b)
     pos_dqb = torch.stack(pos_dqb_list, dim=1)  # (N_n, B, 3)
+    quat_dqb = torch.stack(quat_dqb_list, dim=1)  # (N_n, B, 4)
 
-    delta_dqb = pos_nk_t - pos_dqb.detach()     # (N_n, B, 3) — detach DQB (it's a target)
+    delta_dqb = pos_nk_t - pos_dqb              # (N_n, B, 3)
     mah_dqb = mahalanobis_sq(delta_dqb, u_nk, R_wc, r_scale)  # (N_n, B)
-    loss_dqb = mah_dqb.mean()
+    loss_dqb = torch.sqrt(mah_dqb + 1e-8).mean()
+    loss_dqb_rot = quaternion_chordal_loss(quats_nk_t, quat_dqb)
 
     # --- Motion loss ---
     mot = motion_loss_non_key(
@@ -485,4 +496,4 @@ def non_key_node_loss(
         lambda_vel=lambda_vel,
         lambda_acc=lambda_acc,
     )
-    return loss_pre + loss_dqb + mot
+    return loss_pre + loss_dqb + lambda_rot * loss_dqb_rot + mot

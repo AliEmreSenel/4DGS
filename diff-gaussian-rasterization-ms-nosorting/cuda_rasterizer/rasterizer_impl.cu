@@ -27,6 +27,11 @@
 #include <c10/cuda/CUDAStream.h>
 namespace cg = cooperative_groups;
 
+__device__ inline void atomicMaxFloatNonnegative(float* address, float val)
+{
+	atomicMax(reinterpret_cast<unsigned int*>(address), __float_as_uint(val));
+}
+
 #include "auxiliary.h"
 #include "forward.h"
 #include "backward.h"
@@ -372,7 +377,10 @@ __global__ void __launch_bounds__(256) renderTileOIT(
 	float* __restrict__ accum_alpha,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ background,
-	float* __restrict__ gaussian_scores
+	float* __restrict__ gaussian_scores,
+	const bool compute_score_squares,
+	const float* __restrict__ score_error_map,
+	float* __restrict__ gaussian_score_max_error
 ) {
     auto block = cg::this_thread_block();
     uint32_t horizontal_blocks = (W + 15) / 16;
@@ -448,6 +456,7 @@ __global__ void __launch_bounds__(256) renderTileOIT(
         // COMPUTE: Process current buffer while prefetching happens in background
         #pragma unroll 4 
         for (int i = 0; i < limit; i++) {
+            if (!inside) continue;
             float4 g = s_geom[db][i];
             float4 w = s_weight[db][i];
             
@@ -469,10 +478,13 @@ __global__ void __launch_bounds__(256) renderTileOIT(
             c[2] += col.z * alpha;
 
 			if (gaussian_scores != nullptr) {
-				// Sort-free rendering should use an order-independent score. The
-				// previous alpha * transmittance proxy depended on arbitrary tile-list
-				// traversal order and corrupted pruning scores for 4D scenes.
-				atomicAdd(&gaussian_scores[p_idx], alpha * w.z);
+				// Sort-free rendering uses the order-independent MobileGS weight.
+				const float blend_weight = alpha * w.z;
+				const float score = compute_score_squares ? blend_weight * blend_weight : blend_weight;
+				atomicAdd(&gaussian_scores[p_idx], score);
+			}
+			if (gaussian_score_max_error != nullptr && score_error_map != nullptr) {
+				atomicMaxFloatNonnegative(&gaussian_score_max_error[p_idx], score_error_map[pix.y * W + pix.x]);
 			}
             
             w_fg_acc += alpha * w.z;
@@ -546,6 +558,9 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* gaussian_scores,
+	const bool compute_score_squares,
+	const float* score_error_map,
+	float* gaussian_score_max_error,
 	float* out_color,
 
 	float* accum_weights_ptr,
@@ -668,7 +683,7 @@ int CudaRasterizer::Rasterizer::forward(
         feature_ptr, 
         geomState.conic_opacity,
         workspace.precomp_w_thres,
-		out_color, w_fg, Ts, imgState.accum_alpha, imgState.n_contrib, background, gaussian_scores
+		out_color, w_fg, Ts, imgState.accum_alpha, imgState.n_contrib, background, gaussian_scores, compute_score_squares, score_error_map, gaussian_score_max_error
     );
 	
 	if (kernel_times != nullptr) {

@@ -23,9 +23,9 @@ ModelParams:
   dataloader: False
 
 PipelineParams:
-  use_usplat: False
+  use_usplat: True
   random_dropout_prob: 0
-  sort_free_render: True
+  sort_free_render: False
   convert_SHs_python: False
   compute_cov3D_python: False
   debug: False
