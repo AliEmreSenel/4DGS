@@ -25,7 +25,7 @@
 
 #let block = tblock.with()
 
-= Overview
+= Problem Formulation
 
 #slide(title: "Lightweight 4D Gaussian Splatting")[
   \
@@ -42,8 +42,6 @@
     Compact 4DGS architecture validated through ablations and best-model evaluation.
   ]
 ]
-
-= Implementation
 
 #slide(title: "Modern Picture")[
   #grid(
@@ -81,9 +79,11 @@
   )
 ]
 
+= Proposed Solution
+
 #slide(title: "Contributions")[
-  \ 
-  
+  \
+
   Each codebase contributes with features and clashes.
 
   #table(
@@ -109,10 +109,10 @@
 
     [Backbone], [Render], [Memory], [Pruning], [Movement],
   )
- 
-  \ 
+
+  \
   #block(title: "Additions", "Dropout, Densification Schedule")
- 
+
 ]
 
 #slide(title: "Contributions & Challenges")[
@@ -120,9 +120,59 @@
   #ablations
 ]
 
-#slide(title: "Comparison")[
-  .
+= Performance Evaluation
+
+#slide(title: "Metrics for Comparison")[
+  \ \
+
+  #grid(
+    columns: (2fr, 1fr),
+    gutter: 2em,
+    // left section
+    table(
+      columns: (0.5fr, 2fr),
+      stroke: none,
+
+      table.vline(x: 1, stroke: black),
+
+      table.hline(y: 1, stroke: black),
+      table.hline(y: 2, stroke: gray),
+      table.hline(y: 3, stroke: gray),
+      table.hline(y: 4, stroke: gray),
+      table.hline(y: 5, stroke: gray),
+      table.hline(y: 6, stroke: gray),
+      table.hline(y: 7, stroke: gray),
+      table.hline(y: 8, stroke: gray),
+
+      [*Metric*], [*Short description*],
+
+      [PSNR], [Signal fidelity; higher is better],
+      [D-SSIM], [Structural dissimilarity; lower is better],
+      [LPIPS], [Perceptual difference; lower is better],
+      [TIME], [Total runtime or processing time],
+      [FPS], [Rendering speed in frames per second],
+      [Storage], [Disk space required],
+      [\#Gaussians], [Number of Gaussian primitives used],
+      [Memory], [Peak memory usage over train],
+    ),
+
+    // right section
+    [
+      #block(title: "Testing Datasets", [
+        DNerf
+        - Bouncing Balls
+        - Lego
+        - HellWarrior
+        - JumpingJacks
+        - Hook
+        - TRex
+
+      ])
+    ],
+  )
 ]
+
+= Final Result
 
 #slide(title: "Evaluation, Future Work")[
   .
