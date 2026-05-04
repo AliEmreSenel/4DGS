@@ -9,13 +9,13 @@ Features:
 - USplat on/off and DropoutGS-style RDR on/off as ablation axes
 - Robust failure handling: failed runs are recorded and skipped for metrics,
   but the overall orchestration continues
-- Slurm integration with one main batch job and 4 long-lived `srun` worker steps
+- Slurm integration with one deliberate batch allocation and long-lived `srun` worker steps
 - Auto-detection of already completed runs
 - Auto-detection of trained-but-unmeasured runs (metrics-only mode)
 - Greedy worker assignment so each GPU gets a queue of runs
 
 Typical usage:
-    python train_ablations_slurm.py configs/dnerf/*.yaml --submit-slurm
+    python batch_train.py configs/dnerf_ablation/*.yaml --submit-slurm
 
 Important runtime behavior:
 - Supports both `uv run` and direct Python execution
@@ -44,7 +44,10 @@ from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # Keep --help/--preflight usable in a fresh environment.
+    yaml = None
 
 
 DEFAULT_ISOTROPY = {
@@ -92,7 +95,44 @@ def build_dropout_registry(dropout_prob: float, lambda_rdr: float) -> Dict[str, 
     }
 
 
-SUPPORTED_AXES = ("isotropy", "appearance", "sorting", "pruning", "usplat", "dropout")
+def build_ess_registry(total_iterations: int) -> Dict[str, Dict[str, Any]]:
+    """DropoutGS ESS as an independent densification/splitting axis.
+
+    RDR dropout and ESS are separate mechanisms in the DropoutGS paper.  Keeping
+    ESS independent makes it possible to measure RDR-only, ESS-only, RDR+ESS,
+    and non-DropoutGS uses of edge-guided splitting.
+    """
+    if total_iterations <= 0:
+        start = 5000
+        until = 8500
+    else:
+        start = _clamped_schedule_iter(total_iterations, 0.45, 5000, minimum=1000)
+        until = _clamped_schedule_iter(total_iterations, 0.85, 8500, minimum=1000)
+        if until < start:
+            until = start
+    enabled = {
+        "enable_edge_guided_splitting": True,
+        "ess_from_iter": start,
+        "ess_until_iter": until,
+        "ess_interval": 2000,
+        "ess_edge_percentile": 0.90,
+        "ess_scale_percentile": 0.70,
+        "ess_max_splits": 5000,
+        "ess_split_children": 2,
+    }
+    return {
+        "no_ess": {
+            "enable_edge_guided_splitting": False,
+            "ess_from_iter": -1,
+            "ess_until_iter": -1,
+        },
+        "ess": dict(enabled),
+        # Backwards-compatible alias matching the use_* option names.
+        "use_ess": dict(enabled),
+    }
+
+
+SUPPORTED_AXES = ("isotropy", "appearance", "sorting", "pruning", "usplat", "dropout", "ess")
 
 
 @dataclass(frozen=True)
@@ -158,7 +198,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Launch train.py ablation sweeps locally or through a Slurm driver job."
     )
-    parser.add_argument("configs", nargs="+", help="Base config files.")
+    parser.add_argument("configs", nargs="*", help="Base config files.")
+    parser.add_argument("--preflight", action="store_true", help="Check Python modules and Slurm settings without reading configs, submitting jobs, or training.")
     parser.add_argument("--python", default=sys.executable, help="Python executable used when the runner mode resolves to python.")
     parser.add_argument("--runner", choices=["auto", "uv", "python"], default="auto", help="Command runner for train/eval/worker launch. auto prefers `uv run` when uv is available.")
     parser.add_argument("--uv-binary", default="uv", help="uv executable to use when --runner=uv or auto resolves to uv.")
@@ -201,7 +242,8 @@ def parse_args() -> argparse.Namespace:
         default="isotropy,appearance",
         help=(
             "Comma-separated ablation axes used only when --matrix-preset=cartesian "
-            "or when axis flags are explicitly supplied without --matrix-preset."
+            "or when axis flags are explicitly supplied without --matrix-preset. "
+            "Include ess to vary DropoutGS edge-guided splitting separately from RDR dropout."
         ),
     )
     parser.add_argument("--isotropy-options", default="anisotropic,isotropic")
@@ -210,6 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pruning-options", default="no_pruning,interleaved_prune_densify")
     parser.add_argument("--usplat-options", default="no_usplat")
     parser.add_argument("--dropout-options", default="no_dropout,dropout")
+    parser.add_argument("--ess-options", default="no_ess,ess")
     parser.add_argument("--dropout-prob", type=float, default=0.2, help="Gaussian dropout probability for the enabled dropout ablation option.")
     parser.add_argument("--dropout-lambda-rdr", type=float, default=1.0, help="RDR consistency-loss weight for the enabled dropout ablation option.")
     parser.add_argument("--include-invalid-combinations", action="store_true", help="Do not filter known incompatible ablation combinations.")
@@ -242,8 +285,9 @@ def parse_args() -> argparse.Namespace:
     # after each ablation checkpoint is available, so compressed payloads and
     # post-quantization metrics are stored with the ablation row.  By default
     # this runs for every ablation variant, not only sort-free variants.
-    parser.add_argument("--mobilegs-report", action=argparse.BooleanOptionalAction, default=True, help="Export, compress, and benchmark Mobile-GS payloads for ablation reporting.")
-    parser.add_argument("--mobilegs-report-scope", choices=["all", "sort_free"], default="all", help="Which ablation rows receive Mobile-GS export/benchmark reporting.")
+    parser.add_argument("--mobilegs-report", action=argparse.BooleanOptionalAction, default=True, help="After every run, export, compress, and benchmark a Mobile-GS payload so speed/quality deltas are reported for the trained checkpoint.")
+    parser.add_argument("--mobilegs-report-scope", choices=["all", "sort_free"], default="all", help="Which ablation rows receive Mobile-GS export/benchmark reporting. The default is all because Mobile-GS compression is a post-training evaluation for every ablation.")
+    parser.add_argument("--require-mobilegs-report", action=argparse.BooleanOptionalAction, default=False, help="Mark the run status as failed when Mobile-GS compression/benchmarking fails. Default keeps the training result and records mobile_status=failed.")
     parser.add_argument("--mobilegs-benchmark-render-mode", choices=["match", "sort_free", "sorted"], default="match", help="Renderer used to benchmark the compressed payload: match the source run, force sort-free, or force sorted alpha blending.")
     parser.add_argument("--mobilegs-force-first-order-sh", action=argparse.BooleanOptionalAction, default=True, help="Force ablations to train/export first-order spatial SH for Mobile-GS reporting.")
     parser.add_argument("--mobilegs-teacher-checkpoint", default="", help="Optional sorted-render teacher checkpoint for Mobile-GS SH/depth distillation.")
@@ -266,18 +310,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mobilegs-quality-samples", type=int, default=16, help="Number of metadata cameras used for quantized-vs-raw render quality.")
 
     # Slurm controls
-    parser.add_argument("--submit-slurm", action="store_true", help="Submit one main Slurm job that will launch srun workers.")
+    parser.add_argument("--submit-slurm", action="store_true", help="Submit one explicit Slurm allocation that launches srun workers. Use --dry-run with this flag to print the sbatch command without submitting.")
     parser.add_argument("--slurm-driver", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--slurm-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--assignment-file", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--slurm-partition", default="stud")
-    parser.add_argument("--slurm-account", default="3221337")
-    parser.add_argument("--slurm-qos", default="stud")
+    # Defaults are chosen for the probed hpc Slurm cluster on 2026-05-04:
+    # normal QOS allows up to 4 user GPUs, gpuh200/gpunew nodes expose 2 GPUs
+    # per node, and the user quota has a 180G soft limit. Override these flags
+    # explicitly on other clusters rather than relying on a wrapper script.
+    parser.add_argument("--slurm-partition", default="gpuh200")
+    parser.add_argument("--slurm-account", default=os.environ.get("SLURM_ACCOUNT") or os.environ.get("USER") or "")
+    parser.add_argument("--slurm-qos", default="normal")
     parser.add_argument("--slurm-time", default="1-00:00:00")
-    parser.add_argument("--slurm-mem", default="400G")
-    parser.add_argument("--slurm-gpus", type=int, default=4)
-    parser.add_argument("--slurm-tasks", type=int, default=4)
-    parser.add_argument("--slurm-total-cpus", type=int, default=8)
+    parser.add_argument("--slurm-mem", default="160G", help="Memory requested per allocated node.")
+    parser.add_argument("--slurm-gpus", type=int, default=4, help="Total GPUs requested for the allocation. The probed normal QOS limit is 4 GPUs per user.")
+    parser.add_argument("--slurm-tasks", type=int, default=4, help="Number of worker tasks. Keep equal to --slurm-gpus for one training run per GPU.")
+    parser.add_argument("--slurm-total-cpus", type=int, default=8, help="Total CPU threads across workers. Default gives 2 CPUs per GPU worker.")
+    parser.add_argument("--slurm-nodes", type=int, default=0, help="Allocated nodes. 0 computes ceil(total_gpus / gpus_per_node).")
+    parser.add_argument("--slurm-gpus-per-node", type=int, default=2, help="GPUs requested per node. H100/H200 nodes in the probe expose 2 GPUs per node.")
+    parser.add_argument("--slurm-tasks-per-node", type=int, default=0, help="Tasks per node. 0 computes ceil(tasks / nodes).")
+    parser.add_argument("--slurm-gres", default="", help="Exact sbatch GRES string to use instead of gpu counts, e.g. gpu:H200:2.")
+    parser.add_argument("--slurm-worker-gres", default="", help="Exact srun worker GRES string. Empty defaults to gpu:1 for one run per GPU.")
     parser.add_argument("--slurm-job-name", default="4dgs-ablations")
     parser.add_argument("--slurm-log-dir", default=None)
     parser.add_argument("--slurm-export", default="ALL", help="Value passed to sbatch --export. Default keeps the full submitting environment.")
@@ -287,13 +340,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-auto-submit-from-driver", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--quota-command", default="lquota")
     parser.add_argument("--quota-fallback-root", default=str(Path.home()), help="Directory measured with du --apparent-size when lquota is unavailable. Defaults to the user home.")
-    parser.add_argument("--quota-limit-gb", type=float, default=50.0, help="Logical effective quota limit in GB.")
-    parser.add_argument("--quota-reserve-gb", type=float, default=2.0, help="Always keep at least this much quota free.")
-    parser.add_argument("--train-run-peak-storage-gb", type=float, default=2.5, help="Reserved temporary quota per active training run.")
+    parser.add_argument("--quota-limit-gb", type=float, default=180.0, help="Logical effective quota limit in GB. The probed home quota soft limit is 180G.")
+    parser.add_argument("--quota-reserve-gb", type=float, default=25.0, help="Always keep at least this much quota free.")
+    parser.add_argument("--train-run-peak-storage-gb", type=float, default=5.0, help="Reserved temporary quota per active training run.")
     parser.add_argument("--quota-poll-interval", type=float, default=30.0, help="Seconds between quota checks while waiting.")
     parser.add_argument("--cleanup-existing-artifacts", action=argparse.BooleanOptionalAction, default=True, help="Prune bulky artifacts from existing run directories before scheduling.")
     parser.add_argument("--cleanup-after-run", action=argparse.BooleanOptionalAction, default=True, help="Delete bulky artifacts after each run, keeping only the best available checkpoint and metadata.")
     args = parser.parse_args()
+    if not args.preflight and not args.configs:
+        parser.error("configs are required unless --preflight is used")
     matrix_flags = (
         "--axes",
         "--isotropy-options",
@@ -302,6 +357,7 @@ def parse_args() -> argparse.Namespace:
         "--pruning-options",
         "--usplat-options",
         "--dropout-options",
+        "--ess-options",
     )
     matrix_flag_supplied = any(
         raw == flag or raw.startswith(flag + "=")
@@ -314,6 +370,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_yaml(path: str | Path) -> Dict[str, Any]:
+    if yaml is None:
+        raise RuntimeError(
+            "PyYAML is not installed in this Python environment. Install it in the "
+            "training environment, for example: python -m pip install pyyaml"
+        )
     with Path(path).open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
     if not isinstance(data, dict):
@@ -427,6 +488,7 @@ def build_axis_registry(
         "pruning": build_pruning_registry(total_iterations, schedule_options),
         "usplat": DEFAULT_USPLAT,
         "dropout": build_dropout_registry(dropout_prob, dropout_lambda_rdr),
+        "ess": build_ess_registry(total_iterations),
     }
 
 
@@ -516,15 +578,8 @@ def build_matrix_preset_variants(
     dropout = {
         "random_dropout_prob": float(dropout_prob),
         "lambda_rdr": float(dropout_lambda_rdr),
-        "enable_edge_guided_splitting": True,
-        "ess_from_iter": _clamped_schedule_iter(total_iterations, 0.45, 5000, minimum=1000),
-        "ess_until_iter": _clamped_schedule_iter(total_iterations, 0.85, 8500, minimum=1000),
-        "ess_interval": 2000,
-        "ess_edge_percentile": 0.90,
-        "ess_scale_percentile": 0.70,
-        "ess_max_splits": 5000,
-        "ess_split_children": 2,
     }
+    ess = build_ess_registry(total_iterations)["ess"]
     pruning = _paper_pruning_overrides(total_iterations, schedule_options)
     instant = _instant4d_lite_overrides(flat_cfg, total_iterations)
     mobile = {
@@ -562,8 +617,18 @@ def build_matrix_preset_variants(
         ),
         (
             "paper_dropout_rdr",
-            "dropoutgs",
+            "dropoutgs_rdr",
             dropout,
+        ),
+        (
+            "paper_dropout_ess",
+            "dropoutgs_ess",
+            ess,
+        ),
+        (
+            "paper_dropout_rdr_ess",
+            "dropoutgs",
+            {**dropout, **ess},
         ),
         (
             "paper_usplat_graph",
@@ -581,14 +646,19 @@ def build_matrix_preset_variants(
             mobile,
         ),
         (
-            "hybrid_dropout_st_prune",
+            "hybrid_dropout_rdr_ess_st_prune",
             "hybrid",
-            {**dropout, **pruning},
+            {**dropout, **ess, **pruning},
         ),
         (
-            "hybrid_usplat_dropout",
+            "hybrid_usplat_dropout_rdr",
             "hybrid",
             {**usplat, **dropout},
+        ),
+        (
+            "hybrid_usplat_dropout_rdr_ess",
+            "hybrid",
+            {**usplat, **dropout, **ess},
         ),
         (
             "hybrid_instant4d_mobilegs",
@@ -601,6 +671,7 @@ def build_matrix_preset_variants(
             "paper_4dgs_native",
             "paper_4dgs1k_st_prune",
             "paper_dropout_rdr",
+            "paper_dropout_rdr_ess",
             "paper_instant4d_lite",
             "paper_mobilegs_sortfree",
         }
@@ -617,6 +688,11 @@ def build_matrix_preset_variants(
                     "control_spatial_sh_no_time",
                     "control",
                     {"sh_degree": 3, "force_sh_3d": True, "eval_shfs_4d": False},
+                ),
+                (
+                    "control_ess_only",
+                    "control",
+                    ess,
                 ),
                 (
                     "hybrid_mobilegs_st_prune",
@@ -952,7 +1028,10 @@ def effective_runner(args: argparse.Namespace) -> str:
 def command_prefix(args: argparse.Namespace) -> List[str]:
     runner = effective_runner(args)
     if runner == "uv":
-        return [uv_binary(args), "run"]
+        # Always run Python explicitly under uv.  This avoids relying on
+        # executable bits or shebangs on train.py / batch_train.py and makes
+        # Slurm worker wrapping deterministic: uv run python <script>.
+        return [uv_binary(args), "run", "python"]
     if runner == "python":
         return [effective_python(args)]
     raise ValueError(f"Unsupported runner mode: {runner}")
@@ -1024,6 +1103,10 @@ def mobilegs_cli_args(args: argparse.Namespace) -> List[str]:
         out.append("--mobilegs-report")
     else:
         out.append("--no-mobilegs-report")
+    if bool(getattr(args, "require_mobilegs_report", False)):
+        out.append("--require-mobilegs-report")
+    else:
+        out.append("--no-require-mobilegs-report")
     if bool(getattr(args, "mobilegs_force_first_order_sh", True)):
         out.append("--mobilegs-force-first-order-sh")
     else:
@@ -1045,6 +1128,7 @@ def build_option_map(args: argparse.Namespace) -> Dict[str, List[str]]:
         "pruning": normalize_choice_list(args.pruning_options),
         "usplat": normalize_choice_list(args.usplat_options),
         "dropout": normalize_choice_list(args.dropout_options),
+        "ess": normalize_choice_list(args.ess_options),
     }
 
 
@@ -1971,6 +2055,11 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
             except Exception as exc:
                 row["mobile_status"] = "failed"
                 row["mobile_error"] = str(exc)
+                if bool(getattr(args, "require_mobilegs_report", False)):
+                    row["status"] = "failed"
+                    row["error"] = f"Mobile-GS post-training compression/benchmark failed: {exc}"
+        else:
+            row["mobile_status"] = "skipped"
 
         row.update(load_training_diagnostics(model_path))
         row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
@@ -1993,6 +2082,59 @@ def slurm_cpus_per_task(args: argparse.Namespace) -> int:
     return max(1, args.slurm_total_cpus // max(1, args.slurm_tasks))
 
 
+def slurm_node_count(args: argparse.Namespace) -> int:
+    explicit = int(getattr(args, "slurm_nodes", 0) or 0)
+    if explicit > 0:
+        return explicit
+    gpus = max(1, int(getattr(args, "slurm_gpus", 1) or 1))
+    gpus_per_node = max(1, int(getattr(args, "slurm_gpus_per_node", 1) or 1))
+    return max(1, int(math.ceil(float(gpus) / float(gpus_per_node))))
+
+
+def slurm_gpus_per_node(args: argparse.Namespace) -> int:
+    gpus = max(1, int(getattr(args, "slurm_gpus", 1) or 1))
+    nodes = max(1, slurm_node_count(args))
+    requested = max(1, int(getattr(args, "slurm_gpus_per_node", 1) or 1))
+    return max(1, min(requested, int(math.ceil(float(gpus) / float(nodes)))))
+
+
+def slurm_tasks_per_node(args: argparse.Namespace) -> int:
+    explicit = int(getattr(args, "slurm_tasks_per_node", 0) or 0)
+    if explicit > 0:
+        return explicit
+    tasks = max(1, int(getattr(args, "slurm_tasks", 1) or 1))
+    nodes = max(1, slurm_node_count(args))
+    return max(1, int(math.ceil(float(tasks) / float(nodes))))
+
+
+def slurm_gres_per_node(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "slurm_gres", "") or "").strip()
+    if explicit:
+        return explicit
+    return f"gpu:{slurm_gpus_per_node(args)}"
+
+
+def slurm_worker_gres(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "slurm_worker_gres", "") or "").strip()
+    if explicit:
+        return explicit
+    return "gpu:1"
+
+
+def print_slurm_capacity_plan(args: argparse.Namespace, run_specs: Sequence[RunSpec]) -> None:
+    nodes = slurm_node_count(args)
+    tasks = max(1, int(args.slurm_tasks))
+    gpus = max(1, int(args.slurm_gpus))
+    print("[SLURM PLAN]")
+    print(f"  partition={args.slurm_partition} qos={args.slurm_qos} account={args.slurm_account or '<none>'}")
+    print(f"  nodes={nodes} total_gpus={gpus} gpus_per_node={slurm_gpus_per_node(args)} tasks={tasks} tasks_per_node={slurm_tasks_per_node(args)}")
+    print(f"  cpus_per_task={slurm_cpus_per_task(args)} mem_per_node={args.slurm_mem} mem_per_worker={slurm_mem_per_worker(args, tasks)} time={args.slurm_time}")
+    print(f"  max_parallel_training_runs={min(gpus, tasks)}")
+    print(f"  generated_run_specs={len(run_specs)}")
+    print(f"  worker_gres={slurm_worker_gres(args)} sbatch_gres={slurm_gres_per_node(args)}")
+    print(f"  quota_limit_gb={args.quota_limit_gb} quota_reserve_gb={args.quota_reserve_gb} peak_storage_reserved_per_active_run_gb={args.train_run_peak_storage_gb}")
+
+
 def parse_mem_to_mb(mem_value: str) -> int:
     text = str(mem_value).strip()
     match = re.fullmatch(r"(?i)([0-9]+(?:\.[0-9]+)?)([kmgt]?)b?", text)
@@ -2011,9 +2153,13 @@ def format_mem_from_mb(mem_mb: int) -> str:
 
 
 def slurm_mem_per_worker(args: argparse.Namespace, num_workers: int | None = None) -> str:
+    # --mem is requested per allocated node. Divide by workers per node rather
+    # than by all workers in a multi-node allocation.
     workers = max(1, num_workers if num_workers is not None else args.slurm_tasks)
-    total_mb = parse_mem_to_mb(args.slurm_mem)
-    per_worker_mb = max(1, total_mb // workers)
+    nodes = max(1, slurm_node_count(args))
+    workers_per_node = max(1, int(math.ceil(float(workers) / float(nodes))))
+    total_mb_per_node = parse_mem_to_mb(args.slurm_mem)
+    per_worker_mb = max(1, total_mb_per_node // workers_per_node)
     return format_mem_from_mb(per_worker_mb)
 
 
@@ -2360,7 +2506,7 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
             "--exact",
             "-N1",
             "-n1",
-            f"--gres=gpu:1",
+            f"--gres={slurm_worker_gres(args)}",
             f"--cpus-per-task={cpus_per_task}",
             f"--mem={mem_per_worker}",
         ]
@@ -2440,15 +2586,19 @@ def build_submit_command(args: argparse.Namespace) -> List[str]:
     log_dir = Path(args.slurm_log_dir).resolve() if args.slurm_log_dir else (summary_output_root(args, []) / "slurm_logs").resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     cpus_per_task = slurm_cpus_per_task(args)
+    nodes = slurm_node_count(args)
+    tasks_per_node = slurm_tasks_per_node(args)
+    gres_per_node = slurm_gres_per_node(args)
 
     batch_chdir = Path(args.slurm_chdir).resolve() if args.slurm_chdir else repo_root_from_args(args).resolve()
 
     submit_cmd = [
         "sbatch",
         f"--job-name={args.slurm_job_name}",
-        "--nodes=1",
+        f"--nodes={nodes}",
         f"--ntasks={args.slurm_tasks}",
-        f"--gres=gpu:{args.slurm_gpus}",
+        f"--ntasks-per-node={tasks_per_node}",
+        f"--gres={gres_per_node}",
         f"--cpus-per-task={cpus_per_task}",
         f"--mem={args.slurm_mem}",
         f"--time={args.slurm_time}",
@@ -2466,9 +2616,12 @@ def build_submit_command(args: argparse.Namespace) -> List[str]:
     for extra in args.slurm_extra_sbatch_args:
         submit_cmd.extend(shlex.split(extra))
 
-    print(f"[SLURM SUBMIT] runner={effective_runner(args)} python={effective_python(args)} uv={uv_binary(args)} quota={resolve_quota_command(args) or args.quota_command} quota_fallback_root={args.quota_fallback_root} chdir={batch_chdir} export={args.slurm_export} step_cpus={cpus_per_task} step_mem={slurm_mem_per_worker(args)}")
+    print(f"[SLURM SUBMIT] runner={effective_runner(args)} python={effective_python(args)} uv={uv_binary(args)} quota={resolve_quota_command(args) or args.quota_command} quota_fallback_root={args.quota_fallback_root} chdir={batch_chdir} export={args.slurm_export} step_cpus={cpus_per_task} step_mem={slurm_mem_per_worker(args)} gres_per_node={gres_per_node}")
 
-    wrapped_args = [arg for arg in sys.argv[1:] if arg != "--submit-slurm"]
+    wrapped_args = [
+        arg for arg in sys.argv[1:]
+        if arg not in {"--submit-slurm", "--dry-run", "--write-configs-only"}
+    ]
     wrapped_args.append("--slurm-driver")
     if args.repo_root is None:
         wrapped_args.extend(["--repo-root", str(repo_root_from_args(args))])
@@ -2491,7 +2644,43 @@ def build_submit_command(args: argparse.Namespace) -> List[str]:
     return submit_cmd
 
 
+def run_preflight(args: argparse.Namespace) -> int:
+    print("[PREFLIGHT] batch_train.py environment check")
+    print(f"  current_python={sys.executable}")
+    print(f"  current_version={sys.version.split()[0]}")
+    print(f"  runner={effective_runner(args)} command_prefix={shell_join(command_prefix(args))}")
+
+    probe = '\nimport importlib, json, sys\nresult = {\n    "python": sys.executable,\n    "version": sys.version.split()[0],\n    "modules": {},\n    "cuda": {},\n}\nfor module_name in ["yaml", "numpy", "torch", "PIL", "tqdm"]:\n    try:\n        module = importlib.import_module(module_name)\n        result["modules"][module_name] = getattr(module, "__version__", "present")\n    except Exception as exc:\n        result["modules"][module_name] = "MISSING: " + repr(exc)\ntry:\n    import torch\n    result["cuda"]["available"] = bool(torch.cuda.is_available())\n    result["cuda"]["device_count"] = int(torch.cuda.device_count())\n    result["cuda"]["devices"] = []\n    for idx in range(torch.cuda.device_count()):\n        props = torch.cuda.get_device_properties(idx)\n        result["cuda"]["devices"].append({\n            "index": idx,\n            "name": props.name,\n            "mem_gb": round(props.total_memory / (1024**3), 2),\n        })\nexcept Exception as exc:\n    result["cuda"]["error"] = repr(exc)\nprint(json.dumps(result, indent=2, sort_keys=True))\n'
+
+    failures: list[str] = []
+    cmd = [*command_prefix(args), "-c", probe]
+    try:
+        completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+        print(completed.stdout.rstrip())
+        if completed.returncode != 0:
+            failures.append("runner-python")
+    except Exception as exc:
+        print(f"  runner probe failed: {exc}")
+        failures.append("runner-python")
+
+    for command in ["sbatch", "srun", "sinfo", "squeue"]:
+        path = shutil.which(command)
+        print(f"  command {command}: {path or 'missing'}")
+        if path is None and command in {"sbatch", "srun"}:
+            failures.append(command)
+    print_slurm_capacity_plan(args, [])
+    if failures:
+        print("[PREFLIGHT] missing requirements: " + ", ".join(failures))
+        print("[PREFLIGHT] install/use a training environment with at least PyYAML, PyTorch+CUDA, NumPy, Pillow, and tqdm.")
+        return 2
+    print("[PREFLIGHT] ok")
+    return 0
+
+
 def main(args: argparse.Namespace) -> int:
+    if args.preflight:
+        return run_preflight(args)
+
     if args.slurm_worker:
         return run_worker_from_assignment(args, repo_root_from_args(args))
 
@@ -2519,8 +2708,12 @@ def main(args: argparse.Namespace) -> int:
         return 0
 
     if args.dry_run or args.write_configs_only:
-        for run_spec in run_specs:
-            print(shell_join(run_spec.command))
+        if args.submit_slurm:
+            print_slurm_capacity_plan(args, run_specs)
+            print(shell_join(build_submit_command(args)))
+        else:
+            for run_spec in run_specs:
+                print(shell_join(run_spec.command))
         return 0
 
     if args.cleanup_existing_artifacts:
@@ -2529,6 +2722,7 @@ def main(args: argparse.Namespace) -> int:
     pending_runs, existing_rows = build_pending_runs(run_specs, args.retry_failed_existing)
 
     if args.submit_slurm:
+        print_slurm_capacity_plan(args, run_specs)
         submit_cmd = build_submit_command(args)
         print(shell_join(submit_cmd))
         result = subprocess.run(submit_cmd, check=False)
