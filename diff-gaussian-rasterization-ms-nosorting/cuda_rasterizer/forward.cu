@@ -687,7 +687,7 @@ render_depthCUDA(
 			collected_id[block.thread_rank()] = coll_id;
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
-		    collected_theta[block.thread_rank()] = thetas[coll_id];
+		    collected_theta[block.thread_rank()] = thetas != nullptr ? thetas[coll_id] : 0.0f;
 			collected_phi[block.thread_rank()] = phis[coll_id];
 			collected_depth[block.thread_rank()] = depths[coll_id];
 

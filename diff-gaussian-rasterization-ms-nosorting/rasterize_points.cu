@@ -24,10 +24,33 @@
 #include <string>
 #include <functional>
 
-std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
-    auto lambda = [&t](size_t N) {
-        t.resize_({(long long)N});
-    return reinterpret_cast<char*>(t.contiguous().data_ptr());
+namespace {
+struct WorkspaceCache {
+  torch::Tensor geom;
+  torch::Tensor binning;
+  torch::Tensor image;
+  c10::Device device = c10::Device(c10::DeviceType::CUDA, -1);
+};
+
+thread_local WorkspaceCache g_forward_workspace_cache;
+
+void ensureWorkspaceCacheDevice(WorkspaceCache& cache, const c10::Device& device, const torch::TensorOptions& options) {
+  if (!cache.geom.defined() || cache.device != device) {
+    cache.device = device;
+    cache.geom = torch::empty({0}, options.device(device));
+    cache.binning = torch::empty({0}, options.device(device));
+    cache.image = torch::empty({0}, options.device(device));
+  }
+}
+}
+
+std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t, bool keep_capacity = false) {
+    auto lambda = [&t, keep_capacity](size_t N) {
+        const long long requested = static_cast<long long>(N);
+        if (!keep_capacity || t.numel() < requested) {
+            t.resize_({requested});
+        }
+        return reinterpret_cast<char*>(t.contiguous().data_ptr());
     };
     return lambda;
 }
@@ -74,21 +97,30 @@ RasterizeGaussiansCUDA(
   torch::Tensor kernel_times = torch::full({1}, 0.0, float_opts.device(torch::kCPU));
 
   torch::Tensor out_color = torch::empty({NUM_CHANNELS, H, W}, float_opts);
-  torch::Tensor w_fg = torch::empty({NUM_CHANNELS, H, W}, float_opts);
+  // w_fg is a scalar foreground weight per pixel. The previous 3-channel
+  // tensor stored the same value three times and cost extra memory bandwidth.
+  torch::Tensor w_fg = torch::empty({H, W}, float_opts);
   torch::Tensor Ts = torch::empty({H, W}, float_opts);
   torch::Tensor gaussian_scores = compute_scores ? torch::full({P}, 0.0, float_opts) : torch::empty({0}, float_opts);
   torch::Tensor gaussian_score_max_error = score_error_map.numel() > 0 ? torch::full({P}, 0.0, float_opts) : torch::empty({0}, float_opts);
 
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 
-  torch::Device device(torch::kCUDA);
-  torch::TensorOptions options(torch::kByte);
-  torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
-  torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
-  torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
-  std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
-  std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
-  std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
+  const bool needs_backward_buffers = means3D.requires_grad() || colors.requires_grad() ||
+    opacity.requires_grad() || theta.requires_grad() || phi.requires_grad() ||
+    scales.requires_grad() || rotations.requires_grad() || cov3D_precomp.requires_grad() ||
+    sh.requires_grad();
+  const bool cache_forward_workspaces = !needs_backward_buffers;
+  torch::TensorOptions options = means3D.options().dtype(torch::kUInt8);
+  if (cache_forward_workspaces) {
+    ensureWorkspaceCacheDevice(g_forward_workspace_cache, means3D.device(), options);
+  }
+  torch::Tensor geomBuffer = cache_forward_workspaces ? g_forward_workspace_cache.geom : torch::empty({0}, options.device(means3D.device()));
+  torch::Tensor binningBuffer = cache_forward_workspaces ? g_forward_workspace_cache.binning : torch::empty({0}, options.device(means3D.device()));
+  torch::Tensor imgBuffer = cache_forward_workspaces ? g_forward_workspace_cache.image : torch::empty({0}, options.device(means3D.device()));
+  std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer, cache_forward_workspaces);
+  std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer, cache_forward_workspaces);
+  std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer, cache_forward_workspaces);
   
 
   int rendered = 0;
@@ -111,7 +143,7 @@ RasterizeGaussiansCUDA(
       sh.contiguous().data_ptr<float>(),
       colors.contiguous().data<float>(), 
       opacity.contiguous().data<float>(),
-      theta.contiguous().data<float>(),
+      theta.numel() > 0 ? theta.contiguous().data<float>() : nullptr,
       phi.contiguous().data<float>(),
       w_fg.contiguous().data<float>(),
       Ts.contiguous().data<float>(),
@@ -134,6 +166,12 @@ RasterizeGaussiansCUDA(
       kernel_times.contiguous().data<float>(), 
       radii.contiguous().data<int>(),
       debug);
+  }
+
+  if (cache_forward_workspaces) {
+    g_forward_workspace_cache.geom = geomBuffer;
+    g_forward_workspace_cache.binning = binningBuffer;
+    g_forward_workspace_cache.image = imgBuffer;
   }
 
   return std::make_tuple(rendered, out_color, radii, kernel_times, geomBuffer,
@@ -194,14 +232,21 @@ RasterizeGaussiansDepthCUDA(
   torch::Tensor accum_alpha = torch::full({1, H, W}, 0.0, float_opts);
   torch::Tensor gidx = torch::full({1, H, W}, 0.0, int_opts);
   
-  torch::Device device(torch::kCUDA);
-  torch::TensorOptions options(torch::kByte);
-  torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
-  torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
-  torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
-  std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
-  std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
-  std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
+  const bool needs_backward_buffers = means3D.requires_grad() || colors.requires_grad() ||
+    opacity.requires_grad() || theta.requires_grad() || phi.requires_grad() ||
+    scales.requires_grad() || rotations.requires_grad() || cov3D_precomp.requires_grad() ||
+    sh.requires_grad();
+  const bool cache_forward_workspaces = !needs_backward_buffers;
+  torch::TensorOptions options = means3D.options().dtype(torch::kUInt8);
+  if (cache_forward_workspaces) {
+    ensureWorkspaceCacheDevice(g_forward_workspace_cache, means3D.device(), options);
+  }
+  torch::Tensor geomBuffer = cache_forward_workspaces ? g_forward_workspace_cache.geom : torch::empty({0}, options.device(means3D.device()));
+  torch::Tensor binningBuffer = cache_forward_workspaces ? g_forward_workspace_cache.binning : torch::empty({0}, options.device(means3D.device()));
+  torch::Tensor imgBuffer = cache_forward_workspaces ? g_forward_workspace_cache.image : torch::empty({0}, options.device(means3D.device()));
+  std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer, cache_forward_workspaces);
+  std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer, cache_forward_workspaces);
+  std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer, cache_forward_workspaces);
   
 
   torch::Tensor discriminants = torch::full({1, H, W}, 0.0, float_opts);
@@ -227,7 +272,7 @@ RasterizeGaussiansDepthCUDA(
       sh.contiguous().data_ptr<float>(),
       colors.contiguous().data<float>(), 
       opacity.contiguous().data<float>(),
-      	theta.contiguous().data<float>(),
+      	theta.numel() > 0 ? theta.contiguous().data<float>() : nullptr,
 		phi.contiguous().data<float>(),
 		w_fg.contiguous().data<float>(),
       scales.contiguous().data_ptr<float>(),
@@ -250,10 +295,16 @@ RasterizeGaussiansDepthCUDA(
       debug);
   }
 
-  return std::make_tuple(rendered, out_color, out_pts, out_depth, 
-  accum_alpha, gidx, discriminants, radii, geomBuffer, 
+  if (cache_forward_workspaces) {
+    g_forward_workspace_cache.geom = geomBuffer;
+    g_forward_workspace_cache.binning = binningBuffer;
+    g_forward_workspace_cache.image = imgBuffer;
+  }
+
+  return std::make_tuple(rendered, out_color, out_pts, out_depth,
+  accum_alpha, gidx, discriminants, radii, geomBuffer,
   binningBuffer, imgBuffer, w_fg);
-}  
+}
 
 
 

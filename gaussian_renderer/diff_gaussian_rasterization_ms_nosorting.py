@@ -66,6 +66,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         compute_score_squares,
         score_error_map,
     ):
+        needs_backward = any(ctx.needs_input_grad[:10])
+
         args = (
             raster_settings.bg,
             means3D,
@@ -129,23 +131,23 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
-        ctx.save_for_backward(
-            color,
-            colors_precomp,
-            means3D,
-            scales,
-            rotations,
-            theta,
-            phi,
-            w_fg,
-            cov3Ds_precomp,
-            radii,
-            sh,
-            geomBuffer,
-            binningBuffer,
-            imgBuffer,
-            gaussian_scores,
-        )
+        if needs_backward:
+            ctx.save_for_backward(
+                color,
+                colors_precomp,
+                means3D,
+                scales,
+                rotations,
+                theta,
+                phi,
+                w_fg,
+                cov3Ds_precomp,
+                radii,
+                sh,
+                geomBuffer,
+                binningBuffer,
+                imgBuffer,
+            )
         return color, radii, kernel_time, transmittance, gaussian_scores, gaussian_score_max_error
 
     @staticmethod
@@ -177,7 +179,6 @@ class _RasterizeGaussians(torch.autograd.Function):
             geomBuffer,
             binningBuffer,
             imgBuffer,
-            gaussian_scores,
         ) = ctx.saved_tensors
 
         args = (
@@ -320,6 +321,8 @@ class GaussianRasterizer(nn.Module):
             shs = empty
         if colors_precomp is None:
             colors_precomp = empty
+        if theta is None:
+            theta = empty
         if scales is None:
             scales = empty
         if rotations is None:

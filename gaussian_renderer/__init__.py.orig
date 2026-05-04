@@ -380,12 +380,7 @@ def render(
     if dropout_mask is not None:
         mask = dropout_mask if mask is None else (mask & dropout_mask)
     if mask is not None:
-        # In no-grad render/evaluation paths screenspace_points is an empty
-        # placeholder because the CUDA extensions do not consume means2D in
-        # forward.  Do not index that placeholder with the full Gaussian mask.
-        # Training still uses a dense P x 3 leaf tensor so screen-space gradients
-        # keep their original behavior.
-        if means2D is not None and means2D.shape[0] == mask.shape[0]:
+        if means2D is not None:
             means2D = means2D[mask]
         if means3D is not None:
             means3D = means3D[mask]

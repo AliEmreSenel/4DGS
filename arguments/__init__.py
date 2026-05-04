@@ -83,6 +83,9 @@ class PipelineParams(ParamGroup):
         self.use_usplat = False
         self.sort_free_render = False
         self.temporal_mask_threshold = 0.05
+        # "marginal" is the legacy timestamp-support approximation.
+        # "visibility" consumes exported 4DGS-1K keyframe visibility masks.
+        self.temporal_mask_mode = "marginal"
         self.temporal_mask_keyframes = 0
         self.temporal_mask_window = 2
         self.random_dropout_prob = 0.0
@@ -126,6 +129,10 @@ class OptimizationParams(ParamGroup):
         self.lambda_rdr = 1.0
         # Keep the MobileGS opacity/phi MLP inactive unless sort-free rendering is requested.
         self.mobilegs_opacity_phi_lr = 0.0
+        self.mobilegs_teacher_checkpoint = ""
+        self.mobilegs_force_first_order_sh = False
+        self.lambda_mobilegs_sh_distill = 0.0
+        self.lambda_mobilegs_depth_distill = 0.0
         # Spatio-temporal pruning parameters
         self.enable_spatio_temporal_pruning = False
         self.spatio_temporal_pruning_ratio = 0.80

@@ -3,13 +3,93 @@ import argparse
 import ast
 import math
 import os
+import queue
 import sys
+import threading
 from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
 import torch
 
+
+
+
+class AsyncFrameSink:
+    """Write video/PNG frames on a worker thread to keep rendering hot."""
+
+    def __init__(self, *, video_path, frames_dir, args, save_png):
+        self.video_path = video_path
+        self.frames_dir = frames_dir
+        self.args = args
+        self.save_png = bool(save_png)
+        self.write_video = not bool(args.no_video)
+        self.enabled = self.write_video or self.save_png
+        self._queue = None
+        self._error = None
+        self._closed = False
+        self._thread = None
+        if self.enabled:
+            self._queue = queue.Queue(maxsize=max(2, int(getattr(args, "writer_queue", 8))))
+            self._thread = threading.Thread(target=self._worker, name="frame-writer", daemon=True)
+            self._thread.start()
+
+    def _worker(self):
+        writer = None
+        try:
+            if self.write_video:
+                writer = imageio.get_writer(
+                    self.video_path,
+                    fps=self.args.fps,
+                    codec=self.args.video_codec,
+                    quality=self.args.video_quality,
+                    macro_block_size=self.args.macro_block_size,
+                    ffmpeg_params=list(getattr(self.args, "ffmpeg_params", []) or []),
+                )
+            while True:
+                item = self._queue.get()
+                try:
+                    if item is None:
+                        return
+                    idx, frame = item
+                    if writer is not None:
+                        writer.append_data(frame)
+                    if self.save_png:
+                        imageio.imwrite(self.frames_dir / f"{idx:04d}.png", frame)
+                finally:
+                    self._queue.task_done()
+        except BaseException as exc:
+            self._error = exc
+        finally:
+            if writer is not None:
+                writer.close()
+
+    def append(self, idx: int, frame: np.ndarray) -> None:
+        if not self.enabled:
+            return
+        if self._error is not None:
+            raise RuntimeError("Frame writer failed") from self._error
+        # Ensure the worker owns a contiguous array even if callers hand in a
+        # view; the underlying storage is not reused by render_tensor_to_uint8.
+        self._queue.put((idx, np.ascontiguousarray(frame)))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if not self.enabled:
+            return
+        self._queue.put(None)
+        self._thread.join()
+        if self._error is not None:
+            raise RuntimeError("Frame writer failed") from self._error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
 
 def coerce_time_duration(value):
@@ -494,14 +574,7 @@ def render_orbit_mode(
     look_at = center.copy()
     look_at[1] += args.look_at_offset_y
 
-    writer = None if args.no_video else imageio.get_writer(
-        video_path,
-        fps=args.fps,
-        codec=args.video_codec,
-        quality=args.video_quality,
-        macro_block_size=args.macro_block_size,
-    )
-    try:
+    with AsyncFrameSink(video_path=video_path, frames_dir=frames_dir, args=args, save_png=save_png) as frame_sink:
         for idx in range(args.frames):
             frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
             az = math.radians(
@@ -572,17 +645,11 @@ def render_orbit_mode(
             with torch.no_grad():
                 render_pkg = render(cam, gaussians, pipe, background)
                 image_u8 = render_tensor_to_uint8(render_pkg["render"])
-            if writer is not None:
-                writer.append_data(image_u8)
-            if save_png:
-                imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
+            frame_sink.append(idx, image_u8)
             if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
                 print(
                     f"[{idx+1}/{args.frames}] t={t_val:.4f} az_deg={math.degrees(az):.2f}"
                 )
-    finally:
-        if writer is not None:
-            writer.close()
 
     info = out_dir / "render_info.txt"
     info.write_text(
@@ -609,7 +676,7 @@ def render_orbit_mode(
         f"elevation_deg={args.elevation_deg}\n"
         f"look_at_offset_y={args.look_at_offset_y}\n"
     )
-    if writer is not None:
+    if not args.no_video:
         print(f"Wrote video to {video_path}")
     if save_png:
         print(f"Wrote frames to {frames_dir}")
@@ -662,14 +729,7 @@ def render_bounded_mode(
         f"novel_strength={args.novel_strength} overshoot={args.endpoint_overshoot}"
     )
 
-    writer = None if args.no_video else imageio.get_writer(
-        video_path,
-        fps=args.fps,
-        codec=args.video_codec,
-        quality=args.video_quality,
-        macro_block_size=args.macro_block_size,
-    )
-    try:
+    with AsyncFrameSink(video_path=video_path, frames_dir=frames_dir, args=args, save_png=save_png) as frame_sink:
         for idx in range(args.frames):
             frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
             if args.time_mode in ("sync_arc_freeze", "bounded_novel_freeze"):
@@ -713,17 +773,11 @@ def render_bounded_mode(
             with torch.no_grad():
                 render_pkg = render(cam, gaussians, pipe, background)
                 image_u8 = render_tensor_to_uint8(render_pkg["render"])
-            if writer is not None:
-                writer.append_data(image_u8)
-            if save_png:
-                imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
+            frame_sink.append(idx, image_u8)
             if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
                 print(
                     f"[{idx+1}/{args.frames}] t={t_val:.4f} u={u:.3f} novel_phase={novel_phase:.3f}"
                 )
-    finally:
-        if writer is not None:
-            writer.close()
 
     info = out_dir / "render_info.txt"
     info.write_text(
@@ -751,7 +805,8 @@ def render_bounded_mode(
         f"num_slots={path_data['num_slots']}\n"
         f"median_spacing={path_data['median_spacing']}\n"
     )
-    print(f"Wrote video to {video_path}")
+    if not args.no_video:
+        print(f"Wrote video to {video_path}")
     if save_png:
         print(f"Wrote frames to {frames_dir}")
 
@@ -817,6 +872,18 @@ def main():
     parser.add_argument("--no_video", action="store_true", help="Render PNG frames only; skip MP4 encoding")
     parser.add_argument("--video_codec", type=str, default="libx264")
     parser.add_argument("--video_quality", type=int, default=8)
+    parser.add_argument(
+        "--writer_queue",
+        type=int,
+        default=8,
+        help="Max queued frames for the asynchronous video/PNG writer.",
+    )
+    parser.add_argument(
+        "--ffmpeg_params",
+        nargs="*",
+        default=[],
+        help="Extra ffmpeg parameters forwarded to imageio, e.g. -preset ultrafast.",
+    )
     parser.add_argument("--macro_block_size", type=int, default=16)
     parser.add_argument(
         "--temporal_mask_threshold",

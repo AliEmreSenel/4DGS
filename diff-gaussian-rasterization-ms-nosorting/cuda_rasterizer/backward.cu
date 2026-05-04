@@ -506,9 +506,10 @@ renderCUDA(
     if (inside)
         {
 
+            const float w_pixel = w_fg[pix_id];
             for (int ch = 0; ch < C; ch++)
                 {
-                    ws[ch] =  w_fg[ch * H * W + pix_id];
+                    ws[ch] = w_pixel;
 
                 }
         }
@@ -568,11 +569,13 @@ renderCUDA(
 			glm::vec3 scale = collected_scales[j];
             float max_scale = fmaxf(scale.x, fmaxf(scale.y, scale.z));
 
-			const float exp_arg = fminf(max_scale / depth_safe, 20.0f);
+			const float raw_exp_arg = max_scale / depth_safe;
+			const float exp_arg = fminf(raw_exp_arg, 20.0f);
 			const float exp_term = expf(exp_arg);
             const float unclamped_weight = exp_term + phi / (depth_safe * depth_safe) + phi*phi ;
             const float weight = fminf(unclamped_weight, 1e6f);
             const float weight_grad_gate = unclamped_weight > 1e6f ? 0.0f : 1.0f;
+            const float exp_grad_gate = raw_exp_arg > 20.0f ? 0.0f : 1.0f;
 
 			if (power > 0.0f)
 				continue;
@@ -636,12 +639,12 @@ renderCUDA(
 
 
             const float dL_dunclamped_weight = weight_grad_gate * dL_dweight;
-            const float dweight_dd = -exp_term * (max_scale / (depth_safe * depth_safe)) - 2.0f * phi / (depth_safe * depth_safe * depth_safe);
+            const float dweight_dd = -exp_grad_gate * exp_term * (max_scale / (depth_safe * depth_safe)) - 2.0f * phi / (depth_safe * depth_safe * depth_safe);
 			atomicAdd(&dL_ddepth[global_id], dL_dunclamped_weight * dweight_dd);
 
 			atomicAdd(&dL_dphi[global_id], dL_dunclamped_weight * (1.0f / (depth_safe * depth_safe) + 2.0f * phi));
 
-            const float dweight_dmax = exp_term / depth_safe;
+            const float dweight_dmax = exp_grad_gate * exp_term / depth_safe;
             const float dL_dmax_scale = dL_dunclamped_weight * dweight_dmax;
 
             const float eps = 1e-6f;

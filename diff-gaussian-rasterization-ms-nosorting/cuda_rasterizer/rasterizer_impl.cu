@@ -517,9 +517,7 @@ __global__ void __launch_bounds__(256) renderTileOIT(
         out_color[2 * W * H + p_id] = (c[2] * inv_w) * (1.0f - final_T) + final_T * background[2];
         
 		if (w_fg) {
-			for (int ch = 0; ch < CHANNELS; ++ch) {
-				w_fg[ch * H * W + p_id] = w_fg_acc;
-			}
+			w_fg[p_id] = w_fg_acc;
 		}
 		if (Ts) Ts[p_id] = final_T;
 		if (accum_alpha) accum_alpha[p_id] = final_T;
@@ -676,8 +674,6 @@ int CudaRasterizer::Rasterizer::forward(
 
     const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
     
-    cudaFuncSetAttribute(renderTileOIT<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, 0);
-
     renderTileOIT<3><<<tile_grid, block, 0, stream>>>(
 		imgState.ranges,
 		binningState.point_list,

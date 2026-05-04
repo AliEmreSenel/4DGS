@@ -93,7 +93,14 @@ class Scene:
 
     def save(self, iteration, filename=None):
         if self.checkpoint_run_config is None:
-            raise RuntimeError("Scene.checkpoint_run_config must be set before saving checkpoints.")
+            # Training initializes this immediately after Scene construction.
+            # Keep a defensive fallback for older scripts that still call
+            # Scene.save() directly so checkpointing does not crash mid-run.
+            self.checkpoint_run_config = {"args": {}, "gaussian_kwargs": {}}
+            print(
+                "[WARN] Scene.checkpoint_run_config was not set; saving a minimal "
+                "checkpoint run_config. Prefer setting it with build_run_config()."
+            )
         checkpoint = build_checkpoint(
             gaussians=self.gaussians,
             iteration=iteration,

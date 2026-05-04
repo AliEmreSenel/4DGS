@@ -24,6 +24,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, easy_cmap
 from argparse import ArgumentParser, Namespace
+from copy import deepcopy
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from torchvision.utils import make_grid
 import numpy as np
@@ -78,6 +79,33 @@ def _safe_mean(value):
     value = value.detach().float()
     value = value[torch.isfinite(value)]
     return None if value.numel() == 0 else float(value.mean().item())
+
+
+
+def scale_invariant_depth_distill_loss(depth, teacher_depth, eps=1e-8):
+    valid = torch.isfinite(depth) & torch.isfinite(teacher_depth) & (depth > 0) & (teacher_depth > 0)
+    if not bool(valid.any()):
+        return depth.new_tensor(0.0)
+    log_diff = torch.log(depth[valid].clamp_min(eps)) - torch.log(teacher_depth[valid].clamp_min(eps))
+    return (log_diff * log_diff).mean() - log_diff.mean().pow(2)
+
+
+def _clone_pipe_for_teacher(pipe):
+    teacher_pipe = deepcopy(pipe)
+    teacher_pipe.sort_free_render = False
+    teacher_pipe.temporal_mask_keyframes = 0
+    teacher_pipe.temporal_mask_mode = "marginal"
+    return teacher_pipe
+
+
+def _load_mobilegs_teacher(path, device="cuda"):
+    checkpoint_payload = load_checkpoint(path, map_location=device)
+    teacher_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
+    teacher = GaussianModel(**teacher_kwargs)
+    teacher.restore(checkpoint_payload["gaussians"], training_args=None)
+    if teacher.mobilegs_opacity_phi_nn is not None:
+        teacher.mobilegs_opacity_phi_nn.eval()
+    return teacher
 
 
 @torch.no_grad()
@@ -469,13 +497,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
 
+    mobilegs_first_order = bool(getattr(opt, "mobilegs_force_first_order_sh", False))
+    if mobilegs_first_order:
+        dataset.sh_degree = min(int(dataset.sh_degree), 1)
+        force_sh_3d = True
+        pipe.eval_shfs_4d = False
+
     gaussian_kwargs = {
         "sh_degree": dataset.sh_degree,
         "gaussian_dim": gaussian_dim,
         "time_duration": time_duration,
         "rot_4d": rot_4d,
         "force_sh_3d": force_sh_3d,
-        "sh_degree_t": 2 if pipe.eval_shfs_4d else 0,
+        "sh_degree_t": 0 if mobilegs_first_order else (2 if pipe.eval_shfs_4d else 0),
         "prefilter_var": dataset.prefilter_var,
         "isotropic_gaussians": isotropic_gaussians,
     }
@@ -488,6 +522,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         time_duration=time_duration,
     )
     save_gaussian_args(scene.model_path, gaussian_kwargs)
+    # Self-contained checkpoint saves require the full immutable CLI/config
+    # namespace plus the Gaussian constructor kwargs.  This must be set before
+    # the first possible best-checkpoint save, which can happen at an early test
+    # iteration such as 500.
+    if run_config_args is None:
+        merged_args = {}
+        for group in (dataset, opt, pipe):
+            merged_args.update(vars(group))
+        run_config_args = Namespace(**merged_args)
+    scene.checkpoint_run_config = build_run_config(run_config_args, gaussian_kwargs)
     scene.checkpoint_include_mobilegs = bool(getattr(pipe, "sort_free_render", False))
 
     if getattr(pipe, "sort_free_render", False):
@@ -511,6 +555,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     else:
         # Avoid allocating/training the MobileGS opacity/phi MLP in ordinary sorted runs.
         opt.mobilegs_opacity_phi_lr = 0.0
+
+    mobilegs_teacher = None
+    mobilegs_teacher_pipe = None
+    teacher_ckpt = str(getattr(opt, "mobilegs_teacher_checkpoint", "") or "")
+    lambda_mobilegs_sh_distill = float(getattr(opt, "lambda_mobilegs_sh_distill", 0.0) or 0.0)
+    lambda_mobilegs_depth_distill = float(getattr(opt, "lambda_mobilegs_depth_distill", 0.0) or 0.0)
+    if lambda_mobilegs_sh_distill > 0.0 or lambda_mobilegs_depth_distill > 0.0:
+        if not teacher_ckpt:
+            raise ValueError(
+                "Mobile-GS distillation requested but mobilegs_teacher_checkpoint is empty."
+            )
+        mobilegs_teacher = _load_mobilegs_teacher(teacher_ckpt, device="cuda")
+        mobilegs_teacher_pipe = _clone_pipe_for_teacher(pipe)
+        print(f"[Mobile-GS] Loaded teacher checkpoint for distillation: {teacher_ckpt}")
 
     gaussians.training_setup(opt)
     
@@ -669,6 +727,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             batch_Lrigid = torch.tensor(0.0, device="cuda")
             batch_Lmotion = torch.tensor(0.0, device="cuda")
             batch_Lrdr = torch.tensor(0.0, device="cuda")
+            batch_Lmobile_sh_distill = torch.tensor(0.0, device="cuda")
+            batch_Lmobile_depth_distill = torch.tensor(0.0, device="cuda")
             batch_psnr = torch.tensor(0.0, device="cuda")
             reg_loss = torch.tensor(0.0, device="cuda")
             Ldepth = torch.tensor(0.0, device="cuda")
@@ -707,6 +767,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 Ll1_i = l1_loss(image, gt_image)
                 Lssim_i = 1.0 - ssim(image, gt_image)
                 loss = (1.0 - opt.lambda_dssim) * Ll1_i + opt.lambda_dssim * Lssim_i
+
+                if mobilegs_teacher is not None:
+                    with torch.no_grad():
+                        teacher_pkg = render(
+                            viewpoint_cam,
+                            mobilegs_teacher,
+                            mobilegs_teacher_pipe,
+                            background,
+                        )
+                        teacher_image = torch.clamp(teacher_pkg["render"], 0.0, 1.0)
+                        teacher_depth = teacher_pkg.get("depth")
+                    if lambda_mobilegs_sh_distill > 0.0:
+                        Lmobile_sh_i = l1_loss(image, teacher_image)
+                        loss = loss + lambda_mobilegs_sh_distill * Lmobile_sh_i
+                        batch_Lmobile_sh_distill += Lmobile_sh_i.detach()
+                    if lambda_mobilegs_depth_distill > 0.0 and teacher_depth is not None:
+                        Lmobile_depth_i = scale_invariant_depth_distill_loss(
+                            depth, teacher_depth.to(depth.device, dtype=depth.dtype)
+                        )
+                        loss = loss + lambda_mobilegs_depth_distill * Lmobile_depth_i
+                        batch_Lmobile_depth_distill += Lmobile_depth_i.detach()
 
                 # DropoutGS RDR: train a random low-complexity submodel to match
                 # the full model render, rather than using the ground truth as the
@@ -986,6 +1067,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if opt.lambda_motion > 0:
                 Lmotion = batch_Lmotion
             Lrdr = batch_Lrdr / current_batch_size
+            Lmobile_sh_distill = batch_Lmobile_sh_distill / current_batch_size
+            Lmobile_depth_distill = batch_Lmobile_depth_distill / current_batch_size
             if should_densify:
                 if current_batch_size > 1:
                     visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
@@ -1026,6 +1109,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss_dict = {"Ll1": Ll1, "Lssim": Lssim}
             if float(getattr(opt, "lambda_rdr", 0.0) or 0.0) > 0.0 and float(getattr(pipe, "random_dropout_prob", 0.0) or 0.0) > 0.0:
                 loss_dict["Lrdr"] = Lrdr
+            if lambda_mobilegs_sh_distill > 0.0:
+                loss_dict["Lmobile_sh_distill"] = Lmobile_sh_distill
+            if lambda_mobilegs_depth_distill > 0.0:
+                loss_dict["Lmobile_depth_distill"] = Lmobile_depth_distill
             if opt.lambda_depth > 0:
                 loss_dict["Ldepth"] = Ldepth
             if opt.lambda_opa_mask > 0:
@@ -1047,6 +1134,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "lambda_rigid": Lrigid,
                     "lambda_motion": Lmotion,
                     "lambda_rdr": Lrdr,
+                    "lambda_mobilegs_sh_distill": Lmobile_sh_distill,
+                    "lambda_mobilegs_depth_distill": Lmobile_depth_distill,
                 }
 
                 for lambda_name in lambda_all:
@@ -1411,6 +1500,18 @@ def training_report(
                 tb_writer.add_scalar(
                     "train_loss_patches/rdr_loss",
                     loss_dict["Lrdr"].item(),
+                    iteration,
+                )
+            if "Lmobile_sh_distill" in loss_dict:
+                tb_writer.add_scalar(
+                    "train_loss_patches/mobilegs_sh_distill_loss",
+                    loss_dict["Lmobile_sh_distill"].item(),
+                    iteration,
+                )
+            if "Lmobile_depth_distill" in loss_dict:
+                tb_writer.add_scalar(
+                    "train_loss_patches/mobilegs_depth_distill_loss",
+                    loss_dict["Lmobile_depth_distill"].item(),
                     iteration,
                 )
             if "Ltv" in loss_dict:

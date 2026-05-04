@@ -80,6 +80,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         score_error_map,
     ):
 
+        needs_backward = any(ctx.needs_input_grad[:12])
+
         # Restructure arguments the way that the C++ lib expects them
         args = (
             raster_settings.bg, 
@@ -133,9 +135,10 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.prefilter_var = prefilter_var
-        ctx.save_for_backward(colors_precomp, means3D, out_means3D, scales, rotations, cov3Ds_precomp, radii, sh, 
-                                flow_2d, opacities, ts, scales_t, rotations_r,
-                                geomBuffer, binningBuffer, imgBuffer)
+        if needs_backward:
+            ctx.save_for_backward(colors_precomp, means3D, out_means3D, scales, rotations, cov3Ds_precomp, radii, sh,
+                                    flow_2d, opacities, ts, scales_t, rotations_r,
+                                    geomBuffer, binningBuffer, imgBuffer)
         return color, radii, depth, 1-T, flow, covs_com, gaussian_scores, gaussian_score_max_error
 
     @staticmethod
