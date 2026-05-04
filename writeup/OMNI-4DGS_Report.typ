@@ -148,26 +148,131 @@ Custom CUDA kernels are used to compute pixel operations on the GPU directly, th
 
 [Densification]
 
-== USPLAT Algorithm
-
 == Loss
 
-Multiple metrics exist for image reconstruction tasks.
-[Reconstruction Error]
+The primary objective is photometric fidelity, measured as a weighted
+combination of pixel-wise L1 error and structural similarity:
 
-[SSIM metrics]
+$
+cal(L)_"rgb" = (1 - lambda_"dssim") cal(L)_1 + lambda_"dssim" cal(L)_"SSIM"
+$
 
-[LSPIS]
+This alone is insufficient for dynamic outdoor scenes, where the background
+is transparent but the model may place opaque Gaussians there. An opacity
+mask loss discourages this by penalising opacity in sky regions identified
+from the ground-truth alpha channel $m_"gt"$:
 
-[Image Reconstruction L1 or L2 loss]
+$
+cal(L)_"opa" = -1 / abs(Omega) sum_(p in Omega) (1 - m_"gt"(p)) dot log(1 - alpha(p))
+$
 
-Specific Loss for 4DGS + Loss variations (see USPLAT)
+Dynamic Gaussians additionally require motion regularization to prevent
+physically implausible trajectories. A rigidity loss enforces that spatially
+proximate Gaussians move with coherent velocities, weighted by squared
+distance with $k = 20$ neighbours:
+
+$
+cal(L)_"rigid" =
+1 / (k dot G)
+sum_(i=1)^G
+sum_(j in cal(N)(i))
+e^(-100 dot d_(i j)) dot
+norm(dot(mu)_i - dot(mu)_j)_2
+$
+
+A global motion loss further suppresses high-velocity Gaussians that are
+unlikely to correspond to real scene motion:
+
+$
+cal(L)_"motion" = 1 / G sum_(i=1)^G norm(dot(mu)_i)_2
+$
+
+where $dot(mu)_i$ is the temporal velocity by finite difference. These four
+terms are active throughout training.
+
+== Uncertainty-Aware Loss
+
+The baseline losses treat all Gaussians equally, but poorly-observed Gaussians, occluded, nearly transparent, or rarely visible, are underconstrained and
+tend to drift, producing artifacts at novel viewpoints. To address this, at
+$N_"start" = 15000$ (coinciding with the end of densification, when the
+Gaussian count is stable), we activate the uncertainty-aware graph losses of
+USplat4D:
+
+$
+cal(L) =
+cal(L)_"rgb"
++ lambda_"key" cal(L)_"key"
++ lambda_"non-key" cal(L)_"non-key"
+$
+
+with $lambda_"key" = lambda_"non-key" = 1.0$.
+
+
+The first step is identifying which Gaussians are reliable. Uncertainty is
+estimated per Gaussian per frame from alpha-blending weights. This shows
+us that well-observed
+Gaussians contribute strongly to many pixels and thus have low uncertainty:
+
+$
+sigma^2_(i,t) =
+1 / (sum_(h in P_(i,t)) (T^h_(i,t) dot alpha_i)^2),
+quad
+u_(i,t) = cases(
+  sigma^2_(i,t) & "if " bb(1)_(i,t) = 1,
+  phi & "otherwise"
+)
+$
+
+with $phi = 10^6$. The convergence indicator $bb(1)_(i,t)$ forces $u = phi$
+if any pixel in the Gaussian footprint exceeds color residual $eta_c = 0.5$,
+preventing unconverged Gaussians from becoming anchors. The top $2%$ by
+confidence with significant period $>= 5$ frames become key nodes $V_k$;
+UA-kNN with $k = 8$ builds key-key edges; each non-key node is assigned to
+its closest key over all frames.
+
+*Key node loss.* Reliable Gaussians should not drift from their well-trained
+positions, and their neighbourhoods should move geometrically consistently.
+This is enforced by anchoring them to their pretrained positions $bold(p)^circle$
+and applying motion locality constraints:
+
+$
+cal(L)_"key" =
+sum_t sum_(i in V_k)
+norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,t,i))
++ cal(L)_"motion,key"
+$
+
+The uncertainty matrix $U_(i,t) = R_"wc" op("diag")(u, u, 0.01 u) R_"wc"^T$
+down-weights depth corrections by $100 times$, reflecting monocular depth
+unreliability. $cal(L)_"motion,key"$ combines isometry, rigidity, rotation,
+velocity and acceleration constraints ($lambda_"iso" = lambda_"rigid" = 1.0$,
+$lambda_"rot" = lambda_"vel" = lambda_"acc" = 0.01$).
+
+*Non-key node loss.* Uncertain Gaussians have no reliable photometric signal
+to constrain their motion. Rather than leaving them free, we pull them toward
+positions predicted by interpolating the motion of their key neighbours via
+DQB, which correctly handles rotation
+and translation jointly:
+
+$
+cal(L)_"non-key" =
+sum_t sum_(i in.not V_k)
+norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,i))
++ sum_t sum_(i in.not V_k)
+norm(bold(p)_(i,t) - bold(p)^"DQB"_(i,t))^2_(U^(-1)_(w,i))
++ cal(L)_"motion,non-key"
+$
+
+As Gaussians are isotropic, DQB interpolation reduces to a weighted blend of key 
+node positions in our isotropic setting. The DQB target is soft; 
+$bold(p)_(i,t)$ remains free and may deviate when the photometric loss
+provides a stronger signal, preserving non-rigid deformation. Density control
+is disabled in the first $10%$ and last $20%$ of USplat iterations to protect
+graph index integrity.
 
 == At-Rest Compression
 
 The complete model is stored as the combination of compression MLPs, and lossy codebook approximations @du2026_mobilegs.
-
-*Compression MLPs*  stored in memory as weights, and are evaluated during inference to render each image.
 
 *Codebook Compression* is applied to gaussian features by splitting the complete vector of features into sub-vectors, which are replaced with the K-means nearest centroids to obtain a lossy compression of similar vectors. The corresponding index for each gaussian is stored using Huffman Encoding. This technique is referred to as Neural Vector Quantization (NVQ).
 
