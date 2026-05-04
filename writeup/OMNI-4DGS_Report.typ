@@ -133,20 +133,17 @@ $
 
 Other optimizations have also been developed for the rendering (inference) operation: following @du2026_mobilegs, gaussians with opacity smaller than a threshold are dropped. Visibility masks are also an option for selectively loading gaussians at render time: @yuan2025_4dgs1k proposes binary labellings of the gaussians every 5 frames, so the rendering step loads only gaussians that are visible just before or just after. Both of these techniques result in faster inference time, since they drastically reduce memory loading and reducing the problem size.
 
-*SH MLP Compression* encodes the view-dependent color of the Gaussians into latent vectors: #box[$(h_d, h_v) = ("view", "diffuse")$], which isolate the information between gaussian-specific and perspective specific @du2026_mobilegs. To learn the split, while training "view", the diffuse component is fixed but camera angle changes. The opposite holds for "diffuse", where the view component is fixed. During inference, the MLPs are used to recover color.
+*MLP Compression of SH* encodes the view-dependent color of the Gaussians into latent vectors: #box[$(h_d, h_v) = ("view", "diffuse")$], which isolate the information between gaussian-specific and perspective specific @du2026_mobilegs. To learn the split, while training "view", the diffuse component is fixed but camera angle changes. The opposite holds for "diffuse", where the view component is fixed. During inference, the MLPs are used to recover color.
 
 *Teacher-Student SH Compression* works by training an MLP to compress existing high-order harmonic colors to lower order through a faithful mapping. The operation identifies the set of mappings that minimizes the color loss between the original representation and the lower-order one.
 
 == Training
 
-Standard Backpropagation is used in the model to train the best parameters for scene fidelity, while loss can be measured using image similarity metrics. To reduce training instability, Adam Optimizer and Batch training are used @yang2024_4dgs, while loss choice depends on the architectural components.
+_Standard Backpropagation_ is used in the model to train the best parameters for scene fidelity, while loss can be measured using image similarity metrics. To reduce training instability, _Adam Optimizer_ and _Batch training_ are used @yang2024_4dgs, while loss choice depends on the architectural components.
+
+Since memory usage is proportional to the number of Gaussians, one seeks to minimize their number by pruning less relevant ones. *Opacity Pruning* drops gaussians with opacity value smaller than a chosen threshold @yang2024_4dgs @du2026_mobilegs. *Contribution Pruning* accumulates a contribution value over training steps, and drops gaussians that remain not relevant enough for enough iterations. *Spatio-Temporal Pruning* drops the bottom $~ 90%$ quantile, ranking higher more persistent and longer-lasting gaussians @luo2025_instant4d. Finally, *Grid Pruning* de-duplicates gaussians by position, velocity, temporal scale and position @luo2025_instant4d. Since pruning rules are correlated, we only re-implement Spatio-Temporal pruning, which had to be written from scratch, and maintain Opacity Pruning from 4DGS-Native. *Densification* is the opposite strategy, splitting gaussians with high loss gradient: although the reference papers skipped it for a faster training, we reintroduce it as a regularization technique.
 
 Custom CUDA kernels are used to compute pixel operations on the GPU directly, though it limits compatibility across codebases. For this reason, we opted for a mixed pruning-densify schedule, as opposed to MegaSAM @luo2025_instant4d.
-
-
-[In-training Pruning: Spatio-Temporal, Opacity]
-
-[Densification]
 
 == Loss
 
@@ -154,7 +151,7 @@ The primary objective is photometric fidelity, measured as a weighted
 combination of pixel-wise L1 error and structural similarity:
 
 $
-cal(L)_"rgb" = (1 - lambda_"dssim") cal(L)_1 + lambda_"dssim" cal(L)_"SSIM"
+  cal(L)_"rgb" = (1 - lambda_"dssim") cal(L)_1 + lambda_"dssim" cal(L)_"SSIM"
 $
 
 This alone is insufficient for dynamic outdoor scenes, where the background
@@ -163,7 +160,7 @@ mask loss discourages this by penalising opacity in sky regions identified
 from the ground-truth alpha channel $m_"gt"$:
 
 $
-cal(L)_"opa" = -1 / abs(Omega) sum_(p in Omega) (1 - m_"gt"(p)) dot log(1 - alpha(p))
+  cal(L)_"opa" = -1 / abs(Omega) sum_(p in Omega) (1 - m_"gt"(p)) dot log(1 - alpha(p))
 $
 
 Dynamic Gaussians additionally require motion regularization to prevent
@@ -172,19 +169,19 @@ proximate Gaussians move with coherent velocities, weighted by squared
 distance with $k = 20$ neighbours:
 
 $
-cal(L)_"rigid" =
-1 / (k dot G)
-sum_(i=1)^G
-sum_(j in cal(N)(i))
-e^(-100 dot d_(i j)) dot
-norm(dot(mu)_i - dot(mu)_j)_2
+  cal(L)_"rigid" =
+  1 / (k dot G)
+  sum_(i=1)^G
+  sum_(j in cal(N)(i))
+  e^(-100 dot d_(i j)) dot
+  norm(dot(mu)_i - dot(mu)_j)_2
 $
 
 A global motion loss further suppresses high-velocity Gaussians that are
 unlikely to correspond to real scene motion:
 
 $
-cal(L)_"motion" = 1 / G sum_(i=1)^G norm(dot(mu)_i)_2
+  cal(L)_"motion" = 1 / G sum_(i=1)^G norm(dot(mu)_i)_2
 $
 
 where $dot(mu)_i$ is the temporal velocity by finite difference. These four
@@ -199,10 +196,10 @@ Gaussian count is stable), we activate the uncertainty-aware graph losses of
 USplat4D:
 
 $
-cal(L) =
-cal(L)_"rgb"
-+ lambda_"key" cal(L)_"key"
-+ lambda_"non-key" cal(L)_"non-key"
+  cal(L) =
+  cal(L)_"rgb"
+  + lambda_"key" cal(L)_"key"
+  + lambda_"non-key" cal(L)_"non-key"
 $
 
 with $lambda_"key" = lambda_"non-key" = 1.0$.
@@ -214,13 +211,13 @@ us that well-observed
 Gaussians contribute strongly to many pixels and thus have low uncertainty:
 
 $
-sigma^2_(i,t) =
-1 / (sum_(h in P_(i,t)) (T^h_(i,t) dot alpha_i)^2),
-quad
-u_(i,t) = cases(
-  sigma^2_(i,t) & "if " bb(1)_(i,t) = 1,
-  phi & "otherwise"
-)
+  sigma^2_(i,t) =
+  1 / (sum_(h in P_(i,t)) (T^h_(i,t) dot alpha_i)^2),
+  quad
+  u_(i,t) = cases(
+    sigma^2_(i,t) & "if " bb(1)_(i,t) = 1,
+    phi & "otherwise"
+  )
 $
 
 with $phi = 10^6$. The convergence indicator $bb(1)_(i,t)$ forces $u = phi$
@@ -236,10 +233,10 @@ This is enforced by anchoring them to their pretrained positions $bold(p)^circle
 and applying motion locality constraints:
 
 $
-cal(L)_"key" =
-sum_t sum_(i in V_k)
-norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,t,i))
-+ cal(L)_"motion,key"
+  cal(L)_"key" =
+  sum_t sum_(i in V_k)
+  norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,t,i))
+  + cal(L)_"motion,key"
 $
 
 The uncertainty matrix $U_(i,t) = R_"wc" op("diag")(u, u, 0.01 u) R_"wc"^T$
@@ -255,16 +252,16 @@ DQB, which correctly handles rotation
 and translation jointly:
 
 $
-cal(L)_"non-key" =
-sum_t sum_(i in.not V_k)
-norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,i))
-+ sum_t sum_(i in.not V_k)
-norm(bold(p)_(i,t) - bold(p)^"DQB"_(i,t))^2_(U^(-1)_(w,i))
-+ cal(L)_"motion,non-key"
+  cal(L)_"non-key" =
+  sum_t sum_(i in.not V_k)
+  norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,i))
+  + sum_t sum_(i in.not V_k)
+  norm(bold(p)_(i,t) - bold(p)^"DQB"_(i,t))^2_(U^(-1)_(w,i))
+  + cal(L)_"motion,non-key"
 $
 
-As Gaussians are isotropic, DQB interpolation reduces to a weighted blend of key 
-node positions in our isotropic setting. The DQB target is soft; 
+As Gaussians are isotropic, DQB interpolation reduces to a weighted blend of key
+node positions in our isotropic setting. The DQB target is soft;
 $bold(p)_(i,t)$ remains free and may deviate when the photometric loss
 provides a stronger signal, preserving non-rigid deformation. Density control
 is disabled in the first $10%$ and last $20%$ of USplat iterations to protect
@@ -324,6 +321,38 @@ We combine the papers into a single architecture, which can be studied through a
   #let X = table.cell(align: center + horizon, fill: rgb("#dff3df"))[
     #text(fill: black, weight: "bold")[×]
   ]
+  #let XG = table.cell(align: center + horizon, fill: rgb("#56aa68"))[
+    #text(fill: white, weight: "bold")[×]
+  ]
+  #let XB = table.cell(align: center + horizon, fill: rgb("#5698df"))[
+    #text(fill: white, weight: "bold")[×]
+  ]
+  #let XR = table.cell(align: center + horizon, fill: rgb("#df6f6f"))[
+    #text(fill: white, weight: "bold")[×]
+  ]
+  #let KG(body) = box(
+    fill: rgb("#56aa68"),
+    inset: (x: 2pt, y: 1pt),
+    radius: 2pt,
+  )[
+    #text(fill: white, weight: "bold")[#body]
+  ]
+
+  #let KB(body) = box(
+    fill: rgb("#5698df"),
+    inset: (x: 2pt, y: 1pt),
+    radius: 2pt,
+  )[
+    #text(fill: white, weight: "bold")[#body]
+  ]
+
+  #let KR(body) = box(
+    fill: rgb("#df6f6f"),
+    inset: (x: 2pt, y: 1pt),
+    radius: 2pt,
+  )[
+    #text(fill: white, weight: "bold")[#body]
+  ]
   #let E = table.cell(align: center + horizon)[]
 
   #let VH(body) = table.cell(align: center + horizon)[
@@ -358,7 +387,8 @@ We combine the papers into a single architecture, which can be studied through a
       align: left + horizon,
     )[
       #par(justify: false)[
-        Implementations available in each architecture, including our combined codebase. Costly or obsolete features were dropped.
+        Implementations in each architecture, and our codebase:
+        #KG[existing], #KR[heavily modified] and #KB[re-implemented].
       ]
     ],
 
@@ -373,73 +403,69 @@ We combine the papers into a single architecture, which can be studied through a
 
     MGL(2, [Gaussians], bg: light-blue),
     MGO([4D], bg: light-blue),
-    X, X, X, E, X, X,
+    X, X, X, E, X, XG,
 
     MGO([3D], bg: light-blue),
     E, E, E, X, E, E,
 
     MGL(2, [Rotation], bg: light-orange),
     MGO([Quaternion], bg: light-orange),
-    X, X, X, E, X, X,
+    X, X, X, E, X, XG,
 
     MGO([Rotation Matrix], bg: light-orange),
     E, E, E, X, E, E,
 
     MGL(2, [Shape], bg: light-blue),
     MGO([Isotropic], bg: light-blue),
-    E, E, X, E, E, X,
+    E, E, X, E, E, XG,
 
     MGO([Anisotropic], bg: light-blue),
-    X, X, E, X, X, X,
+    X, X, E, X, X, XR,
 
     MGL(3, [Color \ Basis], bg: light-orange),
     MGO([RGB], bg: light-orange),
-    E, E, X, E, E, X,
+    E, E, X, E, E, XG,
 
     MGO([SH(1)], bg: light-orange),
-    E, E, E, X, E, X,
+    E, E, E, X, E, XG,
 
     MGO([SH(3)], bg: light-orange),
-    X, X, E, X, X, X,
+    X, X, E, X, X, XG,
 
-    SEC(3, [*Init*]),
+    SEC(2, [*Init*]),
 
     MGL(2, [Point \ Cloud], bg: light-blue),
     MGO([Random], bg: light-blue),
-    X, X, E, E, E, X,
+    X, X, E, E, E, XG,
 
     MGO([MegaSAM], bg: light-blue),
     E, E, X, E, E, E,
-
-    C([Confidence], bg: light-orange),
-    L([Uncertainty], bg: light-orange),
-    E, E, E, E, X, X,
 
     SEC(3, [*Compress*]),
 
     C([SH], bg: light-blue),
     L([MLP Distillation], bg: light-blue),
-    E, E, E, X, E, X,
+    E, E, E, X, E, XR,
 
     table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Quantize],
     L([K-means ], bg: light-orange),
-    E, E, E, X, E, X,
+    E, E, E, X, E, XR,
 
     L([Spatial GPCC], bg: light-orange),
-    E, E, E, X, E, X,
+    E, E, E, X, E, XR,
 
     SEC(3, [*Train*]),
     C([Weighting], bg: light-blue),
     L([Uncertainty], bg: light-blue),
-    E, E, E, E, X, X,
+    E, E, E, E, X, XR,
 
     C([Sampling], bg: light-orange),
     L([Batch in Time], bg: light-orange),
-    X, X, E, E, E, X,
+    X, X, E, E, E, XG,
 
     C([Grid \ Reliance], bg: light-blue),
     L([Voxelization], bg: light-blue),
-    E, E, X, X, X, X,
+    E, E, X, X, X, XR,
 
     SEC(8, [*Prune*]),
 
@@ -448,47 +474,48 @@ We combine the papers into a single architecture, which can be studied through a
     X, E, E, X, E, E,
 
     L([Gradient Loss], bg: light-orange),
-    X, E, E, E, E, X,
+    X, E, E, E, E, XG,
 
     table.cell(rowspan: 2, align: center + horizon, fill: light-blue)[Quantile Filter],
     L([Spatio-Temporal], bg: light-blue),
-    E, E, X, X, E, X,
+    E, E, X, X, E, XB,
 
     L([Opacity], bg: light-blue),
-    E, E, X, E, E, X,
+    E, E, X, E, E, XG,
 
     table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Strategy],
     L([One-shot], bg: light-orange),
-    E, X, X, E, X, X,
+    E, X, X, E, X, XG,
 
     L([Scheduled], bg: light-orange),
-    E, E, E, E, E, X,
+    E, E, E, E, E, XB,
 
     C([Increase], bg: light-blue),
     L([Densify], bg: light-blue),
-    X, E, E, E, E, X,
+    X, E, E, E, E, XG,
 
     C([Dropout], bg: light-orange),
     L([Dropout], bg: light-orange),
-    E, E, E, E, E, X,
+    E, E, E, E, E, XB,
 
     SEC(3, [*Render*]),
 
     C([Loading], bg: light-blue),
     L([Visibility Mask], bg: light-blue),
-    E, X, E, E, E, X,
+    E, X, E, E, E, XB,
 
     MGL(2, [Raster], bg: light-orange),
     MGO([Sort-based], bg: light-orange),
-    X, X, X, E, X, X,
+    X, X, X, E, X, XG,
 
     MGO([Sort-free], bg: light-orange),
-    E, E, E, X, E, X,
+    E, E, E, X, E, XR,
+
     // Inner-table outline.
     table.hline(y: 1, start: 1, end: 9, stroke: soft-thick),
-    table.hline(y: 29, start: 1, end: 9, stroke: soft-thick),
-    table.vline(x: 1, start: 1, end: 29, stroke: soft-thick),
-    table.vline(x: 9, start: 1, end: 29, stroke: soft-thick),
+    table.hline(y: 28, start: 1, end: 9, stroke: soft-thick),
+    table.vline(x: 1, start: 1, end: 28, stroke: soft-thick),
+    table.vline(x: 9, start: 1, end: 28, stroke: soft-thick),
 
     // Extended mutually-exclusive group boundaries.
     table.hline(y: 3, start: 1, end: 9, stroke: soft-thick),
@@ -496,14 +523,14 @@ We combine the papers into a single architecture, which can be studied through a
     table.hline(y: 7, start: 1, end: 9, stroke: soft-thick),
     table.hline(y: 10, start: 1, end: 9, stroke: soft-thick),
     table.hline(y: 12, start: 1, end: 9, stroke: soft-thick),
-    table.hline(y: 26, start: 1, end: 9, stroke: soft-thick),
-    table.hline(y: 28, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 25, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 27, start: 1, end: 9, stroke: soft-thick),
 
     // Thin red outline around the rightmost column.
-    table.vline(x: 8, start: 0, end: 30, stroke: luma(100) + thick),
-    table.vline(x: 9, start: 0, end: 30, stroke: luma(100) + thick),
+    table.vline(x: 8, start: 0, end: 29, stroke: luma(100) + thick),
+    table.vline(x: 9, start: 0, end: 29, stroke: luma(100) + thick),
     table.hline(y: 0, start: 8, end: 9, stroke: luma(100) + thick),
-    table.hline(y: 30, start: 8, end: 9, stroke: luma(100) + thick),
+    table.hline(y: 29, start: 8, end: 9, stroke: luma(100) + thick),
   )
 ]
 == Loss
