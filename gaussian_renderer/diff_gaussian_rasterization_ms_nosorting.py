@@ -99,9 +99,6 @@ class _RasterizeGaussians(torch.autograd.Function):
                 (
                     num_rendered,
                     color,
-                    accum_weights_ptr,
-                    accum_weights_count,
-                    accum_max_count,
                     radii,
                     kernel_time,
                     geomBuffer,
@@ -119,9 +116,6 @@ class _RasterizeGaussians(torch.autograd.Function):
             (
                 num_rendered,
                 color,
-                accum_weights_ptr,
-                accum_weights_count,
-                accum_max_count,
                 radii,
                 kernel_time,
                 geomBuffer,
@@ -132,8 +126,6 @@ class _RasterizeGaussians(torch.autograd.Function):
                 gaussian_scores,
                 gaussian_score_max_error,
             ) = _C.rasterize_gaussians(*args)
-
-        del accum_weights_ptr, accum_weights_count, accum_max_count
 
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered

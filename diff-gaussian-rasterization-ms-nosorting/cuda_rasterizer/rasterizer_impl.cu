@@ -27,6 +27,8 @@
 #include <c10/cuda/CUDAStream.h>
 namespace cg = cooperative_groups;
 
+static constexpr float OIT_ALPHA_EPS = 1.0f / 255.0f;
+
 __device__ inline void atomicMaxFloatNonnegative(float* address, float val)
 {
 	atomicMax(reinterpret_cast<unsigned int*>(address), __float_as_uint(val));
@@ -213,6 +215,8 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 
 
 struct ChunkRenderWorkspace {
+	size_t tile_scan_size;
+	char* tile_scanning_space;
 	int* tile_offsets_tmp;
 	int* temp_counts;
 	uint2* d_tile_ranges;
@@ -225,6 +229,8 @@ struct ChunkRenderWorkspace {
 		CudaRasterizer::obtain(chunk, ws.temp_counts, num_tiles, 128);
 		CudaRasterizer::obtain(chunk, ws.d_tile_ranges, num_tiles, 128);
 		CudaRasterizer::obtain(chunk, ws.precomp_w_thres, num_points, 128);
+		cub::DeviceScan::InclusiveSum(nullptr, ws.tile_scan_size, ws.temp_counts, ws.tile_offsets_tmp, num_tiles);
+		CudaRasterizer::obtain(chunk, ws.tile_scanning_space, ws.tile_scan_size, 256);
 		return ws;
 	}
 };
@@ -237,10 +243,11 @@ static size_t requiredChunkRenderWorkspace(size_t num_tiles, size_t num_points)
 }
 
 // Init Ranges
-__global__ void initOITRangesKernel(int n, const int* offsets, uint2* ranges) {
+__global__ void initOITRangesKernel(int n, const int* inclusive_offsets, uint2* ranges) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i >= n) return;
-    ranges[i] = make_uint2(offsets[i], offsets[i]);
+    const unsigned int start = (i == 0) ? 0u : (unsigned int)inclusive_offsets[i - 1];
+    ranges[i] = make_uint2(start, start);
 }
 
 
@@ -278,9 +285,14 @@ __global__ void precomputeGaussianData(
 
 
     float w_o = conic_opacity[idx].w;
-    float threshold = 1.0f; 
-    if (w_o > 0.0f) {
-        threshold = __logf(fmaxf(1.0f / 255.0f, 1e-7f) / fmaxf(w_o, 1e-7f));
+    float threshold = 1.0f;
+    // A splat can affect the output either through the weighted foreground
+    // average (alpha * MobileGS_weight) or through the transmittance term T
+    // (alpha).  Use the looser of the two support tests during binning so the
+    // render kernel never silently drops high-alpha / low-weight occluders.
+    const float support_opacity = w_o * fmaxf(1.0f, weight);
+    if (support_opacity > 0.0f) {
+        threshold = __logf(fmaxf(OIT_ALPHA_EPS, 1e-7f) / fmaxf(support_opacity, 1e-7f));
     }
 
     precomp_w_thres[idx] = make_float2(weight, threshold);
@@ -309,7 +321,7 @@ __global__ void countOITPointsPerTile(
     int idx = cg::this_grid().thread_rank();
     if (idx >= P || radii[idx] <= 0) return;
 
-    if (conic_opacity[idx].w * precomp_w_thres[idx].x < (1.0f / 255.0f)) return;
+    if (conic_opacity[idx].w * fmaxf(1.0f, precomp_w_thres[idx].x) < OIT_ALPHA_EPS) return;
 
 	float2 center = means2D[idx];
 	const int r = max(1, radii[idx]);
@@ -341,7 +353,7 @@ __global__ void fillOITTiles(
     int idx = cg::this_grid().thread_rank();
     if (idx >= P || radii[idx] <= 0) return;
 
-    if (conic_opacity[idx].w * precomp_w_thres[idx].x < (1.0f / 255.0f)) return;
+    if (conic_opacity[idx].w * fmaxf(1.0f, precomp_w_thres[idx].x) < OIT_ALPHA_EPS) return;
 
 	float2 center = means2D[idx];
 	const int r = max(1, radii[idx]);
@@ -468,7 +480,8 @@ __global__ void __launch_bounds__(256) renderTileOIT(
             if (power > 0.0f || power < w.w) continue;
             
             float alpha = fminf(0.99f, w.y * __expf(power));
-            if (alpha < 0.00392f) continue;
+            const float blend_weight = alpha * w.z;
+            if (alpha < OIT_ALPHA_EPS && blend_weight < OIT_ALPHA_EPS) continue;
             
             float4 col = s_color[db][i];
 			int p_idx = point_list[tile_range.x + r * 256 + i];
@@ -479,7 +492,6 @@ __global__ void __launch_bounds__(256) renderTileOIT(
 
 			if (gaussian_scores != nullptr) {
 				// Sort-free rendering uses the order-independent MobileGS weight.
-				const float blend_weight = alpha * w.z;
 				const float score = compute_score_squares ? blend_weight * blend_weight : blend_weight;
 				atomicAdd(&gaussian_scores[p_idx], score);
 			}
@@ -487,7 +499,7 @@ __global__ void __launch_bounds__(256) renderTileOIT(
 				atomicMaxFloatNonnegative(&gaussian_score_max_error[p_idx], score_error_map[pix.y * W + pix.x]);
 			}
             
-            w_fg_acc += alpha * w.z;
+            w_fg_acc += blend_weight;
             Ts_acc += __logf(max(1.0f - alpha, 1e-6f));
         }
         
@@ -563,9 +575,6 @@ int CudaRasterizer::Rasterizer::forward(
 	float* gaussian_score_max_error,
 	float* out_color,
 
-	float* accum_weights_ptr,
-	int* accum_weights_count,
-	float* accum_max_count,
 	float* kernel_times,
 	int* radii,
 	bool debug)
@@ -629,10 +638,6 @@ int CudaRasterizer::Rasterizer::forward(
 		prefiltered
 	), debug)
 
-	CHECK_CUDA(cudaMemsetAsync(out_color, 0, width * height * 3 * sizeof(float), stream), debug);
-	CHECK_CUDA(cudaMemsetAsync(w_fg, 0, width * height * sizeof(float), stream), debug);
-	CHECK_CUDA(cudaMemsetAsync(Ts, 0, width * height * sizeof(float), stream), debug);
-
 	int num_tiles = tile_grid.x * tile_grid.y;
 	int* tile_counts = workspace.temp_counts;
 	CHECK_CUDA(cudaMemsetAsync(tile_counts, 0, num_tiles * sizeof(int), stream), debug);
@@ -649,13 +654,11 @@ int CudaRasterizer::Rasterizer::forward(
     );
 
     int* tile_offsets = workspace.tile_offsets_tmp;
-	CHECK_CUDA(cub::DeviceScan::ExclusiveSum(geomState.scanning_space, geomState.scan_size, tile_counts, tile_offsets, num_tiles, stream), debug);
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(workspace.tile_scanning_space, workspace.tile_scan_size, tile_counts, tile_offsets, num_tiles, stream), debug);
 
-    int last_off, last_cnt;
-	CHECK_CUDA(cudaMemcpyAsync(&last_off, tile_offsets + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
-	CHECK_CUDA(cudaMemcpyAsync(&last_cnt, tile_counts + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
+    int total_instances = 0;
+	CHECK_CUDA(cudaMemcpyAsync(&total_instances, tile_offsets + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
 	CHECK_CUDA(cudaStreamSynchronize(stream), debug);
-    int total_instances = last_off + last_cnt;
 
     size_t binning_chunk_size = required<BinningState>(total_instances);
     char* binning_chunkptr = binningBuffer(binning_chunk_size);

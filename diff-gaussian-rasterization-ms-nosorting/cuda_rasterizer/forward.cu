@@ -276,9 +276,6 @@ renderTileAtomicCUDA(
     const glm::vec3* scales,
     const float* __restrict__ depths,
     const float* __restrict__ features,
-    float* __restrict__ accum_weights_p,
-    int* __restrict__ accum_weights_count,
-    float* __restrict__ accum_max_count,
     const float4* __restrict__ conic_opacity,
     const float* __restrict__ thetas,
     const float* __restrict__ phis,
@@ -399,9 +396,6 @@ renderTileAtomicCUDA(
 // 	const glm::vec3* scales,
 // 	const float* __restrict__ depths,
 // 	const float* __restrict__ features,
-// 	float* __restrict__ accum_weights_p,
-// 	int* __restrict__ accum_weights_count,
-// 	float* __restrict__ accum_max_count,
 // 	const float4* __restrict__ conic_opacity,
 // 	const float* __restrict__ thetas,
 // 	const float* __restrict__ phis,
@@ -530,8 +524,6 @@ renderTileAtomicCUDA(
 // 			}
 
 //             T = test_T;
-// 			atomicAdd(&(accum_weights_p[collected_id[j]]), alpha * weight);
-// 			atomicAdd(&(accum_weights_count[collected_id[j]]), 1);
 
 
 // 			// Keep track of last range entry to update this
@@ -542,7 +534,6 @@ renderTileAtomicCUDA(
 
 // 	if(flag_update==1)
 // 	{
-// 		atomicAdd(&(accum_max_count[idx_max]), 1);
 // 	}
 
 
@@ -836,9 +827,6 @@ void FORWARD::render(
 	const glm::vec3* scales,
     const float* depths,
 	const float* colors,
-	float* accum_weights_p,
-	int* accum_weights_count,
-	float* accum_max_count,
 	const float4* conic_opacity,
 	const float* theta,
 	const float* phi,
@@ -857,9 +845,6 @@ void FORWARD::render(
 		scales,
 		depths,
 		colors,
-		accum_weights_p,	
-		accum_weights_count,
-		accum_max_count,
 		conic_opacity,
 		theta,
 		phi,

@@ -17,6 +17,85 @@ from .diff_gaussian_rasterization import GaussianRasterizer as SortedGaussianRas
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 
+
+def _pipeline_float(pipe, name, default):
+    return float(getattr(pipe, name, default))
+
+
+def _pipeline_int(pipe, name, default):
+    return int(getattr(pipe, name, default))
+
+
+def _tensor_version(obj, name):
+    tensor = getattr(obj, name, None)
+    return -1 if tensor is None else int(getattr(tensor, "_version", -1))
+
+
+def _select_temporal_active_mask(pc, timestamp, marginal_t, pipe, scaling_modifier):
+    """Return the temporal render mask for inference/training.
+
+    The default is the original per-frame marginal threshold.  During no-grad
+    rendering, optional key-frame masks approximate the 4DGS-1K temporal
+    filtering idea: active sets for nearby timestamps are re-used instead of
+    admitting every Gaussian.  We intentionally disable the cache when gradients
+    are enabled so training never uses stale masks after parameter updates.
+    """
+    threshold = max(0.0, _pipeline_float(pipe, "temporal_mask_threshold", 0.05))
+    current_mask = marginal_t[:, 0] > threshold
+
+    keyframes = _pipeline_int(pipe, "temporal_mask_keyframes", 0)
+    if keyframes <= 1 or torch.is_grad_enabled():
+        return current_mask
+
+    if pc.get_t.numel() == 0:
+        return current_mask
+
+    t0 = float(pc.time_duration[0])
+    t1 = float(pc.time_duration[1])
+    if not math.isfinite(t0) or not math.isfinite(t1) or abs(t1 - t0) < 1e-8:
+        return current_mask
+
+    # Keep the cache conservative.  It is only valid for the same point count,
+    # threshold, keyframe layout and render-time scale modifier.
+    cache_key = (
+        int(pc.get_xyz.shape[0]),
+        pc.get_xyz.device.type,
+        str(pc.get_xyz.device),
+        float(threshold),
+        int(keyframes),
+        float(t0),
+        float(t1),
+        float(scaling_modifier),
+        bool(getattr(pc, "rot_4d", False)),
+        float(getattr(pc, "prefilter_var", -1.0)),
+        _tensor_version(pc, "_t"),
+        _tensor_version(pc, "_scaling_t"),
+        _tensor_version(pc, "_scaling"),
+        _tensor_version(pc, "_rotation"),
+        _tensor_version(pc, "_rotation_r"),
+    )
+    cache = getattr(pc, "_temporal_active_mask_cache", None)
+    if cache is None or cache.get("key") != cache_key:
+        masks = []
+        for i in range(keyframes):
+            kt = t0 + (t1 - t0) * (float(i) / max(1, keyframes - 1))
+            masks.append((pc.get_marginal_t(kt, scaling_modifier)[:, 0] > threshold).detach())
+        cache = {"key": cache_key, "masks": torch.stack(masks, dim=0)}
+        setattr(pc, "_temporal_active_mask_cache", cache)
+
+    masks = cache["masks"]
+    frac = (float(timestamp) - t0) / (t1 - t0)
+    pos = int(math.ceil(max(0.0, min(1.0, frac)) * max(0, keyframes - 1)))
+    window = max(1, _pipeline_int(pipe, "temporal_mask_window", 2))
+    lo = max(0, pos - window)
+    hi = min(keyframes, pos + window + 1)
+    if lo >= hi:
+        return current_mask
+    key_mask = masks[lo:hi].any(dim=0)
+    # Avoid pathological all-empty frames caused by too few keyframes.
+    return key_mask if bool(key_mask.any()) else current_mask
+
+
 def render(
     viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
     scaling_modifier = 1.0, override_color = None,
@@ -183,23 +262,22 @@ def render(
     else:
         colors_precomp = override_color
 
-    if use_mobilegs_sort_free and colors_precomp is None:
+    if use_mobilegs_sort_free and colors_precomp is None and not pc.force_sh_3d:
+        # The no-sort CUDA path can evaluate ordinary 3D SH in-kernel.  Only
+        # precompute 4D SHFS colors here because that rasterizer intentionally
+        # has no timestamp/SCH interface.
         shs_view = pc.get_features.transpose(1, 2).view(-1, 3, pc.get_max_sh_channels)
         dir_pp = (means3D - viewpoint_camera.camera_center.expand_as(means3D)).detach()
         dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
-
-        if pc.force_sh_3d:
-            sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
-        else:
-            dir_t = (pc.get_t - viewpoint_camera.timestamp).detach()
-            sh2rgb = eval_shfs_4d(
-                pc.active_sh_degree,
-                pc.active_sh_degree_t,
-                shs_view,
-                dir_pp_normalized,
-                dir_t,
-                pc.time_duration[1] - pc.time_duration[0],
-            )
+        dir_t = (pc.get_t - viewpoint_camera.timestamp).detach()
+        sh2rgb = eval_shfs_4d(
+            pc.active_sh_degree,
+            pc.active_sh_degree_t,
+            shs_view,
+            dir_pp_normalized,
+            dir_t,
+            pc.time_duration[1] - pc.time_duration[0],
+        )
         colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         shs = None
     
@@ -217,9 +295,13 @@ def render(
             dropout_mask[torch.randint(dropout_mask.shape[0], (1,), device=dropout_mask.device)] = True
     
     mask = None
-    # Prefilter
+    # Temporal active filtering. The threshold is configurable, and inference can
+    # use cached key-frame masks to skip Gaussians that are inactive around the
+    # requested timestamp.
     if marginal_t is not None and not (return_gaussian_scores or return_gaussian_scores_sq):
-        mask = marginal_t[:, 0] > 0.05
+        mask = _select_temporal_active_mask(
+            pc, viewpoint_camera.timestamp, marginal_t, pipe, scaling_modifier
+        )
     if dropout_mask is not None:
         mask = dropout_mask if mask is None else (mask & dropout_mask)
     if mask is not None:
@@ -253,12 +335,19 @@ def render(
     image_width = int(viewpoint_camera.image_width)
 
     if means3D.shape[0] == 0:
-        # The faithful image for an empty scene is black. Keep a zero-valued
-        # gradient anchor so training-time bookkeeping remains valid.
+        # Empty temporal/key-frame masks are valid; render the configured
+        # background color instead of hard-coded black, while keeping a zero
+        # gradient anchor for training-time bookkeeping.
         grad_anchor = screenspace_points.sum() * 0.0
         if pc.get_t.numel() > 0:
             grad_anchor = grad_anchor + pc.get_t.sum() * 0.0
-        rendered_image = means3D.new_zeros((3, image_height, image_width)) + grad_anchor
+        rendered_image = (
+            bg_color.to(device=means3D.device, dtype=means3D.dtype)
+            .view(3, 1, 1)
+            .expand(3, image_height, image_width)
+            .clone()
+            + grad_anchor
+        )
         radii = torch.empty((0,), device=means3D.device, dtype=torch.int32)
         depth = rendered_image.new_zeros((1, image_height, image_width))
         alpha = rendered_image.new_zeros((1, image_height, image_width))
@@ -305,7 +394,10 @@ def render(
             rotations_mlp,
             time_features=time_features,
         )
-        opacity = mlp_opacity * marginal_t_mlp
+        # Preserve the learned base opacity instead of replacing it entirely.
+        # This keeps sort-free rendering compatible with existing 4DGS-style
+        # checkpoints and lets the MLP act as a view-dependent visibility gate.
+        opacity = opacity * mlp_opacity
 
         rendered_image, radii, _kernel_time, transmittance, gaussian_scores, gaussian_score_max_error = rasterizer(
             means3D=means3D,

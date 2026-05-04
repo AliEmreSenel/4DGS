@@ -918,7 +918,19 @@ __global__ void preprocessCUDA(
 		}else{
 			computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
 			if (gaussian_dim == 4){
-				// TODO: marginal opacity
+				// Forward non-rotated 4D uses the temporal marginal only as an
+				// opacity gate: opacity *= exp(-0.5 * (t - timestamp)^2 / sigma).
+				// Backpropagate that gate to base opacity, timestamp mean, and
+				// temporal scale.
+				float dt = ts[idx] - timestamp;
+				float sigma = scales_t[idx] * scale_modifier;
+				float sigma_eff = (prefilter_var > 0.0f) ? (prefilter_var + sigma) : sigma;
+				sigma_eff = fmaxf(sigma_eff, 1e-7f);
+				float marginal_t = __expf(-0.5f * dt * dt / sigma_eff);
+				float dL_dmarginal_t = dL_dopacity[idx] * opacities[idx];
+				dL_dopacity[idx] *= marginal_t;
+				dL_dts[idx] += dL_dmarginal_t * marginal_t * (-dt / sigma_eff);
+				dL_dscale_t[idx] += dL_dmarginal_t * marginal_t * (dt * dt) / (2.0f * sigma_eff * sigma_eff) * scale_modifier;
 			}
 		}
 

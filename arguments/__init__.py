@@ -82,6 +82,9 @@ class PipelineParams(ParamGroup):
         self.debug = False
         self.use_usplat = False
         self.sort_free_render = False
+        self.temporal_mask_threshold = 0.05
+        self.temporal_mask_keyframes = 0
+        self.temporal_mask_window = 2
         self.random_dropout_prob = 0.0
         self.env_map_res = 0
         self.env_optimize_until = 1000000000

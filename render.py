@@ -10,6 +10,20 @@ import numpy as np
 import torch
 
 
+def render_tensor_to_uint8(render_tensor: torch.Tensor) -> np.ndarray:
+    """Convert CHW float render tensor to HWC uint8 with minimal host traffic."""
+    return (
+        torch.clamp(render_tensor, 0.0, 1.0)
+        .mul(255.0)
+        .add_(0.5)
+        .to(torch.uint8)
+        .permute(1, 2, 0)
+        .contiguous()
+        .cpu()
+        .numpy()
+    )
+
+
 def normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     if n < 1e-8:
@@ -337,7 +351,11 @@ def select_orbit_cameras(train_cams, test_cams, split: str):
 def infer_resolution_and_intrinsics(base_cam, width_arg: int, height_arg: int):
     width = width_arg or int(base_cam.image_width)
     height = height_arg or int(base_cam.image_height)
-    if getattr(base_cam, "cx", -1) > 0:
+    has_valid_intrinsics = all(
+        float(getattr(base_cam, name, -1.0)) > 0.0
+        for name in ("fl_x", "fl_y", "cx", "cy")
+    )
+    if has_valid_intrinsics:
         scale_x = width / base_cam.image_width
         scale_y = height / base_cam.image_height
         cx = base_cam.cx * scale_x
@@ -414,7 +432,12 @@ def render_orbit_mode(
     centers = np.stack(
         [cam.camera_center.detach().cpu().numpy() for cam in cam_list], axis=0
     )
-    center = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    forwards = np.stack(
+        [camera_forward_from_R(np.asarray(cam.R)) for cam in cam_list], axis=0
+    )
+    center = closest_point_to_rays(centers, forwards)
+    if not np.all(np.isfinite(center)):
+        center = np.median(centers, axis=0).astype(np.float32)
     radius = (
         np.quantile(np.linalg.norm(centers - center[None], axis=1), 0.9)
         * args.radius_scale
@@ -447,7 +470,13 @@ def render_orbit_mode(
     look_at = center.copy()
     look_at[1] += args.look_at_offset_y
 
-    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
+    writer = None if args.no_video else imageio.get_writer(
+        video_path,
+        fps=args.fps,
+        codec=args.video_codec,
+        quality=args.video_quality,
+        macro_block_size=args.macro_block_size,
+    )
     try:
         for idx in range(args.frames):
             frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
@@ -518,15 +547,9 @@ def render_orbit_mode(
 
             with torch.no_grad():
                 render_pkg = render(cam, gaussians, pipe, background)
-                image = (
-                    torch.clamp(render_pkg["render"], 0.0, 1.0)
-                    .permute(1, 2, 0)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-            image_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
-            writer.append_data(image_u8)
+                image_u8 = render_tensor_to_uint8(render_pkg["render"])
+            if writer is not None:
+                writer.append_data(image_u8)
             if save_png:
                 imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
             if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
@@ -534,7 +557,8 @@ def render_orbit_mode(
                     f"[{idx+1}/{args.frames}] t={t_val:.4f} az_deg={math.degrees(az):.2f}"
                 )
     finally:
-        writer.close()
+        if writer is not None:
+            writer.close()
 
     info = out_dir / "render_info.txt"
     info.write_text(
@@ -544,6 +568,12 @@ def render_orbit_mode(
         f"split={args.split}\n"
         f"frames={args.frames}\n"
         f"fps={args.fps}\n"
+        f"video_codec={args.video_codec}\n"
+        f"video_quality={args.video_quality}\n"
+        f"no_video={args.no_video}\n"
+        f"temporal_mask_threshold={getattr(pipe, 'temporal_mask_threshold', None)}\n"
+        f"temporal_mask_keyframes={getattr(pipe, 'temporal_mask_keyframes', None)}\n"
+        f"temporal_mask_window={getattr(pipe, 'temporal_mask_window', None)}\n"
         f"time_mode={args.time_mode}\n"
         f"time_start={time_start}\n"
         f"time_end={time_end}\n"
@@ -555,7 +585,8 @@ def render_orbit_mode(
         f"elevation_deg={args.elevation_deg}\n"
         f"look_at_offset_y={args.look_at_offset_y}\n"
     )
-    print(f"Wrote video to {video_path}")
+    if writer is not None:
+        print(f"Wrote video to {video_path}")
     if save_png:
         print(f"Wrote frames to {frames_dir}")
 
@@ -607,7 +638,13 @@ def render_bounded_mode(
         f"novel_strength={args.novel_strength} overshoot={args.endpoint_overshoot}"
     )
 
-    writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
+    writer = None if args.no_video else imageio.get_writer(
+        video_path,
+        fps=args.fps,
+        codec=args.video_codec,
+        quality=args.video_quality,
+        macro_block_size=args.macro_block_size,
+    )
     try:
         for idx in range(args.frames):
             frac = 0.0 if args.frames == 1 else idx / (args.frames - 1)
@@ -651,15 +688,9 @@ def render_bounded_mode(
             )
             with torch.no_grad():
                 render_pkg = render(cam, gaussians, pipe, background)
-                image = (
-                    torch.clamp(render_pkg["render"], 0.0, 1.0)
-                    .permute(1, 2, 0)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-            image_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
-            writer.append_data(image_u8)
+                image_u8 = render_tensor_to_uint8(render_pkg["render"])
+            if writer is not None:
+                writer.append_data(image_u8)
             if save_png:
                 imageio.imwrite(frames_dir / f"{idx:04d}.png", image_u8)
             if idx == 0 or (idx + 1) % 25 == 0 or idx + 1 == args.frames:
@@ -667,7 +698,8 @@ def render_bounded_mode(
                     f"[{idx+1}/{args.frames}] t={t_val:.4f} u={u:.3f} novel_phase={novel_phase:.3f}"
                 )
     finally:
-        writer.close()
+        if writer is not None:
+            writer.close()
 
     info = out_dir / "render_info.txt"
     info.write_text(
@@ -677,6 +709,12 @@ def render_bounded_mode(
         f"split={args.split}\n"
         f"frames={args.frames}\n"
         f"fps={args.fps}\n"
+        f"video_codec={args.video_codec}\n"
+        f"video_quality={args.video_quality}\n"
+        f"no_video={args.no_video}\n"
+        f"temporal_mask_threshold={getattr(pipe, 'temporal_mask_threshold', None)}\n"
+        f"temporal_mask_keyframes={getattr(pipe, 'temporal_mask_keyframes', None)}\n"
+        f"temporal_mask_window={getattr(pipe, 'temporal_mask_window', None)}\n"
         f"time_mode={args.time_mode}\n"
         f"time_start={time_start}\n"
         f"time_end={time_end}\n"
@@ -752,8 +790,37 @@ def main():
     parser.add_argument("--orbit_start_deg", type=float, default=0.0)
     parser.add_argument("--orbit_end_deg", type=float, default=360.0)
     parser.add_argument("--save_png", action="store_true", help="Also write individual PNG frames next to the video")
+    parser.add_argument("--no_video", action="store_true", help="Render PNG frames only; skip MP4 encoding")
+    parser.add_argument("--video_codec", type=str, default="libx264")
+    parser.add_argument("--video_quality", type=int, default=8)
+    parser.add_argument("--macro_block_size", type=int, default=16)
+    parser.add_argument(
+        "--temporal_mask_threshold",
+        type=float,
+        default=None,
+        help="Override pipeline temporal active-mask threshold; lower is safer, higher is faster",
+    )
+    parser.add_argument(
+        "--temporal_mask_keyframes",
+        type=int,
+        default=None,
+        help="Enable cached key-frame temporal active masks for inference when >1",
+    )
+    parser.add_argument(
+        "--temporal_mask_window",
+        type=int,
+        default=None,
+        help="Number of neighboring temporal keyframes to union on each side",
+    )
     parser.add_argument("--out_dir", type=str, default=None)
     args = parser.parse_args()
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("render.py requires CUDA because the Gaussian rasterizers are CUDA extensions.")
+    if args.no_video and not args.save_png:
+        # Avoid a costly render loop that produces no output.
+        args.save_png = True
+        print("--no_video was set without --save_png; enabling --save_png automatically.")
 
     repo_root = Path(args.repo_root).resolve()
     model_file = Path(args.model_file).resolve()
@@ -791,6 +858,13 @@ def main():
         raise ValueError("Only 4D Gaussian checkpoints are supported.")
 
     pipe = pp.extract(resolved)
+    if args.temporal_mask_threshold is not None:
+        pipe.temporal_mask_threshold = float(args.temporal_mask_threshold)
+    if args.temporal_mask_keyframes is not None:
+        pipe.temporal_mask_keyframes = int(args.temporal_mask_keyframes)
+    if args.temporal_mask_window is not None:
+        pipe.temporal_mask_window = int(args.temporal_mask_window)
+
     gaussians = GaussianModel(**gaussian_kwargs)
     gaussians.restore(checkpoint_payload["gaussians"], None)
     gaussians.active_sh_degree = gaussians.max_sh_degree

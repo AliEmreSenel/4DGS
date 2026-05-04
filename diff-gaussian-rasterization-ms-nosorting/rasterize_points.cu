@@ -32,8 +32,8 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, 
-torch::Tensor, torch::Tensor,  torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
   const torch::Tensor& background,
   const torch::Tensor& means3D,
@@ -73,18 +73,14 @@ RasterizeGaussiansCUDA(
   auto float_opts = means3D.options().dtype(torch::kFloat32);
   torch::Tensor kernel_times = torch::full({1}, 0.0, float_opts.device(torch::kCPU));
 
-  torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
-  torch::Tensor w_fg = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
-  torch::Tensor Ts = torch::full({H, W}, 0.0, float_opts);
+  torch::Tensor out_color = torch::empty({NUM_CHANNELS, H, W}, float_opts);
+  torch::Tensor w_fg = torch::empty({NUM_CHANNELS, H, W}, float_opts);
+  torch::Tensor Ts = torch::empty({H, W}, float_opts);
   torch::Tensor gaussian_scores = compute_scores ? torch::full({P}, 0.0, float_opts) : torch::empty({0}, float_opts);
   torch::Tensor gaussian_score_max_error = score_error_map.numel() > 0 ? torch::full({P}, 0.0, float_opts) : torch::empty({0}, float_opts);
 
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 
-  torch::Tensor accum_weights_ptr = torch::full({P}, 0, float_opts);
-  torch::Tensor accum_weights_count = torch::full({P}, 0, int_opts);
-  torch::Tensor accum_max_count = torch::full({P}, 0, float_opts);
-  
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
   torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
@@ -135,15 +131,12 @@ RasterizeGaussiansCUDA(
       score_error_map.numel() > 0 ? gaussian_score_max_error.contiguous().data_ptr<float>() : nullptr,
       out_color.contiguous().data<float>(),
 
-      accum_weights_ptr.contiguous().data<float>(),  
-      accum_weights_count.contiguous().data<int>(),  
-      accum_max_count.contiguous().data<float>(), 
       kernel_times.contiguous().data<float>(), 
       radii.contiguous().data<int>(),
       debug);
   }
 
-  return std::make_tuple(rendered, out_color, accum_weights_ptr, accum_weights_count, accum_max_count, radii, kernel_times, geomBuffer,
+  return std::make_tuple(rendered, out_color, radii, kernel_times, geomBuffer,
   binningBuffer, imgBuffer, w_fg, Ts, gaussian_scores, gaussian_score_max_error);
   
 }

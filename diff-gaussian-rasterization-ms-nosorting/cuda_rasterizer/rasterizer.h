@@ -58,9 +58,6 @@ namespace CudaRasterizer
 			float* gaussian_score_max_error,
 			float* out_color,
 
-			float* accum_weights_ptr,
-			int* accum_weights_count,
-			float* accum_max_count,
 			float* kernel_times,
 			int* radii = nullptr,
 			bool debug = false);

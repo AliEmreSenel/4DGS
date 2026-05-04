@@ -87,6 +87,10 @@ def _identity_quat(n, device, dtype):
 
 
 def _normalize_quat(quat, eps=1e-8):
+    # Optimizer explosions can briefly introduce non-finite rotations.  Keep
+    # downstream graph losses from crashing; invalid quaternions are converted
+    # to the identity-like finite vector and then normalized.
+    quat = torch.nan_to_num(quat, nan=0.0, posinf=0.0, neginf=0.0)
     return quat / quat.norm(dim=-1, keepdim=True).clamp_min(eps)
 
 
@@ -159,8 +163,36 @@ def _covariance_quat_from_cov6(cov6, reference_quat, eigengap_eps=1e-4):
     covariance is too close to isotropic or has an ambiguous adjacent eigengap.
     """
     reference_quat = _normalize_quat(reference_quat)
-    cov = _cov6_to_matrix(cov6)
-    evals, evecs = torch.linalg.eigh(cov)
+
+    # ``torch.linalg.eigh`` can fail to converge when a covariance is slightly
+    # non-symmetric, non-finite, or numerically close to singular.  That can
+    # happen during early/unstable USplat iterations even though those same
+    # Gaussians should fall back to their learned/base rotations.  Sanitize and
+    # regularize the matrices before eigendecomposition, and retain a robust
+    # all-reference fallback if the CUDA solver still rejects a batch.
+    raw_cov = _cov6_to_matrix(cov6)
+    raw_finite = torch.isfinite(raw_cov).all(dim=(-1, -2))
+    cov = torch.nan_to_num(raw_cov, nan=0.0, posinf=0.0, neginf=0.0)
+    cov = 0.5 * (cov + cov.transpose(-1, -2))
+
+    eye = torch.eye(3, device=cov.device, dtype=cov.dtype).expand(cov.shape[:-2] + (3, 3))
+    abs_cov = cov.abs()
+    diag = cov.diagonal(dim1=-2, dim2=-1)
+    diag_abs = abs_cov.diagonal(dim1=-2, dim2=-1)
+    off_diag_sum = abs_cov.sum(dim=-1) - diag_abs
+    min_gershgorin = (diag - off_diag_sum).min(dim=-1).values
+    scale = diag_abs.mean(dim=-1).clamp_min(1e-8)
+    jitter = scale * max(float(eigengap_eps), 1e-6)
+    shift = (-min_gershgorin).clamp_min(0.0) + jitter
+    cov = cov + shift[..., None, None] * eye
+
+    try:
+        evals, evecs = torch.linalg.eigh(cov)
+    except RuntimeError:
+        # Degenerate chunks are safest as reference rotations.  The zero-valued
+        # anchor preserves autograd connectivity without routing unstable
+        # eigensolver gradients into ill-conditioned covariance parameters.
+        return reference_quat + cov6.sum(dim=-1, keepdim=True) * 0.0
     order = evals.argsort(dim=-1, descending=True)
     sorted_evals = torch.gather(evals, dim=-1, index=order)
 
@@ -183,7 +215,7 @@ def _covariance_quat_from_cov6(cov6, reference_quat, eigengap_eps=1e-4):
         (sorted_evals[..., 0] - sorted_evals[..., 2]).abs()
         / sorted_evals[..., 0].abs().clamp_min(1e-12)
     )
-    finite = torch.isfinite(sorted_evals).all(dim=-1) & torch.isfinite(quat).all(dim=-1)
+    finite = raw_finite & torch.isfinite(sorted_evals).all(dim=-1) & torch.isfinite(quat).all(dim=-1)
     ambiguous = (adjacent_gap.min(dim=-1).values < float(eigengap_eps)) | (
         anisotropy < float(eigengap_eps)
     ) | (~finite)

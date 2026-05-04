@@ -332,8 +332,9 @@ int CudaRasterizer::Rasterizer::forward(
 		tile_grid)
 	CHECK_CUDA(, debug)
 
-	// int bit = getHigherMsb(tile_grid.x * tile_grid.y);
-	int bit = 32;
+	// Only the high tile-id bits plus the low 32 depth bits need sorting.
+	// Sorting all 64 bits wastes radix passes at high resolutions.
+	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
