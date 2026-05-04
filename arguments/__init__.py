@@ -123,13 +123,16 @@ class OptimizationParams(ParamGroup):
         self.lambda_motion = 0.0
 
         self.lambda_depth = 0.0
-        self.mobilegs_opacity_phi_lr = 1e-3
+        self.lambda_rdr = 1.0
+        # Keep the MobileGS opacity/phi MLP inactive unless sort-free rendering is requested.
+        self.mobilegs_opacity_phi_lr = 0.0
         # Spatio-temporal pruning parameters
         self.enable_spatio_temporal_pruning = False
         self.spatio_temporal_pruning_ratio = 0.80
         # Safety floor for iterative ST pruning. A value of 1 preserves
         # previous behavior while preventing accidental empty scenes.
-        self.spatio_temporal_pruning_min_points = 1
+        self.spatio_temporal_pruning_min_points = 1000
+        self.spatio_temporal_pruning_max_total_ratio = 0.50
         self.spatio_temporal_pruning_random = False
         self.spatio_temporal_pruning_from_iter = -1
         self.spatio_temporal_pruning_until_iter = -1
@@ -153,12 +156,14 @@ class OptimizationParams(ParamGroup):
         self.usplat_motion_window = -1
         # Full-sequence USplat can be memory-heavy on low-VRAM GPUs. These
         # defaults favor robustness over throughput; increase them on larger GPUs.
-        self.usplat_nonkey_loss_chunk_size = 1000000000000000000000
-        self.usplat_quat_chunk_size = 819200000000000000000
+        self.usplat_nonkey_loss_chunk_size = 32768
+        self.usplat_quat_chunk_size = 65536
         # Relative eigengap threshold for covariance-derived quaternions.
         # If a covariance is nearly isotropic, its eigenvectors are ambiguous;
         # USplat then falls back to the learned/base Gaussian rotation.
         self.usplat_cov_eigengap_eps = 1e-4
+        self.record_training_diagnostics = True
+        self.diagnostics_short_lifespan_threshold = 0.25
 
         super().__init__(parser, "Optimization Parameters")
 

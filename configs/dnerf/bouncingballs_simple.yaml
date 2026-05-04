@@ -1,6 +1,6 @@
 gaussian_dim: 4
 time_duration: [0.0, 1.0]
-num_pts: 100000
+num_pts: 25000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: False
@@ -23,7 +23,7 @@ ModelParams:
   dataloader: False
 
 PipelineParams:
-  use_usplat: True
+  use_usplat: False
   random_dropout_prob: 0
   sort_free_render: False
   convert_SHs_python: False

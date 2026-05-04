@@ -19,7 +19,7 @@ maximum for Eq. (4).
 
 Depth-aware anisotropic 3D uncertainty (Eq. 8):
     U_{i,t} = R_wc * diag(rx*u, ry*u, rz*u) * R_wc^T
-with default [rx, ry, rz] = [1, 1, 0.01].
+with default [rx, ry, rz] = [1, 1, 100].
 """
 
 
@@ -209,7 +209,7 @@ def compute_uncertainty_all_frames(
 def build_uncertainty_3d_matrices(
     u_scalar: Tensor,
     w2cs: Tensor,
-    r_scale: Tuple[float, float, float] = (1.0, 1.0, 0.01),
+    r_scale: Tuple[float, float, float] = (1.0, 1.0, 100.0),
 ) -> Tensor:
     """Build anisotropic 3D uncertainty matrices (Eq. 8 in paper)."""
     G, T = u_scalar.shape
@@ -227,7 +227,7 @@ def mahalanobis_sq(
     delta: Tensor,
     u_scalar: Tensor,
     R_wc: Tensor,
-    r_scale: Tuple[float, float, float] = (1.0, 1.0, 0.01),
+    r_scale: Tuple[float, float, float] = (1.0, 1.0, 100.0),
 ) -> Tensor:
     """Compute Mahalanobis squared distance ||delta||^2_{U^{-1}}."""
     rx, ry, rz = r_scale

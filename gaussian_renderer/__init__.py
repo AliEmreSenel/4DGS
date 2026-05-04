@@ -174,7 +174,7 @@ def render(
             sh_degree_t=pc.active_sh_degree_t,
             campos=viewpoint_camera.camera_center,
             timestamp=viewpoint_camera.timestamp,
-            time_duration=pc.time_duration[1]-pc.time_duration[0],
+            time_duration=float(pc.time_duration[1]) - float(pc.time_duration[0]),
             rot_4d=pc.rot_4d,
             gaussian_dim=4,
             force_sh_3d=pc.force_sh_3d,
@@ -286,13 +286,16 @@ def render(
 
     dropout_prob = float(getattr(pipe, "random_dropout_prob", 0.0))
     dropout_mask = None
+    dropout_total = int(means3D.shape[0])
+    dropout_kept = None
     if apply_random_dropout and dropout_prob > 0.0 and not (return_gaussian_scores or return_gaussian_scores_sq):
-        dropout_prob = min(dropout_prob, 1.0)
+        dropout_prob = min(max(dropout_prob, 0.0), 1.0)
         dropout_mask = torch.rand(
             (means3D.shape[0],), device=means3D.device, dtype=torch.float32
         ) > dropout_prob
         if dropout_mask.numel() > 0 and not dropout_mask.any():
             dropout_mask[torch.randint(dropout_mask.shape[0], (1,), device=dropout_mask.device)] = True
+        dropout_kept = int(dropout_mask.sum().detach().item())
     
     mask = None
     # Temporal active filtering. The threshold is configurable, and inference can
@@ -461,6 +464,10 @@ def render(
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
+    dropout_survival_rate = None
+    if dropout_kept is not None and dropout_total > 0:
+        dropout_survival_rate = float(dropout_kept) / float(dropout_total)
+
     return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii_all > 0,
@@ -469,4 +476,7 @@ def render(
             "alpha": alpha,
             "flow": flow,
             "gaussian_scores": gaussian_scores if (return_gaussian_scores or return_gaussian_scores_sq) else None,
-            "gaussian_score_max_error": gaussian_score_max_error}
+            "gaussian_score_max_error": gaussian_score_max_error,
+            "dropout_kept": dropout_kept,
+            "dropout_total": dropout_total if dropout_kept is not None else None,
+            "dropout_survival_rate": dropout_survival_rate}

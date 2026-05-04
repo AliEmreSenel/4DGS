@@ -10,6 +10,8 @@
 #
 
 import os
+import json
+import math
 import random
 import torch
 from torch import nn
@@ -45,6 +47,108 @@ except ImportError:
 def save_gaussian_args(model_path, gaussian_kwargs):
     with open(os.path.join(model_path, "gaussian_args"), "w") as f:
         f.write(str(Namespace(**gaussian_kwargs)))
+
+
+
+def _to_float(value):
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "item"):
+        return float(value.item())
+    return float(value)
+
+
+def _safe_percentiles(tensor, percentiles=(0, 1, 5, 25, 50, 75, 95, 99, 100)):
+    if tensor is None:
+        return {}
+    values = tensor.detach().float().reshape(-1)
+    values = values[torch.isfinite(values)]
+    if values.numel() == 0:
+        return {}
+    qs = torch.tensor([p / 100.0 for p in percentiles], device=values.device, dtype=values.dtype)
+    out = torch.quantile(values, qs)
+    return {f"p{p}": _to_float(v) for p, v in zip(percentiles, out)}
+
+
+def _safe_mean(value):
+    if value is None or value.numel() == 0:
+        return None
+    value = value.detach().float()
+    value = value[torch.isfinite(value)]
+    return None if value.numel() == 0 else float(value.mean().item())
+
+
+@torch.no_grad()
+def compute_4dgs_1k_diagnostics(gaussians, scene, pipe, background, render_fn, short_lifespan_threshold=0.25):
+    diagnostics = {}
+    if getattr(gaussians, "gaussian_dim", 4) != 4 or gaussians.get_xyz.shape[0] == 0:
+        return diagnostics
+
+    G = int(gaussians.get_xyz.shape[0])
+    sigma_t = gaussians.get_cov_t(scaling_modifier=1.0).detach().reshape(-1)
+    diagnostics["sigma_t_percentiles"] = _safe_percentiles(sigma_t)
+    diagnostics["percent_short_lifespan_gaussians"] = float((sigma_t < float(short_lifespan_threshold)).float().mean().item()) if sigma_t.numel() else None
+    diagnostics["short_lifespan_threshold"] = float(short_lifespan_threshold)
+
+    training_cameras = scene.getTrainCameras()
+    masks_by_timestamp = {}
+    active_ratios = []
+    for _gt, cam in training_cameras:
+        render_pkg = render_fn(cam, gaussians, pipe, background)
+        radii = render_pkg.get("radii")
+        if radii is None or radii.numel() == 0:
+            mask = torch.zeros(G, dtype=torch.bool, device=gaussians.get_xyz.device)
+        else:
+            mask = (radii.reshape(-1) > 0).to(device=gaussians.get_xyz.device)
+            if mask.numel() != G:
+                fixed = torch.zeros(G, dtype=torch.bool, device=gaussians.get_xyz.device)
+                fixed[: min(G, mask.numel())] = mask[: min(G, mask.numel())]
+                mask = fixed
+        key = float(cam.timestamp)
+        masks_by_timestamp[key] = mask if key not in masks_by_timestamp else (masks_by_timestamp[key] | mask)
+        active_ratios.append(mask.float().mean())
+
+    if active_ratios:
+        ar = torch.stack(active_ratios)
+        diagnostics["active_ratio_mean"] = float(ar.mean().item())
+        diagnostics["active_ratio_percentiles"] = _safe_percentiles(ar)
+
+    ious = []
+    sorted_ts = sorted(masks_by_timestamp)
+    for a, b in zip(sorted_ts[:-1], sorted_ts[1:]):
+        ma = masks_by_timestamp[a]
+        mb = masks_by_timestamp[b]
+        union = (ma | mb).sum().float()
+        if union.item() > 0:
+            ious.append(((ma & mb).sum().float() / union).detach())
+    if ious:
+        iou = torch.stack(ious)
+        diagnostics["activation_iou_adjacent_mean"] = float(iou.mean().item())
+        diagnostics["activation_iou_adjacent_percentiles"] = _safe_percentiles(iou)
+
+    try:
+        prune_scores = gaussians.compute_spatio_temporal_variation_score(scene, pipe, background, render_fn)
+        diagnostics["prune_score_percentiles"] = _safe_percentiles(prune_scores)
+    except Exception as exc:
+        diagnostics["prune_score_error"] = str(exc)
+    return diagnostics
+
+
+def _write_training_diagnostics(model_path, diagnostics):
+    path = os.path.join(model_path, "training_diagnostics.json")
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(diagnostics, f, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
+
+
+def _merge_graph_stats(base, graph, u_scalar=None):
+    stats = dict(getattr(graph, "stats", {}) or {})
+    if u_scalar is not None:
+        stats["uncertainty_percentiles"] = _safe_percentiles(u_scalar)
+    base.update(stats)
 
 
 def _indexed_xyz(gaussians, indices=None):
@@ -384,12 +488,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         time_duration=time_duration,
     )
     save_gaussian_args(scene.model_path, gaussian_kwargs)
-    scene.checkpoint_run_config = build_run_config(run_config_args or Namespace(), gaussian_kwargs)
     scene.checkpoint_include_mobilegs = bool(getattr(pipe, "sort_free_render", False))
 
-    gaussians.training_setup(opt)
-
     if getattr(pipe, "sort_free_render", False):
+        if getattr(pipe, "env_map_res", 0):
+            raise ValueError(
+                "env_map_res is not supported with sort_free_render: the no-sort "
+                "rasterizer does not produce the sorted alpha needed for env-map compositing."
+            )
         if getattr(opt, "lambda_depth", 0.0) > 0.0:
             raise ValueError(
                 "lambda_depth is not supported with sort_free_render: the MobileGS "
@@ -400,6 +506,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 "lambda_opa_mask is not supported with sort_free_render: the MobileGS "
                 "sort-free alpha output is a detached transmittance proxy."
             )
+        if float(getattr(opt, "mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
+            opt.mobilegs_opacity_phi_lr = 1e-3
+    else:
+        # Avoid allocating/training the MobileGS opacity/phi MLP in ordinary sorted runs.
+        opt.mobilegs_opacity_phi_lr = 0.0
+
+    gaussians.training_setup(opt)
     
     # USplat4D setup
     graph = None
@@ -409,6 +522,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     usplat_timestamps = None
     u_scalar = None
     usplat_state_dirty = False
+    usplat_graph_rebuild_count = 0
+    usplat_diag_stats = {}
+    dropout_stats_accum = {"count": 0.0}
+    st_prune_score_percentiles = {}
+    initial_gaussian_count_for_st_prune = None
     
     if checkpoint:
         checkpoint_payload = load_checkpoint(checkpoint, map_location="cuda")
@@ -467,13 +585,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         final_prune_ratio = final_prune_ratio / 100.0
     final_prune_ratio = max(0.0, min(final_prune_ratio, 1.0))
 
+    train_len = len(training_dataset)
+    if train_len <= 0:
+        raise RuntimeError("Training dataset is empty; cannot optimize.")
+    requested_batch_size = max(1, int(batch_size))
+    effective_batch_size = min(requested_batch_size, train_len)
+    if effective_batch_size < requested_batch_size:
+        print(
+            f"[WARN] Requested batch_size={requested_batch_size} but the training split has "
+            f"only {train_len} item(s). Using batch_size={effective_batch_size} and drop_last=False."
+        )
     num_workers = 12 if dataset.dataloader else 0
     dataloader_kwargs = {
-        "batch_size": batch_size,
+        "batch_size": effective_batch_size,
         "shuffle": True,
         "num_workers": num_workers,
         "collate_fn": lambda x: x,
-        "drop_last": True,
+        "drop_last": False,
         "pin_memory": dataset.dataloader,
     }
     if num_workers > 0:
@@ -484,6 +612,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iteration = first_iter
     while iteration < opt.iterations + 1:
         for batch_data in training_dataloader:
+            current_batch_size = len(batch_data)
+            if current_batch_size <= 0:
+                continue
             iteration += 1
             if iteration > opt.iterations:
                 break
@@ -527,6 +658,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     iteration=iteration,
                 )
                 usplat_state_dirty = False
+                usplat_graph_rebuild_count += 1
+                _merge_graph_stats(usplat_diag_stats, graph, u_scalar)
 
             batch_Ll1 = torch.tensor(0.0, device="cuda")
             batch_Lssim = torch.tensor(0.0, device="cuda")
@@ -535,6 +668,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             batch_Lopa_mask = torch.tensor(0.0, device="cuda")
             batch_Lrigid = torch.tensor(0.0, device="cuda")
             batch_Lmotion = torch.tensor(0.0, device="cuda")
+            batch_Lrdr = torch.tensor(0.0, device="cuda")
             batch_psnr = torch.tensor(0.0, device="cuda")
             reg_loss = torch.tensor(0.0, device="cuda")
             Ldepth = torch.tensor(0.0, device="cuda")
@@ -545,17 +679,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Lkey = torch.tensor(0.0, device=background.device)
             Lnon_key = torch.tensor(0.0, device=background.device)
 
-            for batch_idx in range(batch_size):
+            for batch_idx in range(current_batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
                 gt_image = gt_image.to(background.device, non_blocking=True)
                 viewpoint_cam = viewpoint_cam.cuda(non_blocking=True, copy=False)
 
+                # Full-model render drives the photometric loss and density-control
+                # statistics. DropoutGS-style RDR, when enabled, is added below as a
+                # consistency loss from a dropout submodel to this full render.
                 render_pkg = render(
                     viewpoint_cam,
                     gaussians,
                     pipe,
                     background,
-                    apply_random_dropout=True,
+                    apply_random_dropout=False,
                 )
                 image, viewspace_point_tensor, visibility_filter, radii = (
                     render_pkg["render"],
@@ -570,6 +707,37 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 Ll1_i = l1_loss(image, gt_image)
                 Lssim_i = 1.0 - ssim(image, gt_image)
                 loss = (1.0 - opt.lambda_dssim) * Ll1_i + opt.lambda_dssim * Lssim_i
+
+                # DropoutGS RDR: train a random low-complexity submodel to match
+                # the full model render, rather than using the ground truth as the
+                # dropout target. This keeps gradients local to neighbors of dropped
+                # Gaussians and records the dropout-vs-full agreement.
+                Lrdr_i = torch.tensor(0.0, device=background.device)
+                dropout_prob = float(getattr(pipe, "random_dropout_prob", 0.0) or 0.0)
+                lambda_rdr = float(getattr(opt, "lambda_rdr", 1.0) or 0.0)
+                if dropout_prob > 0.0 and lambda_rdr > 0.0:
+                    dropout_pkg = render(
+                        viewpoint_cam,
+                        gaussians,
+                        pipe,
+                        background,
+                        apply_random_dropout=True,
+                    )
+                    dropout_image = dropout_pkg["render"]
+                    full_teacher = image.detach()
+                    Lrdr_l1 = l1_loss(dropout_image, full_teacher)
+                    Lrdr_ssim = 1.0 - ssim(dropout_image, full_teacher)
+                    Lrdr_i = (1.0 - opt.lambda_dssim) * Lrdr_l1 + opt.lambda_dssim * Lrdr_ssim
+                    loss = loss + lambda_rdr * Lrdr_i
+                    batch_Lrdr += Lrdr_i.detach()
+                    with torch.no_grad():
+                        dropout_stats_accum["count"] += 1.0
+                        dropout_stats_accum["rdr_loss_sum"] = dropout_stats_accum.get("rdr_loss_sum", 0.0) + float(Lrdr_i.detach().item())
+                        dropout_stats_accum["full_vs_dropout_psnr_sum"] = dropout_stats_accum.get("full_vs_dropout_psnr_sum", 0.0) + float(psnr(dropout_image.detach(), full_teacher).mean().item())
+                        dropout_stats_accum["full_vs_dropout_ssim_sum"] = dropout_stats_accum.get("full_vs_dropout_ssim_sum", 0.0) + float(ssim(dropout_image.detach(), full_teacher).mean().item())
+                        survival = dropout_pkg.get("dropout_survival_rate")
+                        if survival is not None:
+                            dropout_stats_accum["survival_rate_sum"] = dropout_stats_accum.get("survival_rate_sum", 0.0) + float(survival)
 
                 ###### opa mask Loss ######
                 if opt.lambda_opa_mask > 0:
@@ -700,7 +868,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                                 nonkey_nbrs_global=graph.nonkey_nbrs[nk_start:nk_end],
                             )
                             chunk_weight = float(nk_count) / float(N_n)
-                            (opt.lambda_non_key * chunk_weight * Lnon_key_chunk / batch_size).backward()
+                            (opt.lambda_non_key * chunk_weight * Lnon_key_chunk / current_batch_size).backward()
                             Lnon_key_accum = Lnon_key_accum + Lnon_key_chunk.detach() * nk_count
 
                             del (
@@ -731,7 +899,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             key_nbrs_local=graph.key_nbrs,
                             key_nbr_weights=graph.key_nbr_weights,
                         )
-                        (opt.lambda_key * Lkey / batch_size).backward()
+                        (opt.lambda_key * Lkey / current_batch_size).backward()
                         usplat_loss_for_log = usplat_loss_for_log + opt.lambda_key * Lkey.detach()
                     else:
                         Lkey = torch.tensor(0.0, device=background.device)
@@ -742,8 +910,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_Lssim += Lssim_i.detach()
                 batch_psnr += psnr(image, gt_image).mean().detach()
 
-                loss = loss / batch_size
-                batch_loss += loss.detach() + usplat_loss_for_log / batch_size
+                loss = loss / current_batch_size
+                batch_loss += loss.detach() + usplat_loss_for_log / current_batch_size
                 loss.backward()
                 if should_densify:
                     batch_point_grad.append(
@@ -806,19 +974,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if reg_loss.requires_grad:
                     reg_loss.backward()
 
-            Ll1 = batch_Ll1 / batch_size
-            Lssim = batch_Lssim / batch_size
+            Ll1 = batch_Ll1 / current_batch_size
+            Lssim = batch_Lssim / current_batch_size
             loss = batch_loss
             if opt.lambda_depth > 0:
-                Ldepth = batch_Ldepth / batch_size
+                Ldepth = batch_Ldepth / current_batch_size
             if opt.lambda_opa_mask > 0:
-                Lopa_mask = batch_Lopa_mask / batch_size
+                Lopa_mask = batch_Lopa_mask / current_batch_size
             if opt.lambda_rigid > 0:
                 Lrigid = batch_Lrigid
             if opt.lambda_motion > 0:
                 Lmotion = batch_Lmotion
+            Lrdr = batch_Lrdr / current_batch_size
             if should_densify:
-                if batch_size > 1:
+                if current_batch_size > 1:
                     visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
                     visibility_filter = visibility_count > 0
                     radii = torch.stack(batch_radii, 1).max(1)[0]
@@ -826,7 +995,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     batch_viewspace_point_grad = torch.stack(batch_point_grad, 1).sum(1)
                     batch_viewspace_point_grad[visibility_filter] = (
                         batch_viewspace_point_grad[visibility_filter]
-                        * batch_size
+                        * current_batch_size
                         / visibility_count[visibility_filter]
                     )
                     batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
@@ -843,7 +1012,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         batch_t_grad = t_grad[:, 0].detach().clone()
                         batch_t_grad[visibility_filter] = (
                             batch_t_grad[visibility_filter]
-                            * batch_size
+                            * current_batch_size
                             / visibility_count[visibility_filter]
                         )
                         batch_t_grad = batch_t_grad.unsqueeze(1)
@@ -855,6 +1024,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         batch_t_grad = t_grad.detach().clone()
 
             loss_dict = {"Ll1": Ll1, "Lssim": Lssim}
+            if float(getattr(opt, "lambda_rdr", 0.0) or 0.0) > 0.0 and float(getattr(pipe, "random_dropout_prob", 0.0) or 0.0) > 0.0:
+                loss_dict["Lrdr"] = Lrdr
             if opt.lambda_depth > 0:
                 loss_dict["Ldepth"] = Ldepth
             if opt.lambda_opa_mask > 0:
@@ -875,6 +1046,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "lambda_depth": Ldepth,
                     "lambda_rigid": Lrigid,
                     "lambda_motion": Lmotion,
+                    "lambda_rdr": Lrdr,
                 }
 
                 for lambda_name in lambda_all:
@@ -888,7 +1060,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         )
 
                 if iteration % 10 == 0:
-                    psnr_for_log = (batch_psnr / batch_size).item()
+                    psnr_for_log = (batch_psnr / current_batch_size).item()
                     postfix = {
                         "Loss": f"{ema_loss_for_log.item():.{7}f}",
                         "PSNR": f"{psnr_for_log:.{2}f}",
@@ -941,7 +1113,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.max_radii2D[visibility_filter],
                         radii[visibility_filter],
                     )
-                    if batch_size == 1:
+                    if current_batch_size == 1:
                         gaussians.add_densification_stats(
                             viewspace_point_tensor,
                             visibility_filter,
@@ -1051,8 +1223,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             scene, pipe, background, render
                         )
                     )
+                    st_prune_score_percentiles = _safe_percentiles(spatio_temporal_scores)
+                    if initial_gaussian_count_for_st_prune is None:
+                        initial_gaussian_count_for_st_prune = int(gaussians.get_xyz.shape[0])
+                    max_total_ratio = max(0.0, min(1.0, float(getattr(opt, "spatio_temporal_pruning_max_total_ratio", 0.50))))
+                    min_from_total_cap = int(math.ceil(float(initial_gaussian_count_for_st_prune) * (1.0 - max_total_ratio)))
+                    min_remaining_points = max(
+                        int(getattr(opt, "spatio_temporal_pruning_min_points", 1)),
+                        min_from_total_cap,
+                    )
                     print(
-                        f"[ITER {iteration}] Pruning Gaussians with ratio {opt.spatio_temporal_pruning_ratio}"
+                        f"[ITER {iteration}] Pruning Gaussians with ratio {opt.spatio_temporal_pruning_ratio} "
+                        f"and min_remaining_points={min_remaining_points}"
                     )
                     gaussians.prune_with_spatio_temporal_score(
                         spatio_temporal_scores,
@@ -1061,9 +1243,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         probabilistic=getattr(
                             opt, "spatio_temporal_pruning_random", False
                         ),
-                        min_remaining_points=getattr(
-                            opt, "spatio_temporal_pruning_min_points", 1
-                        ),
+                        min_remaining_points=min_remaining_points,
                     )
                     if use_usplat and iteration >= usplat_start_iter:
                         graph = None
@@ -1083,8 +1263,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             scene, pipe, background, render
                         )
                     )
+                    st_prune_score_percentiles = _safe_percentiles(final_spatio_temporal_scores)
+                    min_remaining_points = int(getattr(opt, "spatio_temporal_pruning_min_points", 1))
                     print(
-                        f"[ITER {iteration}] Final ST-pruning Gaussians with ratio {final_prune_ratio}"
+                        f"[ITER {iteration}] Final ST-pruning Gaussians with ratio {final_prune_ratio} "
+                        f"and min_remaining_points={min_remaining_points}"
                     )
                     gaussians.prune_with_spatio_temporal_score(
                         final_spatio_temporal_scores,
@@ -1093,9 +1276,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         probabilistic=getattr(
                             opt, "spatio_temporal_pruning_random", False
                         ),
-                        min_remaining_points=getattr(
-                            opt, "spatio_temporal_pruning_min_points", 1
-                        ),
+                        min_remaining_points=min_remaining_points,
                     )
                     if use_usplat and iteration >= usplat_start_iter:
                         graph = None
@@ -1124,6 +1305,43 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         iteration=iteration,
                     )
                     usplat_state_dirty = False
+                    usplat_graph_rebuild_count += 1
+                    _merge_graph_stats(usplat_diag_stats, graph, u_scalar)
+
+    diagnostics = {
+        "final_gaussian_count": int(gaussians.get_xyz.shape[0]),
+        "dropout": {},
+        "usplat": dict(usplat_diag_stats),
+        "pruning": {},
+    }
+    dropout_count = float(dropout_stats_accum.get("count", 0.0))
+    if dropout_count > 0:
+        diagnostics["dropout"] = {
+            "samples": dropout_count,
+            "rdr_loss_mean": dropout_stats_accum.get("rdr_loss_sum", 0.0) / dropout_count,
+            "full_vs_dropout_psnr_mean": dropout_stats_accum.get("full_vs_dropout_psnr_sum", 0.0) / dropout_count,
+            "full_vs_dropout_ssim_mean": dropout_stats_accum.get("full_vs_dropout_ssim_sum", 0.0) / dropout_count,
+        }
+        if "survival_rate_sum" in dropout_stats_accum:
+            diagnostics["dropout"]["survival_rate_mean"] = dropout_stats_accum["survival_rate_sum"] / dropout_count
+    if use_usplat:
+        diagnostics["usplat"]["graph_rebuild_count"] = int(usplat_graph_rebuild_count)
+    if st_prune_score_percentiles:
+        diagnostics["pruning"]["last_prune_score_percentiles"] = st_prune_score_percentiles
+
+    if bool(getattr(opt, "record_training_diagnostics", True)):
+        try:
+            diagnostics["four_dgs_1k"] = compute_4dgs_1k_diagnostics(
+                gaussians,
+                scene,
+                pipe,
+                background,
+                render,
+                short_lifespan_threshold=float(getattr(opt, "diagnostics_short_lifespan_threshold", 0.25)),
+            )
+        except Exception as exc:
+            diagnostics["four_dgs_1k"] = {"error": str(exc)}
+        _write_training_diagnostics(scene.model_path, diagnostics)
 
 
 def prepare_output_and_logger(args):
@@ -1187,6 +1405,12 @@ def training_report(
                 tb_writer.add_scalar(
                     "train_loss_patches/depth_loss",
                     loss_dict["Ldepth"].item(),
+                    iteration,
+                )
+            if "Lrdr" in loss_dict:
+                tb_writer.add_scalar(
+                    "train_loss_patches/rdr_loss",
+                    loss_dict["Lrdr"].item(),
                     iteration,
                 )
             if "Ltv" in loss_dict:

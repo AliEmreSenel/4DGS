@@ -84,10 +84,11 @@ class ScheduleOptions:
     one_shot_densify_until_iter: int = 5000
     one_shot_densification_interval: int = 100
 
-    interleaved_prune_from_iter: int = 500
+    interleaved_prune_from_iter: int = 2000
     interleaved_prune_until_iter: int = 7500
-    interleaved_prune_ratio: float = 0.50
-    interleaved_prune_interval: int = 500
+    interleaved_prune_ratio: float = 0.10
+    interleaved_prune_interval: int = 2000
+    interleaved_prune_min_points: int = 1000
     interleaved_densify_from_iter: int = 500
     interleaved_densify_until_iter: int = 7500
     interleaved_densification_interval: int = 100
@@ -159,12 +160,13 @@ def parse_args() -> argparse.Namespace:
         metavar="KEY=VALUE",
         help="Extra flat override applied to every run.",
     )
-    parser.add_argument("--axes", default="isotropy,appearance,sorting,pruning,usplat")
+    parser.add_argument("--axes", default="isotropy,appearance", help="Comma-separated ablation axes. The default is intentionally small and safe; add sorting,pruning,usplat explicitly for larger sweeps.")
     parser.add_argument("--isotropy-options", default="anisotropic,isotropic")
     parser.add_argument("--appearance-options", default="rgb,sh3")
-    parser.add_argument("--sorting-options", default="sort,sort_free")
-    parser.add_argument("--pruning-options", default="no_pruning,densify_then_prune_once,interleaved_prune_densify")
-    parser.add_argument("--usplat-options", default="no_usplat,use_usplat")
+    parser.add_argument("--sorting-options", default="sort")
+    parser.add_argument("--pruning-options", default="no_pruning,densify_then_prune_once")
+    parser.add_argument("--usplat-options", default="no_usplat")
+    parser.add_argument("--include-invalid-combinations", action="store_true", help="Do not filter known incompatible ablation combinations.")
 
     parser.add_argument("--one-shot-prune-step", type=int, default=5001)
     parser.add_argument("--one-shot-prune-ratio", type=float, default=0.85)
@@ -172,10 +174,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--one-shot-densify-until-iter", type=int, default=5000)
     parser.add_argument("--one-shot-densification-interval", type=int, default=100)
 
-    parser.add_argument("--interleaved-prune-from-iter", type=int, default=500)
+    parser.add_argument("--interleaved-prune-from-iter", type=int, default=2000)
     parser.add_argument("--interleaved-prune-until-iter", type=int, default=7500)
-    parser.add_argument("--interleaved-prune-ratio", type=float, default=0.50)
-    parser.add_argument("--interleaved-prune-interval", type=int, default=500)
+    parser.add_argument("--interleaved-prune-ratio", type=float, default=0.10)
+    parser.add_argument("--interleaved-prune-interval", type=int, default=2000)
+    parser.add_argument("--interleaved-prune-min-points", type=int, default=1000)
     parser.add_argument("--interleaved-densify-from-iter", type=int, default=500)
     parser.add_argument("--interleaved-densify-until-iter", type=int, default=7500)
     parser.add_argument("--interleaved-densification-interval", type=int, default=100)
@@ -187,7 +190,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vram-poll-interval", type=float, default=1.0)
     parser.add_argument("--summary-filename", default="ablation_metrics.csv")
     parser.add_argument("--summary-jsonl-filename", default="ablation_metrics.jsonl")
-    parser.add_argument("--retry-failed-existing", action="store_true", help="Retry runs whose run_metrics.json says failed.")
+    parser.add_argument("--retry-failed-existing", action=argparse.BooleanOptionalAction, default=True, help="Retry runs whose run_metrics.json says failed. Use --no-retry-failed-existing to keep old skip-failed behavior.")
 
     # Slurm controls
     parser.add_argument("--submit-slurm", action="store_true", help="Submit one main Slurm job that will launch srun workers.")
@@ -309,6 +312,8 @@ def build_pruning_registry(total_iterations: int, options: ScheduleOptions) -> D
             "spatio_temporal_pruning_from_iter": interleaved_prune_from_iter,
             "spatio_temporal_pruning_until_iter": interleaved_prune_until_iter,
             "spatio_temporal_pruning_interval": options.interleaved_prune_interval,
+            "spatio_temporal_pruning_min_points": options.interleaved_prune_min_points,
+            "spatio_temporal_pruning_max_total_ratio": 0.50,
             "densify_from_iter": interleaved_densify_from_iter,
             "densify_until_iter": interleaved_densify_until_iter,
             "densification_interval": options.interleaved_densification_interval,
@@ -364,6 +369,46 @@ def build_cartesian_variants(
     return variants
 
 
+def invalid_variant_reason(flat_cfg: Mapping[str, Any], variant: AblationVariant) -> str | None:
+    merged = dict(flat_cfg)
+    merged.update(variant.overrides)
+    if bool(merged.get("sort_free_render", False)) and int(merged.get("env_map_res", 0) or 0) > 0:
+        return "sort_free_render does not support env_map_res"
+    if bool(merged.get("sort_free_render", False)) and float(merged.get("lambda_depth", 0.0) or 0.0) > 0.0:
+        return "sort_free_render does not return depth for lambda_depth"
+    if bool(merged.get("sort_free_render", False)) and float(merged.get("lambda_opa_mask", 0.0) or 0.0) > 0.0:
+        return "sort_free_render alpha proxy is not compatible with lambda_opa_mask"
+    return None
+
+
+def filter_valid_variants(flat_cfg: Mapping[str, Any], variants: Sequence[AblationVariant], include_invalid: bool) -> List[AblationVariant]:
+    if include_invalid:
+        return list(variants)
+    valid: List[AblationVariant] = []
+    skipped: List[tuple[str, str]] = []
+    for variant in variants:
+        reason = invalid_variant_reason(flat_cfg, variant)
+        if reason is None:
+            valid.append(variant)
+        else:
+            skipped.append((variant.name, reason))
+    for name, reason in skipped:
+        print(f"[SKIP INVALID] {name}: {reason}")
+    return valid
+
+
+def apply_dependent_overrides(run_overrides: MutableMapping[str, Any], global_overrides: Mapping[str, Any], flat_cfg: Mapping[str, Any] | None = None) -> None:
+    flat_cfg = flat_cfg or {}
+    sort_free = bool(run_overrides.get("sort_free_render", flat_cfg.get("sort_free_render", False)))
+    user_set_mobile_lr = "mobilegs_opacity_phi_lr" in global_overrides
+    if not sort_free:
+        # Keep the MobileGS MLP and optimizer out of ordinary sorted-render runs.
+        run_overrides["mobilegs_opacity_phi_lr"] = 0.0
+    elif not user_set_mobile_lr and float(run_overrides.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
+        # Sort-free training needs the view-dependent opacity/phi MLP.
+        run_overrides["mobilegs_opacity_phi_lr"] = 1e-3
+
+
 def infer_scene_name(config_path: Path, flat_cfg: Mapping[str, Any], explicit_scene_name: str | None) -> str:
     if explicit_scene_name:
         return explicit_scene_name
@@ -395,10 +440,102 @@ def generated_config_root(output_root: Path, explicit_root: str | None) -> Path:
     return output_root / "generated_configs"
 
 
+PIPELINE_OVERRIDE_KEYS = {
+    "convert_SHs_python",
+    "compute_cov3D_python",
+    "debug",
+    "use_usplat",
+    "sort_free_render",
+    "temporal_mask_threshold",
+    "temporal_mask_keyframes",
+    "temporal_mask_window",
+    "random_dropout_prob",
+    "env_map_res",
+    "env_optimize_until",
+    "env_optimize_from",
+    "eval_shfs_4d",
+}
+
+OPTIMIZATION_OVERRIDE_KEYS = {
+    "iterations", "position_lr_init", "position_t_lr_init", "position_lr_final",
+    "position_lr_delay_mult", "position_lr_max_steps", "feature_lr", "opacity_lr",
+    "scaling_lr", "rotation_lr", "percent_dense", "lambda_dssim", "lambda_rdr",
+    "thresh_opa_prune", "densification_interval", "opacity_reset_interval",
+    "densify_from_iter", "densify_until_iter", "densify_grad_threshold",
+    "densify_grad_t_threshold", "densify_until_num_points", "final_prune_from_iter",
+    "final_prune_ratio", "sh_increase_interval", "lambda_opa_mask", "lambda_rigid",
+    "lambda_motion", "lambda_depth", "mobilegs_opacity_phi_lr",
+    "enable_spatio_temporal_pruning", "spatio_temporal_pruning_ratio",
+    "spatio_temporal_pruning_min_points", "spatio_temporal_pruning_random",
+    "spatio_temporal_pruning_from_iter", "spatio_temporal_pruning_until_iter",
+    "spatio_temporal_pruning_interval", "spatio_temporal_pruning_max_total_ratio",
+    "lambda_key", "lambda_non_key", "usplat_start_iter", "usplat_eta_c",
+    "usplat_phi", "usplat_key_ratio", "usplat_spt_threshold", "usplat_knn_k",
+    "usplat_u_tau_percentile", "usplat_max_key_nodes", "usplat_assignment_chunk_size",
+    "usplat_key_assignment_chunk_size", "usplat_motion_window",
+    "usplat_nonkey_loss_chunk_size", "usplat_quat_chunk_size",
+    "usplat_cov_eigengap_eps", "record_training_diagnostics",
+    "diagnostics_short_lifespan_threshold",
+}
+
+MODEL_OVERRIDE_KEYS = {
+    "sh_degree", "source_path", "model_path", "images", "resolution",
+    "white_background", "data_device", "eval", "extension", "num_extra_pts",
+    "loaded_pth", "frame_ratio", "dataloader", "prefilter_var",
+}
+
+
+def _deep_copy_mapping(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {k: _deep_copy_mapping(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_copy_mapping(v) for v in value]
+    return value
+
+
+def _find_nested_key_paths(config: Mapping[str, Any], key: str, prefix: tuple[str, ...] = ()) -> List[tuple[str, ...]]:
+    paths: List[tuple[str, ...]] = []
+    for cur_key, cur_value in config.items():
+        cur_path = prefix + (str(cur_key),)
+        if cur_key == key:
+            paths.append(cur_path)
+        if isinstance(cur_value, Mapping):
+            paths.extend(_find_nested_key_paths(cur_value, key, cur_path))
+    return paths
+
+
+def _set_path(config: MutableMapping[str, Any], path: Sequence[str], value: Any) -> None:
+    cur: MutableMapping[str, Any] = config
+    for piece in path[:-1]:
+        next_value = cur.setdefault(piece, {})
+        if not isinstance(next_value, MutableMapping):
+            next_value = {}
+            cur[piece] = next_value
+        cur = next_value
+    cur[path[-1]] = value
+
+
+def _preferred_override_path(config: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    paths = _find_nested_key_paths(config, key)
+    if len(paths) == 1:
+        return paths[0]
+    # Prefer the canonical config groups when the key is not already present.
+    if key in PIPELINE_OVERRIDE_KEYS:
+        return ("PipelineParams", key)
+    if key in OPTIMIZATION_OVERRIDE_KEYS:
+        return ("OptimizationParams", key)
+    if key in MODEL_OVERRIDE_KEYS:
+        return ("ModelParams", key)
+    if paths:
+        # Avoid writing a duplicate top-level key when a nested key already exists.
+        return min(paths, key=len)
+    return (key,)
+
+
 def apply_flat_overrides(config: Mapping[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
-    derived = dict(config)
+    derived = _deep_copy_mapping(config)
     for key, value in overrides.items():
-        derived[key] = value
+        _set_path(derived, _preferred_override_path(derived, key), value)
     return derived
 
 
@@ -492,6 +629,7 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
         cfg = load_yaml(config_path)
         flat_cfg = flatten_cfg(cfg)
         variants = build_cartesian_variants(requested_axes, option_map, flat_cfg, schedule_options)
+        variants = filter_valid_variants(flat_cfg, variants, args.include_invalid_combinations)
         if args.limit is not None:
             variants = variants[: args.limit]
 
@@ -505,6 +643,7 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
             model_path = build_model_path(output_root, scene_name, variant)
             run_overrides = dict(variant.overrides)
             run_overrides.update(global_overrides)
+            apply_dependent_overrides(run_overrides, global_overrides, flat_cfg)
             run_overrides["model_path"] = str(model_path)
             if args.seed_offset:
                 run_overrides["seed"] = base_seed + args.seed_offset + index
@@ -561,6 +700,46 @@ class GPUPeakMonitor:
                     self.peak_mb = current_mb
             self._stop_event.wait(self.poll_interval)
 
+    def _process_tree_pids(self) -> set[int]:
+        """Return the monitored PID plus descendants.
+
+        `uv run` and shell wrappers often spawn a child Python process that owns
+        the CUDA context. Monitoring only the original Popen PID then reports
+        zero VRAM. This lightweight ps-based tree walk keeps the monitor wrapper
+        agnostic to uv/python/srun launch details.
+        """
+        pids = {int(self.pid)}
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid=,ppid="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return pids
+        if result.returncode != 0:
+            return pids
+        children: Dict[int, List[int]] = {}
+        for raw_line in result.stdout.splitlines():
+            parts = raw_line.strip().split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid, ppid = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            children.setdefault(ppid, []).append(pid)
+        stack = [int(self.pid)]
+        while stack:
+            parent = stack.pop()
+            for child in children.get(parent, []):
+                if child not in pids:
+                    pids.add(child)
+                    stack.append(child)
+        return pids
+
     def _query_pid_memory_mb(self) -> float | None:
         try:
             result = subprocess.run(
@@ -574,6 +753,7 @@ class GPUPeakMonitor:
             return None
         if result.returncode != 0:
             return None
+        monitored_pids = self._process_tree_pids()
         total = 0.0
         found = False
         for raw_line in result.stdout.splitlines():
@@ -588,7 +768,7 @@ class GPUPeakMonitor:
                 used_mb = float(parts[1])
             except ValueError:
                 continue
-            if pid == self.pid:
+            if pid in monitored_pids:
                 total += used_mb
                 found = True
         return total if found else 0.0
@@ -993,6 +1173,28 @@ def evaluate_checkpoint(
     return metric_results
 
 
+
+def flatten_metric_payload(prefix: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    flat: Dict[str, Any] = {}
+    for key, value in payload.items():
+        name = f"{prefix}_{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            flat.update(flatten_metric_payload(name, value))
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            flat[name] = value
+        elif isinstance(value, list):
+            # Keep short histograms/percentile lists as compact JSON strings for CSV.
+            flat[name] = json.dumps(value)
+    return flat
+
+
+def load_training_diagnostics(model_path: Path) -> Dict[str, Any]:
+    payload = load_json_if_exists(model_path / "training_diagnostics.json")
+    if not isinstance(payload, dict):
+        return {}
+    return flatten_metric_payload("diag", payload)
+
+
 def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Path) -> Dict[str, Any]:
     run_spec = pending.run_spec
     model_path = Path(run_spec.model_path)
@@ -1068,6 +1270,7 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
                 row["status"] = "metrics_failed"
                 row["metrics_error"] = str(exc)
 
+        row.update(load_training_diagnostics(model_path))
         row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
         try:
             used_gb, limit_gb = query_lquota_gb(args)
@@ -1490,6 +1693,10 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
                 ],
             )
         )
+        if not args.cleanup_after_run:
+            step_cmd.append("--no-cleanup-after-run")
+        if not args.cleanup_existing_artifacts:
+            step_cmd.append("--no-cleanup-existing-artifacts")
         if args.skip_metrics:
             step_cmd.append("--skip-metrics")
         print(f"[SLURM STEP] worker={worker_index} cpus={cpus_per_task} mem={mem_per_worker} cmd={shell_join(step_cmd)}")
@@ -1582,6 +1789,9 @@ def build_submit_command(args: argparse.Namespace) -> List[str]:
 
 
 def main(args: argparse.Namespace) -> int:
+    if args.slurm_worker:
+        return run_worker_from_assignment(args, repo_root_from_args(args))
+
     schedule_options = ScheduleOptions(
         one_shot_prune_step=args.one_shot_prune_step,
         one_shot_prune_ratio=args.one_shot_prune_ratio,
@@ -1592,6 +1802,7 @@ def main(args: argparse.Namespace) -> int:
         interleaved_prune_until_iter=args.interleaved_prune_until_iter,
         interleaved_prune_ratio=args.interleaved_prune_ratio,
         interleaved_prune_interval=args.interleaved_prune_interval,
+        interleaved_prune_min_points=args.interleaved_prune_min_points,
         interleaved_densify_from_iter=args.interleaved_densify_from_iter,
         interleaved_densify_until_iter=args.interleaved_densify_until_iter,
         interleaved_densification_interval=args.interleaved_densification_interval,
@@ -1608,9 +1819,6 @@ def main(args: argparse.Namespace) -> int:
         for run_spec in run_specs:
             print(shell_join(run_spec.command))
         return 0
-
-    if args.slurm_worker:
-        return run_worker_from_assignment(args, repo_root_from_args(args))
 
     if args.cleanup_existing_artifacts:
         cleanup_existing_artifacts(run_specs, True)

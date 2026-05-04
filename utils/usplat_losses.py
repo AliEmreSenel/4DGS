@@ -38,6 +38,33 @@ def quaternion_chordal_loss(q: Tensor, target: Tensor) -> Tensor:
     return torch.minimum(same, flipped).mean()
 
 
+def quaternion_identity_chordal_loss(q: Tensor) -> Tensor:
+    """Hemisphere-invariant distance from identity rotation.
+
+    The previous velocity/acceleration losses used ``abs(q_rel).sum()``. For a
+    no-motion relative quaternion q_rel=(1,0,0,0), that produces a non-zero
+    penalty. This helper is exactly zero for identity (and -identity).
+    """
+    q = F.normalize(q, p=2, dim=-1)
+    identity = torch.zeros_like(q)
+    identity[..., 0] = 1.0
+    same = (q - identity).square().sum(dim=-1)
+    flipped = (q + identity).square().sum(dim=-1)
+    return torch.minimum(same, flipped).mean()
+
+
+def quat_mul(a: Tensor, b: Tensor) -> Tensor:
+    """Hamilton product for (..., 4) quaternions in (w,x,y,z) order."""
+    w1, x1, y1, z1 = a.unbind(-1)
+    w2, x2, y2, z2 = b.unbind(-1)
+    return torch.stack([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ], dim=-1)
+
+
 # --------------------------------------------------------------------------- #
 #  Motion losses (Appendix A.2.1, Eqs. S8–S13)
 # --------------------------------------------------------------------------- #
@@ -226,15 +253,8 @@ def velocity_loss(
     q_prev = quats_t[:, :B - delta]
     q_curr = quats_t[:, delta:]
     q_curr_inv = torch.cat([q_curr[..., :1], -q_curr[..., 1:]], dim=-1)
-    w1, x1, y1, z1 = q_prev.unbind(-1)
-    w2, x2, y2, z2 = q_curr_inv.unbind(-1)
-    q_rel = torch.stack([
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-    ], dim=-1)
-    dq = q_rel.abs().sum(-1).mean()
+    q_rel = quat_mul(q_prev, q_curr_inv)
+    dq = quaternion_identity_chordal_loss(q_rel)
     return dp + dq
 
 
@@ -259,27 +279,17 @@ def acceleration_loss(
     acc_p = (p0 - 2 * p1 + p2).abs().sum(-1).mean()
 
     # Second-order finite difference for rotation (using relative rotation)
-    def qmul(a, b):
-        w1, x1, y1, z1 = a.unbind(-1)
-        w2, x2, y2, z2 = b.unbind(-1)
-        return torch.stack([
-            w1*w2 - x1*x2 - y1*y2 - z1*z2,
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        ], dim=-1)
-
     q0 = quats_t[:, :B - 2 * delta]
     q1 = quats_t[:, delta:B - delta]
     q2 = quats_t[:, 2 * delta:]
 
     q1_inv = torch.cat([q1[..., :1], -q1[..., 1:]], dim=-1)
     # term = q_{t-2} * q_{t-1}^{-1} * (q_{t-1} * q_t^{-1})^{-1}
-    rel01 = qmul(q0, q1_inv)
+    rel01 = quat_mul(q0, q1_inv)
     q2_inv = torch.cat([q2[..., :1], -q2[..., 1:]], dim=-1)
-    rel12 = qmul(q1, q2_inv)
+    rel12 = quat_mul(q1, q2_inv)
     rel12_inv = torch.cat([rel12[..., :1], -rel12[..., 1:]], dim=-1)
-    acc_q = qmul(rel01, rel12_inv).abs().sum(-1).mean()
+    acc_q = quaternion_identity_chordal_loss(quat_mul(rel01, rel12_inv))
 
     return acc_p + acc_q
 
@@ -370,7 +380,7 @@ def key_node_loss(
     pos_o:              Tensor,  # (N_k, 3)     canonical positions
     key_nbrs_local:     Tensor,  # (N_k, K)
     key_nbr_weights:    Tensor,  # (N_k, K)
-    r_scale: Tuple[float, float, float] = (1.0, 1.0, 0.01),
+    r_scale: Tuple[float, float, float] = (1.0, 1.0, 100.0),
     lambda_iso: float = 1.0,
     lambda_rigid: float = 1.0,
     lambda_rot: float = 0.01,
@@ -431,7 +441,7 @@ def non_key_node_loss(
     nonkey_nbrs_local:   Tensor,  # (N_n, K+1)  indices into key_idx (local)
     nonkey_nbr_weights:  Tensor,  # (N_n, K+1)
     nonkey_nbrs_global:  Tensor,  # (N_n, K+1)  same but mapped to key-array indices (=nonkey_nbrs_local since we pass key subarrays)
-    r_scale: Tuple[float, float, float] = (1.0, 1.0, 0.01),
+    r_scale: Tuple[float, float, float] = (1.0, 1.0, 100.0),
     lambda_iso: float = 1.0,
     lambda_rigid: float = 1.0,
     lambda_rot: float = 0.01,

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import ast
 import math
 import os
 import sys
@@ -8,6 +9,29 @@ from pathlib import Path
 import imageio.v2 as imageio
 import numpy as np
 import torch
+
+
+
+def coerce_time_duration(value):
+    """Accept [0,1], ("0","1"), "[0.0, 1.0]", tensors, numpy arrays."""
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = ast.literal_eval(text)
+        except Exception:
+            value = text.strip("[]()").replace(",", " ").split()
+
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+
+    if not isinstance(value, list) or len(value) < 2:
+        raise ValueError(f"Invalid time_duration: {value!r}")
+
+    return [float(value[0]), float(value[1])]
 
 
 def render_tensor_to_uint8(render_tensor: torch.Tensor) -> np.ndarray:
@@ -875,7 +899,11 @@ def main():
         )
 
     scene = CheckpointScene(checkpoint_payload["scene"], Camera)
-    time_duration = gaussian_kwargs.get("time_duration", gaussians.time_duration)
+    time_duration = coerce_time_duration(
+        gaussian_kwargs.get("time_duration", gaussians.time_duration)
+    )
+    gaussians.time_duration = time_duration
+    gaussian_kwargs["time_duration"] = time_duration
 
     bg_color = [1, 1, 1] if scene.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")

@@ -15,6 +15,7 @@ class USplat4DGraph:
     nonkey_key_idx: Tensor
     nonkey_nbrs: Tensor
     nonkey_nbr_weights: Tensor
+    stats: dict | None = None
 
     @property
     def num_key(self) -> int:
@@ -23,6 +24,17 @@ class USplat4DGraph:
     @property
     def num_nonkey(self) -> int:
         return self.nonkey_idx.shape[0]
+
+
+
+def _percentiles_dict(values: Tensor, percentiles=(0, 1, 5, 25, 50, 75, 95, 99, 100)) -> dict:
+    values = values.detach().float().reshape(-1)
+    values = values[values.isfinite()]
+    if values.numel() == 0:
+        return {}
+    qs = torch.tensor([p / 100.0 for p in percentiles], device=values.device, dtype=values.dtype)
+    out = torch.quantile(values, qs)
+    return {f"p{p}": float(v.item()) for p, v in zip(percentiles, out)}
 
 
 def _safe_quantile(
@@ -65,7 +77,7 @@ def build_graph(
     means_t: Tensor,
     u_scalar: Tensor,
     w2cs: Optional[Tensor] = None,
-    r_scale: Tuple[float, float, float] = (1.0, 1.0, 0.01),
+    r_scale: Tuple[float, float, float] = (1.0, 1.0, 100.0),
     key_ratio: float = 0.02,
     spt_threshold: int = 5,
     voxel_size: Optional[float] = None,
@@ -169,11 +181,14 @@ def build_graph(
     graph_dist.fill_diagonal_(float("inf"))
     if k_eff > 0:
         _, key_nbr_local = graph_dist.topk(k_eff, dim=-1, largest=False)
+        nbr_dists = graph_dist.gather(1, key_nbr_local)
+        key_nbr_weights = F.softmax(-nbr_dists.clamp(min=1e-8), dim=-1)
     else:
+        # Single-key-node scenes cannot have a non-self key edge. Keep a benign
+        # self-neighbor with unit weight so downstream tensor shapes remain valid.
         key_nbr_local = torch.zeros(N_k, 1, dtype=torch.long, device=device)
+        key_nbr_weights = torch.ones(N_k, 1, dtype=means_t.dtype, device=device)
         k_eff = 1
-    nbr_dists = graph_dist.gather(1, key_nbr_local)
-    key_nbr_weights = F.softmax(-nbr_dists.clamp(min=1e-8), dim=-1)
 
     N_n = nonkey_idx.shape[0]
     nk_means_all = means_t[nonkey_idx]
@@ -182,6 +197,7 @@ def build_graph(
     CHUNK = max(int(assignment_chunk_size), 1)
     KEY_CHUNK = max(int(key_assignment_chunk_size), 1)
     nonkey_key_local = torch.empty(N_n, dtype=torch.long, device=device)
+    nonkey_assignment_best_dist = torch.empty(N_n, dtype=means_t.dtype, device=device)
     for start in range(0, N_n, CHUNK):
         end = min(start + CHUNK, N_n)
         best_dist = torch.full((end - start,), float("inf"), device=device)
@@ -200,6 +216,7 @@ def build_graph(
             best_dist[update] = local_dist[update]
             best_key[update] = local_key[update] + key_start
         nonkey_key_local[start:end] = best_key
+        nonkey_assignment_best_dist[start:end] = best_dist
 
     assigned_key_nbrs = key_nbr_local[nonkey_key_local]
     extra = nonkey_key_local.unsqueeze(-1)
@@ -218,6 +235,34 @@ def build_graph(
     graph_dist_nk = _camera_uncertainty_weighted_sq(diff_nk, u_sum_nk, R_cw_nk, r_scale)
     nonkey_nbr_weights = F.softmax(-graph_dist_nk.clamp(min=1e-8), dim=-1)
 
+    # Diagnostics for ablation summaries. Keep tensors out of the dataclass payload.
+    key_row = torch.arange(N_k, device=device)
+    key_edge_lengths = torch.empty((0,), device=device, dtype=means_t.dtype)
+    if N_k > 0 and key_nbr_local.numel() > 0:
+        t_hat = best_t[key_row].unsqueeze(1).expand_as(key_nbr_local)
+        p_i = key_means_all[key_row, best_t].unsqueeze(1)
+        p_j = key_means_all[key_nbr_local.reshape(-1), t_hat.reshape(-1)].reshape(N_k, k_eff, 3)
+        key_edge_lengths = torch.linalg.norm(p_i - p_j, dim=-1).reshape(-1)
+    nonkey_assignment_dist = nonkey_assignment_best_dist.detach() if N_n > 0 else torch.empty((0,), device=device)
+    sig_period_all = low_u_mask.sum(dim=1)
+    key_sig_period = low_u_mask[key_idx].sum(dim=1)
+    hist_bins = torch.bincount(key_sig_period.clamp_min(0).to(torch.long), minlength=T + 1)
+    stats = {
+        "num_key": int(key_idx.numel()),
+        "num_nonkey": int(nonkey_idx.numel()),
+        "key_fraction": float(key_idx.numel()) / float(max(G, 1)),
+        "candidate_count_after_spt": int(candidates.numel()),
+        "key_coverage_ratio": float(key_idx.numel()) / float(max(G, 1)),
+        "significant_period_threshold": int(spt_threshold),
+        "low_uncertainty_tau": float(tau),
+        "key_significant_period_histogram": [int(x) for x in hist_bins.detach().cpu().tolist()],
+        "all_significant_period_percentiles": _percentiles_dict(sig_period_all),
+        "key_edge_length_percentiles": _percentiles_dict(key_edge_lengths),
+        "key_edge_weight_percentiles": _percentiles_dict(key_nbr_weights),
+        "nonkey_edge_weight_percentiles": _percentiles_dict(nonkey_nbr_weights),
+        "nonkey_assignment_distance_percentiles": _percentiles_dict(nonkey_assignment_dist),
+    }
+
     return USplat4DGraph(
         key_idx=key_idx,
         nonkey_idx=nonkey_idx,
@@ -226,4 +271,5 @@ def build_graph(
         nonkey_key_idx=nonkey_key_local,
         nonkey_nbrs=nonkey_nbrs,
         nonkey_nbr_weights=nonkey_nbr_weights,
+        stats=stats,
     )
