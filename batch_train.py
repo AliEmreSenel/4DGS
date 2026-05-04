@@ -53,8 +53,19 @@ DEFAULT_ISOTROPY = {
 }
 
 DEFAULT_APPEARANCE = {
+    # RGB-only baseline used by Instant4D-style lightweight runs.
     "rgb": {"sh_degree": 0, "force_sh_3d": True, "eval_shfs_4d": False},
+    # First-order spatial SH for Mobile-GS-style lightweight export/training.
+    "sh1": {
+        "sh_degree": 1,
+        "force_sh_3d": True,
+        "eval_shfs_4d": False,
+        "mobilegs_force_first_order_sh": True,
+    },
+    # Native 4DGS appearance: spatial SH plus temporal spherindrical harmonics.
     "sh3": {"sh_degree": 3, "force_sh_3d": False, "eval_shfs_4d": True},
+    # Outside-the-paper control: full spatial SH without temporal SCH.
+    "sh3_3d": {"sh_degree": 3, "force_sh_3d": True, "eval_shfs_4d": False},
 }
 
 DEFAULT_SORTING = {
@@ -94,14 +105,14 @@ class AblationVariant:
 @dataclass
 class ScheduleOptions:
     one_shot_prune_step: int = 5001
-    one_shot_prune_ratio: float = 0.85
+    one_shot_prune_ratio: float = 0.50
     one_shot_densify_from_iter: int = 500
     one_shot_densify_until_iter: int = 5000
     one_shot_densification_interval: int = 100
 
     interleaved_prune_from_iter: int = 2000
     interleaved_prune_until_iter: int = 7500
-    interleaved_prune_ratio: float = 0.10
+    interleaved_prune_ratio: float = 0.15
     interleaved_prune_interval: int = 2000
     interleaved_prune_min_points: int = 1000
     interleaved_densify_from_iter: int = 500
@@ -175,11 +186,28 @@ def parse_args() -> argparse.Namespace:
         metavar="KEY=VALUE",
         help="Extra flat override applied to every run.",
     )
-    parser.add_argument("--axes", default="isotropy,appearance", help="Comma-separated ablation axes. The default is intentionally small and safe; add sorting,pruning,usplat,dropout explicitly for larger sweeps.")
+    parser.add_argument(
+        "--matrix-preset",
+        choices=["paper", "compact", "full", "cartesian"],
+        default=None,
+        help=(
+            "A curated ablation matrix. The default is 'paper' unless an explicit "
+            "--axes/--*-options flag is supplied, in which case the old Cartesian "
+            "axis behavior is used. Use 'cartesian' to force the axis product."
+        ),
+    )
+    parser.add_argument(
+        "--axes",
+        default="isotropy,appearance",
+        help=(
+            "Comma-separated ablation axes used only when --matrix-preset=cartesian "
+            "or when axis flags are explicitly supplied without --matrix-preset."
+        ),
+    )
     parser.add_argument("--isotropy-options", default="anisotropic,isotropic")
     parser.add_argument("--appearance-options", default="rgb,sh3")
     parser.add_argument("--sorting-options", default="sort")
-    parser.add_argument("--pruning-options", default="no_pruning,densify_then_prune_once")
+    parser.add_argument("--pruning-options", default="no_pruning,interleaved_prune_densify")
     parser.add_argument("--usplat-options", default="no_usplat")
     parser.add_argument("--dropout-options", default="no_dropout,dropout")
     parser.add_argument("--dropout-prob", type=float, default=0.2, help="Gaussian dropout probability for the enabled dropout ablation option.")
@@ -187,14 +215,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-invalid-combinations", action="store_true", help="Do not filter known incompatible ablation combinations.")
 
     parser.add_argument("--one-shot-prune-step", type=int, default=5001)
-    parser.add_argument("--one-shot-prune-ratio", type=float, default=0.85)
+    parser.add_argument("--one-shot-prune-ratio", type=float, default=0.50)
     parser.add_argument("--one-shot-densify-from-iter", type=int, default=500)
     parser.add_argument("--one-shot-densify-until-iter", type=int, default=5000)
     parser.add_argument("--one-shot-densification-interval", type=int, default=100)
 
     parser.add_argument("--interleaved-prune-from-iter", type=int, default=2000)
     parser.add_argument("--interleaved-prune-until-iter", type=int, default=7500)
-    parser.add_argument("--interleaved-prune-ratio", type=float, default=0.10)
+    parser.add_argument("--interleaved-prune-ratio", type=float, default=0.15)
     parser.add_argument("--interleaved-prune-interval", type=int, default=2000)
     parser.add_argument("--interleaved-prune-min-points", type=int, default=1000)
     parser.add_argument("--interleaved-densify-from-iter", type=int, default=500)
@@ -265,7 +293,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quota-poll-interval", type=float, default=30.0, help="Seconds between quota checks while waiting.")
     parser.add_argument("--cleanup-existing-artifacts", action=argparse.BooleanOptionalAction, default=True, help="Prune bulky artifacts from existing run directories before scheduling.")
     parser.add_argument("--cleanup-after-run", action=argparse.BooleanOptionalAction, default=True, help="Delete bulky artifacts after each run, keeping only the best available checkpoint and metadata.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    matrix_flags = (
+        "--axes",
+        "--isotropy-options",
+        "--appearance-options",
+        "--sorting-options",
+        "--pruning-options",
+        "--usplat-options",
+        "--dropout-options",
+    )
+    matrix_flag_supplied = any(
+        raw == flag or raw.startswith(flag + "=")
+        for flag in matrix_flags
+        for raw in sys.argv[1:]
+    )
+    if args.matrix_preset is None:
+        args.matrix_preset = "cartesian" if matrix_flag_supplied else "paper"
+    return args
 
 
 def load_yaml(path: str | Path) -> Dict[str, Any]:
@@ -385,6 +430,221 @@ def build_axis_registry(
     }
 
 
+
+def _clamped_schedule_iter(total_iterations: int, fraction: float, fallback: int, minimum: int = 1) -> int:
+    if total_iterations <= 1:
+        return max(minimum, int(fallback))
+    proposed = int(round(float(total_iterations) * float(fraction)))
+    proposed = max(minimum, proposed)
+    return min(proposed, total_iterations - 1)
+
+
+def _with_clean_method_defaults(overrides: Mapping[str, Any]) -> Dict[str, Any]:
+    """Start every curated method from a compatible, sorted native-4D baseline."""
+    base = {
+        "isotropic_gaussians": False,
+        "rot_4d": True,
+        "force_sh_3d": False,
+        "sh_degree": 3,
+        "eval_shfs_4d": True,
+        "sort_free_render": False,
+        "use_usplat": False,
+        "random_dropout_prob": 0.0,
+        "lambda_rdr": 0.0,
+        "enable_spatio_temporal_pruning": False,
+        "final_prune_from_iter": -1,
+        "final_prune_ratio": 0.0,
+        "mobilegs_opacity_phi_lr": 0.0,
+        "mobilegs_force_first_order_sh": False,
+        "lambda_mobilegs_sh_distill": 0.0,
+        "lambda_mobilegs_depth_distill": 0.0,
+        "lambda_depth": 0.0,
+        "lambda_opa_mask": 0.0,
+        "enable_edge_guided_splitting": False,
+        "ess_from_iter": -1,
+        "ess_until_iter": -1,
+    }
+    base.update(dict(overrides))
+    return base
+
+
+def _paper_pruning_overrides(total_iterations: int, schedule_options: ScheduleOptions) -> Dict[str, Any]:
+    registry = build_pruning_registry(total_iterations, schedule_options)
+    out = dict(registry["interleaved_prune_densify"])
+    # 4DGS-1K is explicitly a compression method; keep the default sweep safe by
+    # limiting cumulative pruning while still creating a genuine ST-score signal.
+    out["spatio_temporal_pruning_max_total_ratio"] = min(
+        float(out.get("spatio_temporal_pruning_max_total_ratio", 0.50)), 0.40
+    )
+    out["spatio_temporal_pruning_min_points"] = max(
+        int(out.get("spatio_temporal_pruning_min_points", 1000)), 5000
+    )
+    return out
+
+
+def _instant4d_lite_overrides(flat_cfg: Mapping[str, Any], total_iterations: int) -> Dict[str, Any]:
+    base_num_pts = int(flat_cfg.get("num_pts", 100000) or 100000)
+    return {
+        "isotropic_gaussians": True,
+        "force_sh_3d": True,
+        "eval_shfs_4d": False,
+        "sh_degree": 0,
+        "mobilegs_force_first_order_sh": False,
+        "num_pts": max(25000, min(base_num_pts, int(round(base_num_pts * 0.50)))),
+        "num_pts_ratio": min(float(flat_cfg.get("num_pts_ratio", 1.0) or 1.0), 0.5),
+        "densify_until_iter": _clamped_schedule_iter(total_iterations, 0.55, 7500, minimum=500),
+        "densify_until_num_points": max(50000, int(round(base_num_pts * 0.75))),
+    }
+
+
+def build_matrix_preset_variants(
+    preset: str,
+    flat_cfg: Mapping[str, Any],
+    schedule_options: ScheduleOptions,
+    dropout_prob: float,
+    dropout_lambda_rdr: float,
+) -> List[AblationVariant]:
+    """Return a curated matrix of paper-faithful and compatible variants.
+
+    The Cartesian axes remain available through --matrix-preset=cartesian.  These
+    curated presets are intentionally non-Cartesian: each row is a meaningful
+    method baseline or a deliberately compatible cross-paper hybrid.
+    """
+    preset = str(preset or "paper").lower()
+    total_iterations = int(flat_cfg.get("iterations", 0) or 0)
+    usplat_start = _clamped_schedule_iter(total_iterations, 0.20, 3000, minimum=500)
+    dropout = {
+        "random_dropout_prob": float(dropout_prob),
+        "lambda_rdr": float(dropout_lambda_rdr),
+        "enable_edge_guided_splitting": True,
+        "ess_from_iter": _clamped_schedule_iter(total_iterations, 0.45, 5000, minimum=1000),
+        "ess_until_iter": _clamped_schedule_iter(total_iterations, 0.85, 8500, minimum=1000),
+        "ess_interval": 2000,
+        "ess_edge_percentile": 0.90,
+        "ess_scale_percentile": 0.70,
+        "ess_max_splits": 5000,
+        "ess_split_children": 2,
+    }
+    pruning = _paper_pruning_overrides(total_iterations, schedule_options)
+    instant = _instant4d_lite_overrides(flat_cfg, total_iterations)
+    mobile = {
+        "sort_free_render": True,
+        "force_sh_3d": True,
+        "eval_shfs_4d": False,
+        "sh_degree": 1,
+        "mobilegs_force_first_order_sh": True,
+        "mobilegs_opacity_phi_lr": 1e-3,
+        "lambda_depth": 0.0,
+        "lambda_opa_mask": 0.0,
+        "use_usplat": False,
+    }
+    usplat = {
+        "use_usplat": True,
+        "usplat_start_iter": usplat_start,
+        "usplat_key_ratio": 0.02,
+        "usplat_spt_threshold": 5,
+        "usplat_knn_k": 8,
+        "lambda_key": 0.05,
+        "lambda_non_key": 0.05,
+        "usplat_motion_window": 5,
+    }
+
+    rows: List[tuple[str, str, Dict[str, Any]]] = [
+        (
+            "paper_4dgs_native",
+            "4dgs",
+            {},
+        ),
+        (
+            "paper_4dgs1k_st_prune",
+            "4dgs_1k",
+            pruning,
+        ),
+        (
+            "paper_dropout_rdr",
+            "dropoutgs",
+            dropout,
+        ),
+        (
+            "paper_usplat_graph",
+            "usplat4d",
+            usplat,
+        ),
+        (
+            "paper_instant4d_lite",
+            "instant4d",
+            instant,
+        ),
+        (
+            "paper_mobilegs_sortfree",
+            "mobilegs",
+            mobile,
+        ),
+        (
+            "hybrid_dropout_st_prune",
+            "hybrid",
+            {**dropout, **pruning},
+        ),
+        (
+            "hybrid_usplat_dropout",
+            "hybrid",
+            {**usplat, **dropout},
+        ),
+        (
+            "hybrid_instant4d_mobilegs",
+            "hybrid",
+            {**instant, **mobile},
+        ),
+    ]
+    if preset == "compact":
+        keep = {
+            "paper_4dgs_native",
+            "paper_4dgs1k_st_prune",
+            "paper_dropout_rdr",
+            "paper_instant4d_lite",
+            "paper_mobilegs_sortfree",
+        }
+        rows = [row for row in rows if row[0] in keep]
+    elif preset == "full":
+        rows.extend(
+            [
+                (
+                    "control_rgb_only",
+                    "control",
+                    {"sh_degree": 0, "force_sh_3d": True, "eval_shfs_4d": False},
+                ),
+                (
+                    "control_spatial_sh_no_time",
+                    "control",
+                    {"sh_degree": 3, "force_sh_3d": True, "eval_shfs_4d": False},
+                ),
+                (
+                    "hybrid_mobilegs_st_prune",
+                    "hybrid",
+                    {**mobile, **pruning},
+                ),
+                (
+                    "hybrid_usplat_st_prune",
+                    "hybrid",
+                    {**usplat, **pruning},
+                ),
+            ]
+        )
+    elif preset != "paper":
+        raise ValueError(f"Unknown matrix preset: {preset}")
+
+    variants: List[AblationVariant] = []
+    for name, family, overrides in rows:
+        variants.append(
+            AblationVariant(
+                name=name,
+                tags={"matrix_preset": preset, "method_family": family},
+                overrides=_with_clean_method_defaults(overrides),
+            )
+        )
+    return variants
+
+
 def build_axis_variants(axis_name: str, requested_options: Sequence[str], registry: Mapping[str, Dict[str, Dict[str, Any]]]) -> List[AblationVariant]:
     axis_registry = registry[axis_name]
     variants: List[AblationVariant] = []
@@ -467,7 +727,11 @@ def mobilegs_training_overrides(args: argparse.Namespace, sort_free: bool, globa
     """
     out: Dict[str, Any] = {}
 
-    if bool(getattr(args, "mobilegs_report", True)) and bool(getattr(args, "mobilegs_force_first_order_sh", True)):
+    # First-order SH is a Mobile-GS training choice, not a global ablation
+    # side-effect.  Keep native 4DGS/USplat/Dropout rows faithful to their
+    # temporal SCH appearance unless the row itself is sort-free or the user
+    # explicitly overrides mobilegs_force_first_order_sh.
+    if sort_free and bool(getattr(args, "mobilegs_report", True)) and bool(getattr(args, "mobilegs_force_first_order_sh", True)):
         if "mobilegs_force_first_order_sh" not in global_overrides:
             out["mobilegs_force_first_order_sh"] = True
 
@@ -574,6 +838,9 @@ OPTIMIZATION_OVERRIDE_KEYS = {
     "lambda_motion", "lambda_depth", "mobilegs_opacity_phi_lr",
     "mobilegs_teacher_checkpoint", "mobilegs_force_first_order_sh",
     "lambda_mobilegs_sh_distill", "lambda_mobilegs_depth_distill",
+    "enable_edge_guided_splitting", "ess_from_iter", "ess_until_iter",
+    "ess_interval", "ess_edge_percentile", "ess_scale_percentile",
+    "ess_max_splits", "ess_split_children",
     "enable_spatio_temporal_pruning", "spatio_temporal_pruning_ratio",
     "spatio_temporal_pruning_min_points", "spatio_temporal_pruning_random",
     "spatio_temporal_pruning_from_iter", "spatio_temporal_pruning_until_iter",
@@ -795,14 +1062,23 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
         config_path = Path(config_raw)
         cfg = load_yaml(config_path)
         flat_cfg = flatten_cfg(cfg)
-        variants = build_cartesian_variants(
-            requested_axes,
-            option_map,
-            flat_cfg,
-            schedule_options,
-            dropout_prob=args.dropout_prob,
-            dropout_lambda_rdr=args.dropout_lambda_rdr,
-        )
+        if str(args.matrix_preset).lower() == "cartesian":
+            variants = build_cartesian_variants(
+                requested_axes,
+                option_map,
+                flat_cfg,
+                schedule_options,
+                dropout_prob=args.dropout_prob,
+                dropout_lambda_rdr=args.dropout_lambda_rdr,
+            )
+        else:
+            variants = build_matrix_preset_variants(
+                preset=args.matrix_preset,
+                flat_cfg=flat_cfg,
+                schedule_options=schedule_options,
+                dropout_prob=args.dropout_prob,
+                dropout_lambda_rdr=args.dropout_lambda_rdr,
+            )
         variants = filter_valid_variants(flat_cfg, variants, args.include_invalid_combinations)
         if args.limit is not None:
             variants = variants[: args.limit]

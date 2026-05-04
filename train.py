@@ -164,6 +164,104 @@ def compute_4dgs_1k_diagnostics(gaussians, scene, pipe, background, render_fn, s
     return diagnostics
 
 
+
+def _sobel_edge_map(image: torch.Tensor) -> torch.Tensor:
+    """Return a normalized single-channel edge probability map in [0, 1]."""
+    if image.ndim == 3:
+        gray = image.mean(dim=0, keepdim=True).unsqueeze(0)
+    elif image.ndim == 4:
+        gray = image.mean(dim=1, keepdim=True)
+    else:
+        raise ValueError(f"Expected CHW or NCHW image, got shape {tuple(image.shape)}")
+    dtype = gray.dtype
+    device = gray.device
+    kx = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], device=device, dtype=dtype).view(1, 1, 3, 3)
+    ky = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], device=device, dtype=dtype).view(1, 1, 3, 3)
+    gx = torch.nn.functional.conv2d(gray, kx, padding=1)
+    gy = torch.nn.functional.conv2d(gray, ky, padding=1)
+    edge = torch.sqrt(gx.square() + gy.square()).squeeze(0).squeeze(0)
+    edge = edge - edge.amin()
+    denom = edge.amax().clamp_min(1e-8)
+    return (edge / denom).clamp(0.0, 1.0)
+
+
+@torch.no_grad()
+def compute_edge_guided_split_mask(gaussians, scene, pipe, background, render_fn, opt):
+    """Approximate DropoutGS ESS with contribution-weighted image edges.
+
+    The paper's ESS aggregates edge probabilities over the Gaussian footprint and
+    splits high-edge, large-scale primitives.  The renderer already exposes the
+    alpha-transmittance contribution score and a per-Gaussian max value over an
+    auxiliary pixel map; we combine these to get a stable, implementation-light
+    edge score that works for native 4D and all ablation interactions.
+    """
+    G = int(gaussians.get_xyz.shape[0])
+    if G == 0:
+        return torch.zeros((0,), dtype=torch.bool, device=background.device), {}
+
+    edge_scores = torch.zeros((G,), device=background.device)
+    coverage_scores = torch.zeros((G,), device=background.device)
+    for gt_image, viewpoint_camera in scene.getTrainCameras():
+        gt_image = gt_image.to(background.device, non_blocking=True)
+        viewpoint_camera = viewpoint_camera.cuda(non_blocking=True, copy=False)
+        edge_map = _sobel_edge_map(gt_image).contiguous()
+        render_pkg = render_fn(
+            viewpoint_camera,
+            gaussians,
+            pipe,
+            background,
+            return_gaussian_scores=True,
+            gaussian_score_error_map=edge_map.reshape(-1),
+        )
+        contribution = render_pkg.get("gaussian_scores")
+        max_edge = render_pkg.get("gaussian_score_max_error")
+        if contribution is None or contribution.numel() == 0:
+            continue
+        contribution = contribution.to(edge_scores.device)
+        if max_edge is None or max_edge.numel() == 0:
+            weighted = contribution
+        else:
+            weighted = contribution * max_edge.to(edge_scores.device).clamp(0.0, 1.0)
+        n = min(G, weighted.numel())
+        edge_scores[:n] += weighted[:n]
+        coverage_scores[:n] += contribution[:n]
+
+    normalized_edge = edge_scores / coverage_scores.clamp_min(1e-8)
+    scales = gaussians.get_scaling.max(dim=1).values
+    finite_edge = normalized_edge[torch.isfinite(normalized_edge) & (coverage_scores > 0)]
+    finite_scale = scales[torch.isfinite(scales)]
+    if finite_edge.numel() == 0 or finite_scale.numel() == 0:
+        return torch.zeros((G,), dtype=torch.bool, device=background.device), {
+            "edge_score_percentiles": _safe_percentiles(normalized_edge),
+            "scale_percentiles": _safe_percentiles(scales),
+            "selected": 0,
+        }
+
+    edge_q = max(0.0, min(1.0, float(getattr(opt, "ess_edge_percentile", 0.90))))
+    scale_q = max(0.0, min(1.0, float(getattr(opt, "ess_scale_percentile", 0.70))))
+    edge_thr = torch.quantile(finite_edge, torch.tensor(edge_q, device=finite_edge.device, dtype=finite_edge.dtype))
+    scale_thr = torch.quantile(finite_scale, torch.tensor(scale_q, device=finite_scale.device, dtype=finite_scale.dtype))
+    selected = (normalized_edge >= edge_thr) & (scales >= scale_thr) & (coverage_scores > 0)
+
+    max_splits = int(getattr(opt, "ess_max_splits", 5000) or 0)
+    if max_splits > 0 and int(selected.sum().item()) > max_splits:
+        score = normalized_edge * scales
+        idx = torch.nonzero(selected, as_tuple=True)[0]
+        top = torch.topk(score[idx], k=max_splits, largest=True).indices
+        limited = torch.zeros_like(selected)
+        limited[idx[top]] = True
+        selected = limited
+
+    stats = {
+        "edge_score_percentiles": _safe_percentiles(normalized_edge),
+        "scale_percentiles": _safe_percentiles(scales),
+        "edge_threshold": _to_float(edge_thr),
+        "scale_threshold": _to_float(scale_thr),
+        "selected": int(selected.sum().item()),
+    }
+    return selected, stats
+
+
 def _write_training_diagnostics(model_path, diagnostics):
     path = os.path.join(model_path, "training_diagnostics.json")
     tmp_path = path + ".tmp"
@@ -589,6 +687,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     usplat_graph_rebuild_count = 0
     usplat_diag_stats = {}
     dropout_stats_accum = {"count": 0.0}
+    ess_stats_accum = {"runs": 0, "selected_total": 0}
     st_prune_score_percentiles = {}
     initial_gaussian_count_for_st_prune = None
     
@@ -1349,6 +1448,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         u_scalar = None
                         usplat_state_dirty = True
 
+                ess_from_iter = int(getattr(opt, "ess_from_iter", -1))
+                if ess_from_iter < 0:
+                    ess_from_iter = int(getattr(opt, "densify_from_iter", 0))
+                ess_until_iter = int(getattr(opt, "ess_until_iter", -1))
+                if ess_until_iter < 0:
+                    ess_until_iter = int(getattr(opt, "densify_until_iter", opt.iterations))
+                ess_interval = max(1, int(getattr(opt, "ess_interval", 2000)))
+                if (
+                    bool(getattr(opt, "enable_edge_guided_splitting", False))
+                    and iteration < opt.iterations
+                    and iteration >= ess_from_iter
+                    and iteration <= ess_until_iter
+                    and (iteration - ess_from_iter) % ess_interval == 0
+                    and int(gaussians.get_xyz.shape[0]) > 0
+                ):
+                    print(f"\n[ITER {iteration}] Computing edge-guided splitting mask")
+                    ess_mask, ess_stats = compute_edge_guided_split_mask(
+                        gaussians, scene, pipe, background, render, opt
+                    )
+                    ess_children = max(1, int(getattr(opt, "ess_split_children", 2)))
+                    ess_selected = int(ess_mask.sum().item())
+                    if ess_selected > 0:
+                        print(
+                            f"[ITER {iteration}] ESS splitting {ess_selected} Gaussians "
+                            f"into {ess_children} children each"
+                        )
+                        gaussians.split_points_by_mask(ess_mask, N=ess_children)
+                        if use_usplat and iteration >= usplat_start_iter:
+                            graph = None
+                            p_pretrained_base = None
+                            p_pretrained_t = None
+                            usplat_w2cs = None
+                            usplat_timestamps = None
+                            u_scalar = None
+                            usplat_state_dirty = True
+                    else:
+                        print(f"[ITER {iteration}] ESS selected no Gaussians")
+                    ess_stats_accum["runs"] = int(ess_stats_accum.get("runs", 0)) + 1
+                    ess_stats_accum["selected_total"] = (
+                        int(ess_stats_accum.get("selected_total", 0)) + ess_selected
+                    )
+                    ess_stats_accum["last"] = ess_stats
+
                 if should_final_st_prune:
                     print(
                         f"\n[ITER {iteration}] Computing final spatio-temporal pruning scores"
@@ -1406,6 +1548,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     diagnostics = {
         "final_gaussian_count": int(gaussians.get_xyz.shape[0]),
         "dropout": {},
+        "ess": {},
         "usplat": dict(usplat_diag_stats),
         "pruning": {},
     }
@@ -1419,6 +1562,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         }
         if "survival_rate_sum" in dropout_stats_accum:
             diagnostics["dropout"]["survival_rate_mean"] = dropout_stats_accum["survival_rate_sum"] / dropout_count
+    ess_runs = int(ess_stats_accum.get("runs", 0))
+    if ess_runs > 0:
+        ess_selected_total = int(ess_stats_accum.get("selected_total", 0))
+        diagnostics["ess"] = {
+            "runs": ess_runs,
+            "selected_total": ess_selected_total,
+            "selected_mean": float(ess_selected_total) / float(max(1, ess_runs)),
+            "last": ess_stats_accum.get("last", {}),
+        }
     if use_usplat:
         diagnostics["usplat"]["graph_rebuild_count"] = int(usplat_graph_rebuild_count)
     if st_prune_score_percentiles:

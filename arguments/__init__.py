@@ -127,6 +127,16 @@ class OptimizationParams(ParamGroup):
 
         self.lambda_depth = 0.0
         self.lambda_rdr = 1.0
+        # DropoutGS ESS-style refinement. Disabled by default; the ablation
+        # preset enables it only for DropoutGS rows after a coarse RDR phase.
+        self.enable_edge_guided_splitting = False
+        self.ess_from_iter = -1
+        self.ess_until_iter = -1
+        self.ess_interval = 2000
+        self.ess_edge_percentile = 0.90
+        self.ess_scale_percentile = 0.70
+        self.ess_max_splits = 5000
+        self.ess_split_children = 2
         # Keep the MobileGS opacity/phi MLP inactive unless sort-free rendering is requested.
         self.mobilegs_opacity_phi_lr = 0.0
         self.mobilegs_teacher_checkpoint = ""

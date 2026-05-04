@@ -1008,6 +1008,100 @@ class GaussianModel:
             new_rotation_r,
         )
 
+    @torch.no_grad()
+    def split_points_by_mask(self, selected_pts_mask, N=2):
+        """Split selected large Gaussians without relying on gradient stats.
+
+        This is used by DropoutGS ESS-style refinement: after RDR has encouraged
+        smoother, larger primitives, high-edge/high-scale primitives are split to
+        recover details. The implementation mirrors densify_and_split so it
+        remains compatible with native 4D, isotropic Instant4D-style rows, and
+        optimizer state bookkeeping.
+        """
+        n_init_points = self.get_xyz.shape[0]
+        if n_init_points == 0:
+            return 0
+        selected_pts_mask = selected_pts_mask.to(device=self.get_xyz.device, dtype=torch.bool).reshape(-1)
+        if selected_pts_mask.numel() != n_init_points:
+            fixed = torch.zeros(n_init_points, dtype=torch.bool, device=self.get_xyz.device)
+            fixed[: min(n_init_points, selected_pts_mask.numel())] = selected_pts_mask[: min(n_init_points, selected_pts_mask.numel())]
+            selected_pts_mask = fixed
+        if not bool(selected_pts_mask.any()):
+            return 0
+        N = max(1, int(N))
+
+        new_scaling = self.scaling_inverse_activation(
+            self.scaling_activation(self._scaling[selected_pts_mask]).repeat(N, 1)
+            / (0.8 * N)
+        )
+        new_rotation = (
+            None
+            if self.isotropic_gaussians
+            else self._rotation[selected_pts_mask].repeat(N, 1)
+        )
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
+
+        if not self.rot_4d:
+            stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+            means = torch.zeros((stds.size(0), 3), device=self.get_xyz.device)
+            samples = torch.normal(mean=means, std=stds)
+            if self.isotropic_gaussians:
+                new_xyz = samples + self.get_xyz[selected_pts_mask].repeat(N, 1)
+            else:
+                rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+                new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+            new_t = None
+            new_scaling_t = None
+            new_rotation_r = None
+            if self.gaussian_dim == 4:
+                stds_t = self.get_scaling_t[selected_pts_mask].repeat(N, 1)
+                means_t = torch.zeros((stds_t.size(0), 1), device=self.get_xyz.device)
+                samples_t = torch.normal(mean=means_t, std=stds_t)
+                new_t = samples_t + self.get_t[selected_pts_mask].repeat(N, 1)
+                new_scaling_t = self.scaling_inverse_activation(
+                    self.get_scaling_t[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+                )
+        else:
+            stds = self.get_scaling_xyzt[selected_pts_mask].repeat(N, 1)
+            means = torch.zeros((stds.size(0), 4), device=self.get_xyz.device)
+            samples = torch.normal(mean=means, std=stds)
+            if self.isotropic_gaussians:
+                new_xyzt = samples + self.get_xyzt[selected_pts_mask].repeat(N, 1)
+            else:
+                rots = build_rotation_4d(
+                    self._rotation[selected_pts_mask],
+                    self._rotation_r[selected_pts_mask],
+                ).repeat(N, 1, 1)
+                new_xyzt = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyzt[selected_pts_mask].repeat(N, 1)
+            new_xyz = new_xyzt[..., 0:3]
+            new_t = new_xyzt[..., 3:4]
+            new_scaling_t = self.scaling_inverse_activation(
+                self.get_scaling_t[selected_pts_mask].repeat(N, 1) / (0.8 * N)
+            )
+            new_rotation_r = (
+                None
+                if self.isotropic_gaussians
+                else self._rotation_r[selected_pts_mask].repeat(N, 1)
+            )
+
+        num_selected = int(selected_pts_mask.sum().item())
+        self.prune_points(selected_pts_mask)
+        torch.cuda.empty_cache()
+        self.densification_postfix(
+            new_xyz,
+            new_features_dc,
+            new_features_rest,
+            new_opacity,
+            new_scaling,
+            new_rotation,
+            new_t,
+            new_scaling_t,
+            new_rotation_r,
+        )
+        return num_selected
+
     def densify_and_clone(
         self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold
     ):

@@ -1,0 +1,110 @@
+gaussian_dim: 4
+time_duration:
+- 0.0
+- 1.0
+num_pts: 150000
+num_pts_ratio: 1.0
+rot_4d: true
+force_sh_3d: false
+batch_size: 2
+isotropic_gaussians: false
+seed: 6666
+exhaust_test: false
+ModelParams:
+  sh_degree: 3
+  source_path: data/dnerf/hellwarrior
+  model_path: output/dnerf_ablation/hellwarrior/base
+  images: images
+  resolution: 2
+  white_background: false
+  data_device: cuda
+  eval: true
+  extension: .png
+  num_extra_pts: 0
+  loaded_pth: ''
+  frame_ratio: 1
+  dataloader: false
+  prefilter_var: -1.0
+PipelineParams:
+  convert_SHs_python: false
+  compute_cov3D_python: false
+  debug: false
+  use_usplat: false
+  sort_free_render: false
+  temporal_mask_threshold: 0.05
+  temporal_mask_mode: marginal
+  temporal_mask_keyframes: 0
+  temporal_mask_window: 2
+  random_dropout_prob: 0.0
+  env_map_res: 0
+  env_optimize_until: 1000000000
+  env_optimize_from: 0
+  eval_shfs_4d: true
+OptimizationParams:
+  iterations: 30000
+  position_lr_init: 0.00016
+  position_t_lr_init: -1.0
+  position_lr_final: 1.6e-06
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000
+  feature_lr: 0.0025
+  opacity_lr: 0.05
+  scaling_lr: 0.005
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  lambda_rdr: 0.0
+  enable_edge_guided_splitting: false
+  ess_from_iter: -1
+  ess_until_iter: -1
+  ess_interval: 2000
+  ess_edge_percentile: 0.90
+  ess_scale_percentile: 0.70
+  ess_max_splits: 5000
+  ess_split_children: 2
+  thresh_opa_prune: 0.005
+  densification_interval: 100
+  opacity_reset_interval: 3000
+  densify_from_iter: 500
+  densify_until_iter: 15000
+  densify_grad_threshold: 0.0002
+  densify_grad_t_threshold: 5.0e-06
+  densify_until_num_points: -1
+  final_prune_from_iter: -1
+  final_prune_ratio: 0.0
+  sh_increase_interval: 1000
+  lambda_opa_mask: 0.0
+  lambda_rigid: 0.0
+  lambda_motion: 0.0
+  lambda_depth: 0.0
+  mobilegs_opacity_phi_lr: 0.0
+  mobilegs_teacher_checkpoint: ''
+  mobilegs_force_first_order_sh: false
+  lambda_mobilegs_sh_distill: 0.0
+  lambda_mobilegs_depth_distill: 0.0
+  enable_spatio_temporal_pruning: false
+  spatio_temporal_pruning_ratio: 0.15
+  spatio_temporal_pruning_min_points: 5000
+  spatio_temporal_pruning_max_total_ratio: 0.4
+  spatio_temporal_pruning_random: false
+  spatio_temporal_pruning_from_iter: 2000
+  spatio_temporal_pruning_until_iter: 7500
+  spatio_temporal_pruning_interval: 2000
+  lambda_key: 0.05
+  lambda_non_key: 0.05
+  usplat_start_iter: 6000
+  usplat_eta_c: 0.5
+  usplat_phi: 1000000.0
+  usplat_key_ratio: 0.02
+  usplat_spt_threshold: 5
+  usplat_knn_k: 8
+  usplat_u_tau_percentile: -1.0
+  usplat_max_key_nodes: 2000
+  usplat_assignment_chunk_size: 128
+  usplat_key_assignment_chunk_size: 512
+  usplat_motion_window: 5
+  usplat_nonkey_loss_chunk_size: 32768
+  usplat_quat_chunk_size: 65536
+  usplat_cov_eigengap_eps: 0.0001
+  record_training_diagnostics: true
+  diagnostics_short_lifespan_threshold: 0.25
