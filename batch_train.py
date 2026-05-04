@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
 
@@ -208,6 +209,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-filename", default="ablation_metrics.csv")
     parser.add_argument("--summary-jsonl-filename", default="ablation_metrics.jsonl")
     parser.add_argument("--retry-failed-existing", action=argparse.BooleanOptionalAction, default=True, help="Retry runs whose run_metrics.json says failed. Use --no-retry-failed-existing to keep old skip-failed behavior.")
+
+    # Mobile-GS compression/reporting controls. These run inside batch_train.py
+    # after each ablation checkpoint is available, so compressed payloads and
+    # post-quantization metrics are stored with the ablation row.  By default
+    # this runs for every ablation variant, not only sort-free variants.
+    parser.add_argument("--mobilegs-report", action=argparse.BooleanOptionalAction, default=True, help="Export, compress, and benchmark Mobile-GS payloads for ablation reporting.")
+    parser.add_argument("--mobilegs-report-scope", choices=["all", "sort_free"], default="all", help="Which ablation rows receive Mobile-GS export/benchmark reporting.")
+    parser.add_argument("--mobilegs-benchmark-render-mode", choices=["match", "sort_free", "sorted"], default="match", help="Renderer used to benchmark the compressed payload: match the source run, force sort-free, or force sorted alpha blending.")
+    parser.add_argument("--mobilegs-force-first-order-sh", action=argparse.BooleanOptionalAction, default=True, help="Force ablations to train/export first-order spatial SH for Mobile-GS reporting.")
+    parser.add_argument("--mobilegs-teacher-checkpoint", default="", help="Optional sorted-render teacher checkpoint for Mobile-GS SH/depth distillation.")
+    parser.add_argument("--mobilegs-sh-distill-lambda", type=float, default=0.0, help="L1 teacher/student RGB distillation weight for Mobile-GS reporting runs.")
+    parser.add_argument("--mobilegs-depth-distill-lambda", type=float, default=0.0, help="Scale-invariant teacher depth distillation weight for Mobile-GS reporting runs.")
+    parser.add_argument("--mobilegs-mobile-filename", default="mobilegs_quantized.mobile.pt", help="Per-run Mobile-GS compressed payload filename.")
+    parser.add_argument("--mobilegs-metrics-filename", default="mobilegs_metrics.json", help="Per-run Mobile-GS export/benchmark metrics filename.")
+    parser.add_argument("--mobilegs-codebook-size", type=int, default=256)
+    parser.add_argument("--mobilegs-block-size", type=int, default=8)
+    parser.add_argument("--mobilegs-kmeans-iters", type=int, default=16)
+    parser.add_argument("--mobilegs-uniform-bits", type=int, default=8)
+    parser.add_argument("--mobilegs-build-visibility-filter", action=argparse.BooleanOptionalAction, default=True, help="Export true 4DGS-1K-style keyframe visibility masks for Mobile-GS payloads.")
+    parser.add_argument("--mobilegs-temporal-keyframes", type=int, default=32)
+    parser.add_argument("--mobilegs-temporal-mask-window", type=int, default=1)
+    parser.add_argument("--mobilegs-temporal-mask-threshold", type=float, default=0.05)
+    parser.add_argument("--mobilegs-views-per-keyframe", type=int, default=0)
+    parser.add_argument("--mobilegs-benchmark-split", choices=["test", "train"], default="test")
+    parser.add_argument("--mobilegs-benchmark-warmup", type=int, default=20)
+    parser.add_argument("--mobilegs-benchmark-repeats", type=int, default=200)
+    parser.add_argument("--mobilegs-quality-samples", type=int, default=16, help="Number of metadata cameras used for quantized-vs-raw render quality.")
 
     # Slurm controls
     parser.add_argument("--submit-slurm", action="store_true", help="Submit one main Slurm job that will launch srun workers.")
@@ -408,6 +436,8 @@ def invalid_variant_reason(flat_cfg: Mapping[str, Any], variant: AblationVariant
         return "sort_free_render does not return depth for lambda_depth"
     if bool(merged.get("sort_free_render", False)) and float(merged.get("lambda_opa_mask", 0.0) or 0.0) > 0.0:
         return "sort_free_render alpha proxy is not compatible with lambda_opa_mask"
+    if bool(merged.get("sort_free_render", False)) and bool(merged.get("use_usplat", False)):
+        return "USplat uncertainty requires sorted alpha-blending scores, not Mobile-GS OIT scores"
     return None
 
 
@@ -427,17 +457,63 @@ def filter_valid_variants(flat_cfg: Mapping[str, Any], variants: Sequence[Ablati
     return valid
 
 
-def apply_dependent_overrides(run_overrides: MutableMapping[str, Any], global_overrides: Mapping[str, Any], flat_cfg: Mapping[str, Any] | None = None) -> None:
+def mobilegs_training_overrides(args: argparse.Namespace, sort_free: bool, global_overrides: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return Mobile-GS training overrides owned by the ablation runner.
+
+    Mobile-GS export/compression/benchmarking can be reported for every
+    ablation row.  First-order SH and optional teacher distillation are therefore
+    not tied to the sorting axis.  The opacity/phi MLP is still trained only for
+    sort-free render rows, because ordinary sorted rendering never calls it.
+    """
+    out: Dict[str, Any] = {}
+
+    if bool(getattr(args, "mobilegs_report", True)) and bool(getattr(args, "mobilegs_force_first_order_sh", True)):
+        if "mobilegs_force_first_order_sh" not in global_overrides:
+            out["mobilegs_force_first_order_sh"] = True
+
+    teacher = str(getattr(args, "mobilegs_teacher_checkpoint", "") or "").strip()
+    sh_lambda = float(getattr(args, "mobilegs_sh_distill_lambda", 0.0) or 0.0)
+    depth_lambda = float(getattr(args, "mobilegs_depth_distill_lambda", 0.0) or 0.0)
+    if sh_lambda > 0.0 or depth_lambda > 0.0:
+        if not teacher:
+            raise ValueError(
+                "Mobile-GS distillation lambdas were requested but "
+                "--mobilegs-teacher-checkpoint is empty."
+            )
+        if "mobilegs_teacher_checkpoint" not in global_overrides:
+            out["mobilegs_teacher_checkpoint"] = str(Path(teacher).expanduser().resolve())
+        if "lambda_mobilegs_sh_distill" not in global_overrides:
+            out["lambda_mobilegs_sh_distill"] = sh_lambda
+        if "lambda_mobilegs_depth_distill" not in global_overrides:
+            out["lambda_mobilegs_depth_distill"] = depth_lambda
+
+    if sort_free:
+        if "mobilegs_opacity_phi_lr" not in global_overrides and float(out.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
+            out["mobilegs_opacity_phi_lr"] = 1e-3
+    else:
+        # Keep the Mobile-GS opacity/phi MLP out of ordinary sorted-render rows.
+        # Compression and first-order SH export still run for these rows; their
+        # benchmark uses the source sorted renderer unless explicitly overridden.
+        out["mobilegs_opacity_phi_lr"] = 0.0
+    return out
+
+
+def apply_dependent_overrides(
+    run_overrides: MutableMapping[str, Any],
+    global_overrides: Mapping[str, Any],
+    flat_cfg: Mapping[str, Any] | None = None,
+    args: argparse.Namespace | None = None,
+) -> None:
     flat_cfg = flat_cfg or {}
     sort_free = bool(run_overrides.get("sort_free_render", flat_cfg.get("sort_free_render", False)))
-    user_set_mobile_lr = "mobilegs_opacity_phi_lr" in global_overrides
-    if not sort_free:
-        # Keep the MobileGS MLP and optimizer out of ordinary sorted-render runs.
-        run_overrides["mobilegs_opacity_phi_lr"] = 0.0
-    elif not user_set_mobile_lr and float(run_overrides.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
-        # Sort-free training needs the view-dependent opacity/phi MLP.
-        run_overrides["mobilegs_opacity_phi_lr"] = 1e-3
-
+    if args is not None:
+        run_overrides.update(mobilegs_training_overrides(args, sort_free, global_overrides))
+    else:
+        user_set_mobile_lr = "mobilegs_opacity_phi_lr" in global_overrides
+        if not sort_free:
+            run_overrides["mobilegs_opacity_phi_lr"] = 0.0
+        elif not user_set_mobile_lr and float(run_overrides.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
+            run_overrides["mobilegs_opacity_phi_lr"] = 1e-3
 
 def infer_scene_name(config_path: Path, flat_cfg: Mapping[str, Any], explicit_scene_name: str | None) -> str:
     if explicit_scene_name:
@@ -477,6 +553,7 @@ PIPELINE_OVERRIDE_KEYS = {
     "use_usplat",
     "sort_free_render",
     "temporal_mask_threshold",
+    "temporal_mask_mode",
     "temporal_mask_keyframes",
     "temporal_mask_window",
     "random_dropout_prob",
@@ -495,6 +572,8 @@ OPTIMIZATION_OVERRIDE_KEYS = {
     "densify_grad_t_threshold", "densify_until_num_points", "final_prune_from_iter",
     "final_prune_ratio", "sh_increase_interval", "lambda_opa_mask", "lambda_rigid",
     "lambda_motion", "lambda_depth", "mobilegs_opacity_phi_lr",
+    "mobilegs_teacher_checkpoint", "mobilegs_force_first_order_sh",
+    "lambda_mobilegs_sh_distill", "lambda_mobilegs_depth_distill",
     "enable_spatio_temporal_pruning", "spatio_temporal_pruning_ratio",
     "spatio_temporal_pruning_min_points", "spatio_temporal_pruning_random",
     "spatio_temporal_pruning_from_iter", "spatio_temporal_pruning_until_iter",
@@ -634,6 +713,63 @@ def quota_cli_args(args: argparse.Namespace) -> List[str]:
     ]
 
 
+
+def mobilegs_cli_args(args: argparse.Namespace) -> List[str]:
+    out = [
+        "--mobilegs-report-scope",
+        str(args.mobilegs_report_scope),
+        "--mobilegs-benchmark-render-mode",
+        str(args.mobilegs_benchmark_render_mode),
+        "--mobilegs-sh-distill-lambda",
+        str(args.mobilegs_sh_distill_lambda),
+        "--mobilegs-depth-distill-lambda",
+        str(args.mobilegs_depth_distill_lambda),
+        "--mobilegs-mobile-filename",
+        str(args.mobilegs_mobile_filename),
+        "--mobilegs-metrics-filename",
+        str(args.mobilegs_metrics_filename),
+        "--mobilegs-codebook-size",
+        str(args.mobilegs_codebook_size),
+        "--mobilegs-block-size",
+        str(args.mobilegs_block_size),
+        "--mobilegs-kmeans-iters",
+        str(args.mobilegs_kmeans_iters),
+        "--mobilegs-uniform-bits",
+        str(args.mobilegs_uniform_bits),
+        "--mobilegs-temporal-keyframes",
+        str(args.mobilegs_temporal_keyframes),
+        "--mobilegs-temporal-mask-window",
+        str(args.mobilegs_temporal_mask_window),
+        "--mobilegs-temporal-mask-threshold",
+        str(args.mobilegs_temporal_mask_threshold),
+        "--mobilegs-views-per-keyframe",
+        str(args.mobilegs_views_per_keyframe),
+        "--mobilegs-benchmark-split",
+        str(args.mobilegs_benchmark_split),
+        "--mobilegs-benchmark-warmup",
+        str(args.mobilegs_benchmark_warmup),
+        "--mobilegs-benchmark-repeats",
+        str(args.mobilegs_benchmark_repeats),
+        "--mobilegs-quality-samples",
+        str(args.mobilegs_quality_samples),
+    ]
+    if bool(getattr(args, "mobilegs_report", True)):
+        out.append("--mobilegs-report")
+    else:
+        out.append("--no-mobilegs-report")
+    if bool(getattr(args, "mobilegs_force_first_order_sh", True)):
+        out.append("--mobilegs-force-first-order-sh")
+    else:
+        out.append("--no-mobilegs-force-first-order-sh")
+    teacher = str(getattr(args, "mobilegs_teacher_checkpoint", "") or "")
+    if teacher:
+        out.extend(["--mobilegs-teacher-checkpoint", teacher])
+    if bool(getattr(args, "mobilegs_build_visibility_filter", True)):
+        out.append("--mobilegs-build-visibility-filter")
+    else:
+        out.append("--no-mobilegs-build-visibility-filter")
+    return out
+
 def build_option_map(args: argparse.Namespace) -> Dict[str, List[str]]:
     return {
         "isotropy": normalize_choice_list(args.isotropy_options),
@@ -681,7 +817,7 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
             model_path = build_model_path(output_root, scene_name, variant)
             run_overrides = dict(variant.overrides)
             run_overrides.update(global_overrides)
-            apply_dependent_overrides(run_overrides, global_overrides, flat_cfg)
+            apply_dependent_overrides(run_overrides, global_overrides, flat_cfg, args)
             run_overrides["model_path"] = str(model_path)
             if args.seed_offset:
                 run_overrides["seed"] = base_seed + args.seed_offset + index
@@ -1215,6 +1351,242 @@ def evaluate_checkpoint(
 
 
 
+
+
+def _source_sort_free_for_run(run_spec: RunSpec) -> bool:
+    if str(run_spec.variant_tags.get("sorting", "")) == "sort_free":
+        return True
+    try:
+        cfg = flatten_cfg(load_yaml(Path(run_spec.generated_config_path)))
+        return bool(cfg.get("sort_free_render", False))
+    except Exception:
+        return "sort_free" in run_spec.variant_name
+
+
+def should_run_mobilegs_report(run_spec: RunSpec, args: argparse.Namespace) -> bool:
+    if not bool(getattr(args, "mobilegs_report", True)):
+        return False
+    scope = str(getattr(args, "mobilegs_report_scope", "all"))
+    if scope == "all":
+        return True
+    if scope == "sort_free":
+        return _source_sort_free_for_run(run_spec)
+    raise ValueError(f"Unsupported --mobilegs-report-scope={scope}")
+
+
+def _pipe_from_checkpoint(checkpoint_payload: Mapping[str, Any], args: argparse.Namespace, *, visibility: bool, render_mode: str) -> SimpleNamespace:
+    run_config = checkpoint_payload.get("run_config", {})
+    run_args = run_config.get("args", {}) if isinstance(run_config, Mapping) else {}
+    source_sort_free = bool(run_args.get("sort_free_render", False))
+    if render_mode == "match":
+        sort_free = source_sort_free
+    elif render_mode == "sort_free":
+        sort_free = True
+    elif render_mode == "sorted":
+        sort_free = False
+    else:
+        raise ValueError(f"Unsupported Mobile-GS benchmark render mode: {render_mode}")
+
+    # Start from the original run's rendering-related switches and override only
+    # the pieces needed for safe reporting. USplat/dropout are training-time
+    # regularizers and must not affect compression benchmarks.
+    return SimpleNamespace(
+        convert_SHs_python=bool(run_args.get("convert_SHs_python", False)),
+        compute_cov3D_python=bool(run_args.get("compute_cov3D_python", False)),
+        debug=False,
+        use_usplat=False,
+        sort_free_render=bool(sort_free),
+        temporal_mask_threshold=float(args.mobilegs_temporal_mask_threshold),
+        temporal_mask_keyframes=int(args.mobilegs_temporal_keyframes) if visibility else 0,
+        temporal_mask_window=int(args.mobilegs_temporal_mask_window),
+        temporal_mask_mode="visibility" if visibility else "marginal",
+        random_dropout_prob=0.0,
+        # The no-sort renderer cannot do env-map compositing. Keep env maps only
+        # when benchmarking with sorted alpha blending.
+        env_map_res=0 if sort_free else int(run_args.get("env_map_res", 0) or 0),
+        env_optimize_until=0,
+        env_optimize_from=0,
+        eval_shfs_4d=bool(run_args.get("eval_shfs_4d", False)) and not bool(run_args.get("mobilegs_force_first_order_sh", False)),
+    )
+
+
+def run_mobilegs_export_benchmark(
+    *,
+    repo_root: Path,
+    model_path: Path,
+    checkpoint_path: Path,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    """Export NVQ Mobile-GS payload and return flattened reporting metrics."""
+    repo_root = repo_root.resolve()
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    import torch
+    from gaussian_renderer import render
+    from scene.gaussian_model import GaussianModel
+    from utils.checkpoint_utils import load_checkpoint
+    from utils.image_utils import psnr
+    from utils.loss_utils import l1_loss, lpips as lpips_metric, ssim
+    from utils.mobile_compression import (
+        benchmark_renderer,
+        build_temporal_visibility_filter,
+        cameras_from_checkpoint_scene,
+        capture_mobile_payload,
+        load_mobile_payload,
+        restore_mobile_payload,
+        save_mobile_payload,
+        serialized_size,
+        tensor_storage_bytes,
+    )
+
+    map_location = "cuda" if torch.cuda.is_available() else "cpu"
+    if map_location != "cuda":
+        raise RuntimeError("Mobile-GS export/benchmark requires CUDA for rendering.")
+
+    checkpoint_payload = load_checkpoint(checkpoint_path, map_location)
+    run_args = checkpoint_payload.get("run_config", {}).get("args", {})
+    source_sort_free = bool(run_args.get("sort_free_render", False))
+    render_mode = str(getattr(args, "mobilegs_benchmark_render_mode", "match"))
+    benchmark_pipe_probe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode=render_mode)
+
+    gaussian_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
+    gaussians = GaussianModel(**gaussian_kwargs)
+    gaussians.restore(checkpoint_payload["gaussians"], training_args=None)
+    gaussians.active_sh_degree = gaussians.max_sh_degree
+    if hasattr(gaussians, "active_sh_degree_t"):
+        gaussians.active_sh_degree_t = gaussians.max_sh_degree_t
+    if gaussians.mobilegs_opacity_phi_nn is not None:
+        gaussians.mobilegs_opacity_phi_nn.eval()
+
+    if benchmark_pipe_probe.sort_free_render and gaussians.mobilegs_opacity_phi_nn is None:
+        raise RuntimeError(
+            "Requested Mobile-GS sort-free benchmarking for a checkpoint without a trained "
+            "Mobile-GS opacity/phi MLP. Use --mobilegs-benchmark-render-mode match/sorted, "
+            "or train this ablation with sort_free_render."
+        )
+
+    scene_meta = checkpoint_payload.get("scene", {})
+    background = torch.tensor(
+        [1.0, 1.0, 1.0] if scene_meta.get("white_background", False) else [0.0, 0.0, 0.0],
+        dtype=torch.float32,
+        device="cuda",
+    )
+    train_cameras = cameras_from_checkpoint_scene(scene_meta, split="train", device="cuda")
+    bench_cameras = cameras_from_checkpoint_scene(scene_meta, split=args.mobilegs_benchmark_split, device="cuda")
+    bench_split_used = args.mobilegs_benchmark_split
+    if not bench_cameras:
+        bench_cameras = train_cameras
+        bench_split_used = "train"
+    if not bench_cameras:
+        raise RuntimeError("Checkpoint does not contain camera metadata for Mobile-GS benchmarking.")
+
+    temporal_filter = None
+    if bool(args.mobilegs_build_visibility_filter):
+        visibility_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode="match")
+        temporal_filter = build_temporal_visibility_filter(
+            gaussians,
+            train_cameras if train_cameras else bench_cameras,
+            visibility_pipe,
+            background,
+            render,
+            keyframes=int(args.mobilegs_temporal_keyframes),
+            views_per_keyframe=int(args.mobilegs_views_per_keyframe),
+        )
+
+    payload = capture_mobile_payload(
+        gaussians,
+        first_order_sh=bool(args.mobilegs_force_first_order_sh),
+        codebook_size=int(args.mobilegs_codebook_size),
+        block_size=int(args.mobilegs_block_size),
+        kmeans_iters=int(args.mobilegs_kmeans_iters),
+        uniform_bits=int(args.mobilegs_uniform_bits),
+        include_mlp=True,
+        temporal_visibility_filter=temporal_filter,
+    )
+
+    mobile_path = model_path / str(args.mobilegs_mobile_filename)
+    metrics_path = model_path / str(args.mobilegs_metrics_filename)
+    save_mobile_payload(payload, str(mobile_path))
+
+    restored_payload = load_mobile_payload(str(mobile_path), map_location="cpu")
+    mobile = restore_mobile_payload(restored_payload, training_args=None, device="cuda")
+    mobile_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=temporal_filter is not None, render_mode=render_mode)
+    fps = benchmark_renderer(
+        mobile,
+        bench_cameras,
+        mobile_pipe,
+        background,
+        render,
+        warmup=int(args.mobilegs_benchmark_warmup),
+        repeats=int(args.mobilegs_benchmark_repeats),
+    )
+
+    raw_gaussian_size = tensor_storage_bytes({
+        "xyz": gaussians.get_xyz,
+        "features_dc": gaussians._features_dc,
+        "features_rest": gaussians._features_rest,
+        "scaling": gaussians._scaling,
+        "opacity": gaussians._opacity,
+        "t": gaussians._t,
+        "scaling_t": gaussians._scaling_t,
+        "rotation": gaussians._rotation,
+        "rotation_r": gaussians._rotation_r,
+    })
+
+    quality = {"count": 0, "l1": None, "psnr": None, "ssim": None, "lpips": None}
+    quality_samples = max(0, int(args.mobilegs_quality_samples))
+    if quality_samples > 0:
+        raw_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode=render_mode)
+        sums = {"l1": 0.0, "psnr": 0.0, "ssim": 0.0, "lpips": 0.0, "count": 0}
+        with torch.no_grad():
+            for cam in bench_cameras[:quality_samples]:
+                ref = torch.clamp(render(cam, gaussians, raw_pipe, background)["render"], 0.0, 1.0)
+                out = torch.clamp(render(cam, mobile, mobile_pipe, background)["render"], 0.0, 1.0)
+                sums["l1"] += float(l1_loss(out, ref).item())
+                sums["psnr"] += float(psnr(out, ref).mean().item())
+                sums["ssim"] += float(ssim(out, ref).mean().item())
+                sums["lpips"] += float(lpips_metric(out[None].cpu(), ref[None].cpu()).item())
+                sums["count"] += 1
+        if sums["count"]:
+            quality = {k: (v / sums["count"] if k != "count" else v) for k, v in sums.items()}
+
+    summary = {
+        "status": "ok",
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "mobile_payload_path": str(mobile_path.resolve()),
+        "mobile_metrics_json_path": str(metrics_path.resolve()),
+        "num_points": int(mobile.get_xyz.shape[0]),
+        "raw_checkpoint_bytes": int(checkpoint_path.stat().st_size),
+        "raw_gaussian_tensor_bytes": int(raw_gaussian_size),
+        "payload_serialized_bytes": int(serialized_size(restored_payload)),
+        "file_bytes": int(mobile_path.stat().st_size),
+        "compression_vs_raw_gaussian_tensors": float(raw_gaussian_size) / max(float(mobile_path.stat().st_size), 1.0),
+        "first_order_sh": bool(args.mobilegs_force_first_order_sh),
+        "source_sort_free_render": bool(source_sort_free),
+        "benchmark_render_mode_requested": render_mode,
+        "benchmark_sort_free_render": bool(mobile_pipe.sort_free_render),
+        "mobilegs_report_scope": str(args.mobilegs_report_scope),
+        "nvq": {
+            "codebook_size": int(args.mobilegs_codebook_size),
+            "block_size": int(args.mobilegs_block_size),
+            "kmeans_iters": int(args.mobilegs_kmeans_iters),
+            "uniform_bits": int(args.mobilegs_uniform_bits),
+        },
+        "temporal_visibility_filter": temporal_filter is not None,
+        "benchmark_split_used": bench_split_used,
+        "fps": fps,
+        "quality_vs_raw_checkpoint": quality,
+    }
+    write_json(metrics_path, summary)
+    return _flatten_mobile_metrics(summary)
+
+
+def _flatten_mobile_metrics(summary: Mapping[str, Any]) -> Dict[str, Any]:
+    flat = flatten_metric_payload("mobile", summary)
+    flat["mobile_status"] = str(summary.get("status", "ok"))
+    return flat
+
 def flatten_metric_payload(prefix: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
     for key, value in payload.items():
@@ -1310,6 +1682,19 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
             except Exception as exc:
                 row["status"] = "metrics_failed"
                 row["metrics_error"] = str(exc)
+
+        if should_run_mobilegs_report(run_spec, args):
+            try:
+                mobile_result = run_mobilegs_export_benchmark(
+                    repo_root=repo_root,
+                    model_path=model_path,
+                    checkpoint_path=checkpoint_path,
+                    args=args,
+                )
+                row.update(mobile_result)
+            except Exception as exc:
+                row["mobile_status"] = "failed"
+                row["mobile_error"] = str(exc)
 
         row.update(load_training_diagnostics(model_path))
         row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
@@ -1731,6 +2116,7 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
                     "--python",
                     effective_python(args),
                     *quota_cli_args(args),
+                    *mobilegs_cli_args(args),
                 ],
             )
         )

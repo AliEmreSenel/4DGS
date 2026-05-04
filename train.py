@@ -534,6 +534,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     scene.checkpoint_run_config = build_run_config(run_config_args, gaussian_kwargs)
     scene.checkpoint_include_mobilegs = bool(getattr(pipe, "sort_free_render", False))
 
+    if getattr(pipe, "sort_free_render", False) and bool(use_usplat):
+        raise ValueError(
+            "USplat uncertainty requires sorted alpha-blending scores. "
+            "Disable --sort_free_render or --use_usplat for this run."
+        )
+
     if getattr(pipe, "sort_free_render", False):
         if getattr(pipe, "env_map_res", 0):
             raise ValueError(

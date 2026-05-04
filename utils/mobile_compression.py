@@ -367,9 +367,10 @@ def restore_mobile_payload(payload: Mapping, training_args=None, device="cuda") 
     gm.active_sh_degree_t = int(meta.get("active_sh_degree_t", 0))
     gm.spatial_lr_scale = float(meta.get("spatial_lr_scale", 1.0))
 
+    # The export path already Morton-sorts both xyz and every encoded attribute
+    # before GPCC/NVQ encoding. Do not sort again on restore, otherwise xyz and
+    # decoded attributes become desynchronized.
     xyz_q = decompress_gpcc(payload["xyz"]).to(device=device, dtype=torch.int32)
-    sort_idx = calculate_morton_order(xyz_q.int())
-    xyz_q = xyz_q[sort_idx]
     xyz = _dequantize_u16(xyz_q, meta["xyz_quant"], device=device)
 
     attrs = {name: _decode_attr(pack, device=device) for name, pack in payload["attr"].items()}
