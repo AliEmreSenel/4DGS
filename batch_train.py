@@ -6,7 +6,7 @@ Features:
 - Cartesian-product ablations across scenes/configs
 - Metrics logging per run: PSNR, SSIM, LPIPS, final Gaussian count,
   checkpoint size, render FPS, peak VRAM, training wall-clock
-- USplat on/off as an ablation axis
+- USplat on/off and DropoutGS-style RDR on/off as ablation axes
 - Robust failure handling: failed runs are recorded and skipped for metrics,
   but the overall orchestration continues
 - Slurm integration with one main batch job and 4 long-lived `srun` worker steps
@@ -66,7 +66,21 @@ DEFAULT_USPLAT = {
     "use_usplat": {"use_usplat": True},
 }
 
-SUPPORTED_AXES = ("isotropy", "appearance", "sorting", "pruning", "usplat")
+
+def build_dropout_registry(dropout_prob: float, lambda_rdr: float) -> Dict[str, Dict[str, Any]]:
+    enabled = {
+        "random_dropout_prob": float(dropout_prob),
+        "lambda_rdr": float(lambda_rdr),
+    }
+    return {
+        "no_dropout": {"random_dropout_prob": 0.0, "lambda_rdr": 0.0},
+        "dropout": dict(enabled),
+        # Backwards-compatible alias matching the existing use_usplat naming style.
+        "use_dropout": dict(enabled),
+    }
+
+
+SUPPORTED_AXES = ("isotropy", "appearance", "sorting", "pruning", "usplat", "dropout")
 
 
 @dataclass(frozen=True)
@@ -160,12 +174,15 @@ def parse_args() -> argparse.Namespace:
         metavar="KEY=VALUE",
         help="Extra flat override applied to every run.",
     )
-    parser.add_argument("--axes", default="isotropy,appearance", help="Comma-separated ablation axes. The default is intentionally small and safe; add sorting,pruning,usplat explicitly for larger sweeps.")
+    parser.add_argument("--axes", default="isotropy,appearance", help="Comma-separated ablation axes. The default is intentionally small and safe; add sorting,pruning,usplat,dropout explicitly for larger sweeps.")
     parser.add_argument("--isotropy-options", default="anisotropic,isotropic")
     parser.add_argument("--appearance-options", default="rgb,sh3")
     parser.add_argument("--sorting-options", default="sort")
     parser.add_argument("--pruning-options", default="no_pruning,densify_then_prune_once")
     parser.add_argument("--usplat-options", default="no_usplat")
+    parser.add_argument("--dropout-options", default="no_dropout,dropout")
+    parser.add_argument("--dropout-prob", type=float, default=0.2, help="Gaussian dropout probability for the enabled dropout ablation option.")
+    parser.add_argument("--dropout-lambda-rdr", type=float, default=1.0, help="RDR consistency-loss weight for the enabled dropout ablation option.")
     parser.add_argument("--include-invalid-combinations", action="store_true", help="Do not filter known incompatible ablation combinations.")
 
     parser.add_argument("--one-shot-prune-step", type=int, default=5001)
@@ -323,7 +340,12 @@ def build_pruning_registry(total_iterations: int, options: ScheduleOptions) -> D
     }
 
 
-def build_axis_registry(flat_cfg: Mapping[str, Any], schedule_options: ScheduleOptions) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def build_axis_registry(
+    flat_cfg: Mapping[str, Any],
+    schedule_options: ScheduleOptions,
+    dropout_prob: float,
+    dropout_lambda_rdr: float,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     total_iterations = int(flat_cfg.get("iterations", 0))
     return {
         "isotropy": DEFAULT_ISOTROPY,
@@ -331,6 +353,7 @@ def build_axis_registry(flat_cfg: Mapping[str, Any], schedule_options: ScheduleO
         "sorting": DEFAULT_SORTING,
         "pruning": build_pruning_registry(total_iterations, schedule_options),
         "usplat": DEFAULT_USPLAT,
+        "dropout": build_dropout_registry(dropout_prob, dropout_lambda_rdr),
     }
 
 
@@ -350,8 +373,15 @@ def build_cartesian_variants(
     option_map: Mapping[str, Sequence[str]],
     flat_cfg: Mapping[str, Any],
     schedule_options: ScheduleOptions,
+    dropout_prob: float,
+    dropout_lambda_rdr: float,
 ) -> List[AblationVariant]:
-    registry = build_axis_registry(flat_cfg=flat_cfg, schedule_options=schedule_options)
+    registry = build_axis_registry(
+        flat_cfg=flat_cfg,
+        schedule_options=schedule_options,
+        dropout_prob=dropout_prob,
+        dropout_lambda_rdr=dropout_lambda_rdr,
+    )
     per_axis: List[List[AblationVariant]] = []
     for axis_name in axes:
         per_axis.append(build_axis_variants(axis_name, option_map[axis_name], registry))
@@ -611,6 +641,7 @@ def build_option_map(args: argparse.Namespace) -> Dict[str, List[str]]:
         "sorting": normalize_choice_list(args.sorting_options),
         "pruning": normalize_choice_list(args.pruning_options),
         "usplat": normalize_choice_list(args.usplat_options),
+        "dropout": normalize_choice_list(args.dropout_options),
     }
 
 
@@ -628,7 +659,14 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
         config_path = Path(config_raw)
         cfg = load_yaml(config_path)
         flat_cfg = flatten_cfg(cfg)
-        variants = build_cartesian_variants(requested_axes, option_map, flat_cfg, schedule_options)
+        variants = build_cartesian_variants(
+            requested_axes,
+            option_map,
+            flat_cfg,
+            schedule_options,
+            dropout_prob=args.dropout_prob,
+            dropout_lambda_rdr=args.dropout_lambda_rdr,
+        )
         variants = filter_valid_variants(flat_cfg, variants, args.include_invalid_combinations)
         if args.limit is not None:
             variants = variants[: args.limit]
@@ -864,6 +902,9 @@ def estimated_run_cost(run_spec: RunSpec, action: str) -> float:
         cost *= 1.15
     if tags.get("appearance") == "sh3":
         cost *= 1.10
+    if tags.get("dropout") in {"dropout", "use_dropout"}:
+        # RDR performs an additional dropout render in each training iteration.
+        cost *= 1.50
     if tags.get("pruning") == "interleaved_prune_densify":
         cost *= 1.20
     elif tags.get("pruning") == "densify_then_prune_once":
