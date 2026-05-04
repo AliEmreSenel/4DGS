@@ -23,7 +23,7 @@
 
 #title-slide()
 
-#let goal = tblock.with(blocktitle: "Goal")
+#let block = tblock.with()
 
 = Overview
 
@@ -38,7 +38,7 @@
   - OMNI-4DGS combines these ideas into a lightweight dynamic reconstruction pipeline.
   \
 
-  #goal(title: "Final Model")[
+  #block()[
     Compact 4DGS architecture validated through ablations and best-model evaluation.
   ]
 ]
@@ -82,18 +82,42 @@
 ]
 
 #slide(title: "Contributions")[
-  .
+  \ 
+  
+  Each codebase contributes with features and clashes.
+
+  #table(
+    columns: (1.1fr, 1fr, 1fr, 1fr, 1fr),
+    stroke: none,
+
+    // vertical lines between columns only
+    table.vline(x: 1, stroke: black),
+    table.vline(x: 2, stroke: black),
+    table.vline(x: 3, stroke: black),
+    table.vline(x: 4, stroke: black),
+
+    // horizontal line below header row
+    table.hline(y: 1, stroke: black),
+    table.hline(y: 2, stroke: gray),
+    table.hline(y: 3, stroke: black),
+
+    [*4DGS-Native*], [*Instant4D*], [*MobileGS*], [*1000FPS*], [*USPLAT*],
+
+    [Training Logic], [Isotropic Gaussians], [Sort-Free Rendering], [Spatio-Temporal Pruning], [Uncertainty-aware Loss],
+
+    [SH Ablations], [MegaSAM Init], [MLP Compress], [Visibility Masks], [Motion Loss],
+
+    [Backbone], [Render], [Memory], [Pruning], [Movement],
+  )
+ 
+  \ 
+  #block(title: "Additions", "Dropout, Densification Schedule")
+ 
 ]
 
 #slide(title: "Contributions & Challenges")[
-  .
-]
-
-
-= Results
-
-#slide(title: "Ablations")[
-  .
+  \
+  #ablations
 ]
 
 #slide(title: "Comparison")[
