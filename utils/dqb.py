@@ -238,18 +238,29 @@ def apply_dqb_to_batch(
     """
     N_n, Kp1 = nonkey_nbrs.shape
     device = R_key_t.device
+    if N_n == 0:
+        return p_canon.new_empty((0, 3)), p_canon.new_empty((0, 4))
+    if R_key_t.shape[0] == 0:
+        q = p_canon.new_zeros((N_n, 4))
+        q[:, 0] = 1.0
+        return p_canon, q
 
-    # Collect neighbor R and t for all non-key nodes at once
-    # nonkey_nbrs: (N_n, K+1) indices into key arrays
-    nonkey_nbrs = nonkey_nbrs.clamp(0, max(R_key_t.shape[0] - 1, 0))
+    # Collect neighbor R and t for all non-key nodes at once.  Stale graphs can
+    # carry -1/out-of-range indices after pruning or chunked laptop runs; clamp
+    # the index but remove its contribution from the DQB weights.
+    raw_nbrs = nonkey_nbrs.to(device=device, dtype=torch.long)
+    invalid = (raw_nbrs < 0) | (raw_nbrs >= int(R_key_t.shape[0]))
+    nonkey_nbrs = raw_nbrs.clamp(0, max(R_key_t.shape[0] - 1, 0))
+    w_nbr = torch.nan_to_num(nonkey_nbr_weights.to(device=device), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    w_nbr = torch.where(invalid, torch.zeros_like(w_nbr), w_nbr)
+    w_sum = w_nbr.sum(dim=-1, keepdim=True)
+    w_nbr = torch.where(w_sum > 0, w_nbr / w_sum.clamp_min(1e-8), torch.ones_like(w_nbr) / float(max(Kp1, 1)))
+
     flat_idx = nonkey_nbrs.reshape(-1)                           # (N_n*(K+1),)
     R_nbr = R_key_t[flat_idx].reshape(N_n, Kp1, 3, 3)          # (N_n, K+1, 3, 3)
     t_nbr = t_key_t[flat_idx].reshape(N_n, Kp1, 3)             # (N_n, K+1, 3)
     R_nbr = torch.nan_to_num(R_nbr, nan=0.0, posinf=0.0, neginf=0.0)
     t_nbr = torch.nan_to_num(t_nbr, nan=0.0, posinf=1e6, neginf=-1e6)
-    w_nbr = torch.nan_to_num(nonkey_nbr_weights, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
-    w_sum = w_nbr.sum(dim=-1, keepdim=True)
-    w_nbr = torch.where(w_sum > 0, w_nbr / w_sum.clamp_min(1e-8), torch.ones_like(w_nbr) / float(max(Kp1, 1)))
 
     # Dual quaternion encoding: (N_n, K+1, 8)
     dq = se3_to_dual_quat(R_nbr, t_nbr)  # (N_n, K+1, 8)

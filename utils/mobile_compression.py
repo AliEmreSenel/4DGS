@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from scene.cameras import Camera
-from scene.gaussian_model import GaussianModel
+from scene.gaussian_model import GaussianModel, coerce_time_duration
 from utils.gpcc_utils import calculate_morton_order, compress_gpcc, decompress_gpcc
 from utils.system_utils import mkdir_p
 
@@ -328,7 +328,7 @@ def capture_mobile_payload(
             "active_sh_degree": int(active_sh_degree),
             "max_sh_degree_t": int(max_sh_degree_t),
             "active_sh_degree_t": int(active_sh_degree_t),
-            "time_duration": list(gaussians.time_duration),
+            "time_duration": coerce_time_duration(gaussians.time_duration),
             "prefilter_var": float(gaussians.prefilter_var),
             "spatial_lr_scale": float(gaussians.spatial_lr_scale),
             "num_points": int(gaussians.get_xyz.shape[0]),
@@ -355,7 +355,7 @@ def restore_mobile_payload(payload: Mapping, training_args=None, device="cuda") 
     model_kwargs = {
         "sh_degree": int(meta["max_sh_degree"]),
         "gaussian_dim": int(meta["gaussian_dim"]),
-        "time_duration": list(meta["time_duration"]),
+        "time_duration": coerce_time_duration(meta["time_duration"]),
         "rot_4d": bool(meta["rot_4d"]),
         "force_sh_3d": bool(meta["force_sh_3d"]),
         "sh_degree_t": int(meta.get("max_sh_degree_t", 0)),

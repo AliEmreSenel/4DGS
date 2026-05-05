@@ -202,6 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preflight", action="store_true", help="Check Python modules and Slurm settings without reading configs, submitting jobs, or training.")
     parser.add_argument("--python", default=sys.executable, help="Python executable used when the runner mode resolves to python.")
     parser.add_argument("--runner", choices=["auto", "uv", "python"], default="auto", help="Command runner for train/eval/worker launch. auto prefers `uv run` when uv is available.")
+    parser.add_argument("--laptop-8gb", action="store_true", help="Use local, low-memory defaults for quick single-GPU ablation smoke tests without Slurm.")
     parser.add_argument("--uv-binary", default="uv", help="uv executable to use when --runner=uv or auto resolves to uv.")
     parser.add_argument("--train-script", default="train.py", help="Training entrypoint to invoke.")
     parser.add_argument("--repo-root", default=None, help="Repository root. Inferred from --train-script when omitted.")
@@ -229,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--matrix-preset",
-        choices=["paper", "compact", "full", "cartesian"],
+        choices=["essential", "paper", "compact", "full", "cartesian"],
         default=None,
         help=(
             "A curated ablation matrix. The default is 'paper' unless an explicit "
@@ -338,6 +339,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slurm-extra-sbatch-arg", dest="slurm_extra_sbatch_args", action="append", default=[])
     parser.add_argument("--slurm-srun-extra-arg", dest="slurm_srun_extra_args", action="append", default=[])
     parser.add_argument("--no-auto-submit-from-driver", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--quota-reservation", action=argparse.BooleanOptionalAction, default=True, help="Reserve home/quota space before local or Slurm runs. Disable for laptop/non-Slurm runs with --no-quota-reservation.")
     parser.add_argument("--quota-command", default="lquota")
     parser.add_argument("--quota-fallback-root", default=str(Path.home()), help="Directory measured with du --apparent-size when lquota is unavailable. Defaults to the user home.")
     parser.add_argument("--quota-limit-gb", type=float, default=180.0, help="Logical effective quota limit in GB. The probed home quota soft limit is 180G.")
@@ -366,8 +368,78 @@ def parse_args() -> argparse.Namespace:
     )
     if args.matrix_preset is None:
         args.matrix_preset = "cartesian" if matrix_flag_supplied else "paper"
+    if args.laptop_8gb:
+        apply_laptop_8gb_defaults(args, matrix_flag_supplied)
     return args
 
+
+
+def _cli_option_supplied(*names: str) -> bool:
+    argv = sys.argv[1:]
+    return any(raw == name or raw.startswith(name + "=") for raw in argv for name in names)
+
+
+def _override_key_set(items: Sequence[str]) -> set[str]:
+    keys: set[str] = set()
+    for item in items:
+        if "=" in item:
+            keys.add(item.split("=", 1)[0].strip())
+    return keys
+
+
+def _append_default_override(args: argparse.Namespace, key: str, value: Any) -> None:
+    if key in _override_key_set(args.global_overrides):
+        return
+    args.global_overrides.append(f"{key}={repr(value)}")
+
+
+def apply_laptop_8gb_defaults(args: argparse.Namespace, matrix_flag_supplied: bool) -> None:
+    """Bias the batch driver toward safe local smoke tests on an 8GB GPU."""
+    if not _cli_option_supplied("--runner"):
+        args.runner = "python"
+    if not _cli_option_supplied("--quota-reservation", "--no-quota-reservation"):
+        args.quota_reservation = False
+    if not matrix_flag_supplied and not _cli_option_supplied("--matrix-preset"):
+        args.matrix_preset = "essential"
+    if not _cli_option_supplied("--eval-split"):
+        args.eval_split = "train"
+    if not _cli_option_supplied("--render-fps-warmup"):
+        args.render_fps_warmup = 0
+    if not _cli_option_supplied("--vram-poll-interval"):
+        args.vram_poll_interval = 0.5
+    if not _cli_option_supplied("--mobilegs-report", "--no-mobilegs-report"):
+        args.mobilegs_report = False
+    if not _cli_option_supplied("--mobilegs-build-visibility-filter", "--no-mobilegs-build-visibility-filter"):
+        args.mobilegs_build_visibility_filter = False
+    if not _cli_option_supplied("--mobilegs-quality-samples"):
+        args.mobilegs_quality_samples = 0
+    if not _cli_option_supplied("--mobilegs-benchmark-warmup"):
+        args.mobilegs_benchmark_warmup = 0
+    if not _cli_option_supplied("--mobilegs-benchmark-repeats"):
+        args.mobilegs_benchmark_repeats = min(int(args.mobilegs_benchmark_repeats), 20)
+
+    laptop_defaults = {
+        "iterations": 1500,
+        "test_iterations": [1500],
+        "save_iterations": [1500],
+        "batch_size": 1,
+        "num_pts": 20000,
+        "num_pts_ratio": 0.25,
+        "resolution": 4,
+        "densify_from_iter": 250,
+        "densify_until_iter": 900,
+        "densification_interval": 100,
+        "densify_until_num_points": 75000,
+        "position_lr_max_steps": 1500,
+        "usplat_start_iter": 900,
+        "usplat_max_key_nodes": 512,
+        "usplat_assignment_chunk_size": 4,
+        "usplat_key_assignment_chunk_size": 128,
+        "usplat_nonkey_loss_chunk_size": 4096,
+        "usplat_quat_chunk_size": 8192,
+    }
+    for key, value in laptop_defaults.items():
+        _append_default_override(args, key, value)
 
 def load_yaml(path: str | Path) -> Dict[str, Any]:
     if yaml is None:
@@ -415,6 +487,36 @@ def parse_key_value_list(items: Sequence[str]) -> Dict[str, Any]:
         key, value = item.split("=", 1)
         overrides[key.strip()] = parse_scalar(value.strip())
     return overrides
+
+
+def coerce_time_duration_value(value: Any) -> List[float]:
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = ast.literal_eval(text)
+        except Exception:
+            cleaned = text.strip('[]()')
+            value = [piece.strip() for piece in cleaned.replace(';', ',').split(',') if piece.strip()]
+    if isinstance(value, (int, float)):
+        raise ValueError(f"time_duration must contain two values, got scalar {value!r}")
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"time_duration must contain two numeric values, got {value!r}")
+    out = [float(value[0]), float(value[1])]
+    if not all(math.isfinite(v) for v in out):
+        raise ValueError(f"time_duration must be finite, got {value!r}")
+    if out[1] < out[0]:
+        raise ValueError(f"time_duration end must be >= start, got {out!r}")
+    return out
+
+
+def normalize_generated_config_types(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize YAML values that otherwise round-trip as problematic strings."""
+    if "time_duration" in config:
+        config["time_duration"] = coerce_time_duration_value(config["time_duration"])
+    for value in config.values():
+        if isinstance(value, dict):
+            normalize_generated_config_types(value)
+    return config
 
 
 def normalize_choice_list(raw: str) -> List[str]:
@@ -662,7 +764,15 @@ def build_matrix_preset_variants(
             {**instant, **mobile},
         ),
     ]
-    if preset == "compact":
+    if preset == "essential":
+        keep = {
+            "paper_4dgs_native",
+            "paper_dropout_rdr_ess",
+            "paper_4dgs1k_st_prune",
+            "paper_instant4d_lite",
+        }
+        rows = [row for row in rows if row[0] in keep]
+    elif preset == "compact":
         keep = {
             "paper_4dgs_native",
             "paper_4dgs1k_st_prune",
@@ -1092,7 +1202,8 @@ def wrap_script_command(args: argparse.Namespace, script_path: Path, script_args
 
 def quota_cli_args(args: argparse.Namespace) -> List[str]:
     resolved_quota = resolve_quota_command(args) or str(getattr(args, "quota_command", "lquota"))
-    return [
+    args_out = ["--no-quota-reservation"] if not bool(getattr(args, "quota_reservation", True)) else ["--quota-reservation"]
+    args_out.extend([
         "--quota-command",
         resolved_quota,
         "--quota-fallback-root",
@@ -1105,7 +1216,8 @@ def quota_cli_args(args: argparse.Namespace) -> List[str]:
         str(args.train_run_peak_storage_gb),
         "--quota-poll-interval",
         str(args.quota_poll_interval),
-    ]
+    ])
+    return args_out
 
 
 
@@ -1232,8 +1344,10 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
             if args.seed_offset:
                 run_overrides["seed"] = base_seed + args.seed_offset + index
 
-            derived_cfg = apply_flat_overrides(cfg, run_overrides)
+            derived_cfg = normalize_generated_config_types(apply_flat_overrides(cfg, run_overrides))
             validate_run_paths(derived_cfg, repo_root)
+            derived_flat = flatten_cfg(derived_cfg)
+            run_iterations = int(derived_flat.get("iterations", iterations))
             generated_config_path = config_root / f"{variant.name}.yaml"
             write_yaml(generated_config_path, derived_cfg)
 
@@ -1248,7 +1362,7 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
                     variant_name=variant.name,
                     variant_tags=variant.tags,
                     index=index,
-                    iterations=iterations,
+                    iterations=run_iterations,
                 )
             )
     return run_specs
@@ -1604,7 +1718,7 @@ def robust_torch_load(torch_module: Any, path: Path, map_location: str) -> Any:
 
 
 def load_generated_namespace(cfg_path: Path, repo_root: Path) -> argparse.Namespace:
-    flat_cfg = flatten_cfg(load_yaml(cfg_path))
+    flat_cfg = flatten_cfg(normalize_generated_config_types(load_yaml(cfg_path)))
     ns = argparse.Namespace(**flat_cfg)
     source_path = getattr(ns, "source_path", None)
     if isinstance(source_path, str) and source_path and not os.path.isabs(source_path):
@@ -1646,7 +1760,7 @@ def evaluate_checkpoint(
     from arguments import ModelParams, PipelineParams
     from gaussian_renderer import render
     from scene import Scene
-    from scene.gaussian_model import GaussianModel
+    from scene.gaussian_model import GaussianModel, coerce_time_duration
     from utils.checkpoint_utils import checkpoint_args, load_checkpoint
     from utils.image_utils import psnr
     from utils.loss_utils import lpips as lpips_metric
@@ -1671,7 +1785,9 @@ def evaluate_checkpoint(
     gaussian_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
     if int(gaussian_kwargs.get("gaussian_dim", 4)) != 4:
         raise ValueError("Only 4D Gaussian checkpoints are supported.")
-    time_duration = list(gaussian_kwargs.get("time_duration", [-0.5, 0.5]))
+    time_duration = coerce_time_duration(gaussian_kwargs.get("time_duration", getattr(merged, "time_duration", [-0.5, 0.5])))
+    gaussian_kwargs["time_duration"] = time_duration
+    merged.time_duration = time_duration
     num_pts = int(getattr(merged, "num_pts", 100000))
     num_pts_ratio = float(getattr(merged, "num_pts_ratio", 1.0))
 
@@ -1835,7 +1951,7 @@ def run_mobilegs_export_benchmark(
 
     import torch
     from gaussian_renderer import render
-    from scene.gaussian_model import GaussianModel
+    from scene.gaussian_model import GaussianModel, coerce_time_duration
     from utils.checkpoint_utils import load_checkpoint
     from utils.image_utils import psnr
     from utils.loss_utils import l1_loss, lpips as lpips_metric, ssim
@@ -1862,6 +1978,7 @@ def run_mobilegs_export_benchmark(
     benchmark_pipe_probe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode=render_mode)
 
     gaussian_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
+    gaussian_kwargs["time_duration"] = coerce_time_duration(gaussian_kwargs.get("time_duration", [-0.5, 0.5]))
     gaussians = GaussianModel(**gaussian_kwargs)
     gaussians.restore(checkpoint_payload["gaussians"], training_args=None)
     gaussians.active_sh_degree = gaussians.max_sh_degree
@@ -2114,13 +2231,16 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
 
         row.update(load_training_diagnostics(model_path))
         row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
-        try:
-            used_gb, limit_gb = query_lquota_gb(args)
-            row["quota_used_gb"] = used_gb
-            row["quota_limit_gb"] = limit_gb
-            row["quota_free_gb"] = max(0.0, limit_gb - used_gb)
-        except Exception as exc:
-            row["quota_error"] = str(exc)
+        if bool(getattr(args, "quota_reservation", True)):
+            try:
+                used_gb, limit_gb = query_lquota_gb(args)
+                row["quota_used_gb"] = used_gb
+                row["quota_limit_gb"] = limit_gb
+                row["quota_free_gb"] = max(0.0, limit_gb - used_gb)
+            except Exception as exc:
+                row["quota_error"] = str(exc)
+        else:
+            row["quota_status"] = "disabled"
 
         metrics_json_path = write_run_metrics_json(model_path, row)
         row["metrics_json_path"] = str(metrics_json_path.resolve())
@@ -2366,7 +2486,9 @@ def save_quota_reservations(path: Path, payload: Sequence[Mapping[str, Any]]) ->
     write_json(path, list(payload))
 
 
-def acquire_quota_reservation(args: argparse.Namespace, summary_root: Path, model_path: Path) -> str:
+def acquire_quota_reservation(args: argparse.Namespace, summary_root: Path, model_path: Path) -> str | None:
+    if not bool(getattr(args, "quota_reservation", True)):
+        return None
     lock_path, reservations_path = quota_paths(summary_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     reservation_id = f"{os.getpid()}::{model_path}"
@@ -2749,12 +2871,16 @@ def run_preflight(args: argparse.Namespace) -> int:
         print(f"  runner probe failed: {exc}")
         failures.append("runner-python")
 
+    needs_slurm = bool(args.submit_slurm or args.slurm_driver or args.slurm_worker)
     for command in ["sbatch", "srun", "sinfo", "squeue"]:
         path = shutil.which(command)
         print(f"  command {command}: {path or 'missing'}")
-        if path is None and command in {"sbatch", "srun"}:
+        if needs_slurm and path is None and command in {"sbatch", "srun"}:
             failures.append(command)
-    print_slurm_capacity_plan(args, [])
+    if needs_slurm:
+        print_slurm_capacity_plan(args, [])
+    else:
+        print("  slurm: not required for this local run")
     if failures:
         print("[PREFLIGHT] missing requirements: " + ", ".join(failures))
         print("[PREFLIGHT] install/use a training environment with at least PyYAML, PyTorch+CUDA, NumPy, Pillow, and tqdm.")

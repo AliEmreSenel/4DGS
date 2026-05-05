@@ -9,6 +9,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import ast
+
 import torch
 import numpy as np
 from utils.general_utils import (
@@ -29,6 +31,47 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation
 from utils.sh_utils import sh_channels_4d
 from utils.gpcc_utils import compress_gpcc, decompress_gpcc, calculate_morton_order
 from utils.compress_utils import huffman_encode, huffman_decode
+
+
+def coerce_time_duration(value, default=(-0.5, 0.5)):
+    """Return ``[start, end]`` as two floats from CLI/YAML/checkpoint values.
+
+    Batch configs often pass this through YAML/argparse as a string such as
+    ``"[0.0, 1.0]"``.  Leaving that string untouched makes downstream code
+    iterate over characters (``"["``) or compare floats to strings.  Normalize at
+    the model boundary so training, metrics, and Mobile-GS export all see the
+    same numeric representation.
+    """
+    if value is None:
+        value = default
+    if torch.is_tensor(value):
+        value = value.detach().cpu().reshape(-1).tolist()
+    elif isinstance(value, np.ndarray):
+        value = value.reshape(-1).tolist()
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            value = default
+        else:
+            try:
+                value = ast.literal_eval(text)
+            except Exception:
+                cleaned = text.strip().strip('[]()')
+                parts = [part.strip() for part in cleaned.replace(';', ',').split(',') if part.strip()]
+                if len(parts) != 2:
+                    raise ValueError(f"time_duration must contain two numeric values, got {value!r}")
+                value = parts
+
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"time_duration must contain two values, got scalar {value!r}")
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"time_duration must contain two numeric values, got {value!r}")
+    out = [float(value[0]), float(value[1])]
+    if not all(np.isfinite(out)):
+        raise ValueError(f"time_duration must be finite, got {value!r}")
+    if out[1] < out[0]:
+        raise ValueError(f"time_duration end must be >= start, got {out!r}")
+    return out
 
 
 class MobileOpacityPhiNN(nn.Module):
@@ -175,7 +218,7 @@ class GaussianModel:
         self.gaussian_dim = 4
         self._t = torch.empty(0)
         self._scaling_t = torch.empty(0)
-        self.time_duration = time_duration
+        self.time_duration = coerce_time_duration(time_duration)
         self.rot_4d = rot_4d
         self.isotropic_gaussians = isotropic_gaussians
         self._rotation_r = torch.empty(0)
@@ -1400,7 +1443,7 @@ class GaussianModel:
                 "active_sh_degree": self.active_sh_degree,
                 "max_sh_degree_t": self.max_sh_degree_t,
                 "active_sh_degree_t": self.active_sh_degree_t,
-                "time_duration": list(self.time_duration),
+                "time_duration": coerce_time_duration(self.time_duration),
                 "prefilter_var": self.prefilter_var,
                 "attr_bits": int(attr_bits),
                 "xyz_quant": xyz_meta,
@@ -1438,7 +1481,7 @@ class GaussianModel:
 
         self.active_sh_degree = meta["active_sh_degree"]
         self.active_sh_degree_t = meta.get("active_sh_degree_t", 0)
-        self.time_duration = meta.get("time_duration", self.time_duration)
+        self.time_duration = coerce_time_duration(meta.get("time_duration", self.time_duration))
         self.prefilter_var = meta.get("prefilter_var", self.prefilter_var)
         self.spatial_lr_scale = meta.get("spatial_lr_scale", self.spatial_lr_scale)
 

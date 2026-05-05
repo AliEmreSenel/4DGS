@@ -35,25 +35,26 @@ def _detach_optional_tensor(tensor):
     return tensor.detach() if isinstance(tensor, torch.Tensor) else tensor
 
 def _cov6_to_scale_proxy(cov6: torch.Tensor) -> torch.Tensor:
-    """Return sqrt largest/equivalent axes from a 6D covariance tensor.
+    """Return a stable per-axis scale proxy from a packed 3D covariance.
 
-    Mobile-GS uses max spatial scale in its order-independent weight.  For
-    native 4D Gaussians, the visible 3D covariance is timestamp-conditioned, so
-    canonical pc.get_scaling is the wrong signal.  This proxy is differentiable
-    and gives the no-sort CUDA path per-frame scales consistent with
-    cov3D_precomp.
+    The old eigvalsh path occasionally hits cuSolver internal errors on large
+    batched CUDA tensors with nearly singular covariances.  Mobile-GS only needs
+    a monotonic scale signal for the order-independent depth weight, not exact
+    eigenvectors/eigenvalues, so use a Gershgorin row-bound proxy instead.
     """
     if cov6 is None or cov6.numel() == 0:
         return cov6
-    cov = cov6.new_zeros((cov6.shape[0], 3, 3))
-    cov[:, 0, 0] = cov6[:, 0]
-    cov[:, 0, 1] = cov[:, 1, 0] = cov6[:, 1]
-    cov[:, 0, 2] = cov[:, 2, 0] = cov6[:, 2]
-    cov[:, 1, 1] = cov6[:, 3]
-    cov[:, 1, 2] = cov[:, 2, 1] = cov6[:, 4]
-    cov[:, 2, 2] = cov6[:, 5]
-    eigvals = torch.linalg.eigvalsh(cov).clamp_min(1e-12)
-    return torch.sqrt(eigvals)
+    dtype = cov6.dtype
+    cov6f = torch.nan_to_num(cov6.float(), nan=0.0, posinf=1e12, neginf=-1e12)
+    d0 = cov6f[:, 0].clamp_min(0.0)
+    d1 = cov6f[:, 3].clamp_min(0.0)
+    d2 = cov6f[:, 5].clamp_min(0.0)
+    a01 = cov6f[:, 1].abs()
+    a02 = cov6f[:, 2].abs()
+    a12 = cov6f[:, 4].abs()
+    row_bounds = torch.stack((d0 + a01 + a02, d1 + a01 + a12, d2 + a02 + a12), dim=1)
+    scales = torch.sqrt(row_bounds.clamp_min(1e-12))
+    return torch.nan_to_num(scales, nan=1e-6, posinf=1e6, neginf=1e-6).to(dtype=dtype)
 
 
 def _select_cached_visibility_mask(pc, timestamp, pipe):
@@ -556,7 +557,19 @@ def render(
     
     if mask is not None and (torch.is_grad_enabled() or return_gaussian_scores or return_gaussian_scores_sq):
         radii_all = radii.new_zeros(mask.shape)
-        radii_all[mask] = radii
+        kept = int(mask.sum().item())
+        if radii.numel() == kept:
+            radii_all[mask] = radii
+        elif radii.numel() == mask.numel():
+            radii_all = radii.reshape_as(radii_all)
+        else:
+            # Defensive path for stale temporal masks or custom rasterizer builds
+            # that return unexpected lengths. Avoid a CUDA scatter assert and
+            # keep the valid prefix instead of aborting the whole run.
+            n = min(kept, int(radii.numel()))
+            if n > 0:
+                idx = mask.nonzero(as_tuple=False).flatten()[:n]
+                radii_all[idx] = radii[:n]
     else:
         # Render-only callers do not need a full-size visibility vector. Avoid
         # allocating and scattering a dense P-vector for every frame.

@@ -18,6 +18,7 @@ from utils.loss_utils import l1_loss, ssim, msssim, lpips as lpips_metric
 from gaussian_renderer import render
 import sys
 from scene import Scene, GaussianModel
+from scene.gaussian_model import coerce_time_duration
 from utils.general_utils import safe_state, knn
 import uuid
 from tqdm import tqdm
@@ -65,46 +66,42 @@ def _safe_percentiles(
     percentiles=(0, 1, 5, 25, 50, 75, 95, 99, 100),
     max_samples=1_000_000,
 ):
-    """Return lightweight diagnostic percentiles without crashing on huge tensors.
-
-    torch.quantile can fail on very large CUDA tensors. These values are only
-    written to diagnostics, so a deterministic subsample is preferable to
-    stopping training.
-    """
+    """Return diagnostic percentiles without launching fragile CUDA kernels."""
     if tensor is None:
         return {}
-    values = tensor.detach().float().reshape(-1)
-    total = values.numel()
-    if total == 0:
-        return {}
-
-    if total > max_samples:
-        idx = torch.linspace(
-            0,
-            total - 1,
-            steps=max_samples,
-            device=values.device,
-            dtype=torch.float32,
-        ).long()
-        values = values.index_select(0, idx)
-
-    values = values[torch.isfinite(values)]
-    if values.numel() == 0:
-        return {}
-
-    # Compute on CPU after the cap to avoid CUDA quantile size limits.
-    values = values.cpu()
-    qs = torch.tensor([p / 100.0 for p in percentiles], dtype=values.dtype)
     try:
-        out = torch.quantile(values, qs)
-    except RuntimeError:
-        # Last-resort fallback for older PyTorch builds: nearest-rank quantiles.
-        ordered = torch.sort(values).values
-        if ordered.numel() == 0:
+        values = tensor.detach().reshape(-1)
+        total = values.numel()
+        if total == 0:
             return {}
-        ranks = (qs * (ordered.numel() - 1)).round().long().clamp_(0, ordered.numel() - 1)
-        out = ordered.index_select(0, ranks)
-    return {f"p{p}": _to_float(v) for p, v in zip(percentiles, out)}
+        # Move first, then filter/sort/quantile on CPU.  This keeps diagnostics
+        # from launching a CUDA gather after graph/loss indexing has gone bad.
+        if values.is_cuda:
+            if total > max_samples:
+                idx = torch.linspace(0, total - 1, steps=max_samples, dtype=torch.long, device="cpu")
+                values = values.detach().cpu().float().index_select(0, idx)
+            else:
+                values = values.detach().cpu().float()
+        else:
+            if total > max_samples:
+                idx = torch.linspace(0, total - 1, steps=max_samples, dtype=torch.long, device=values.device)
+                values = values.index_select(0, idx)
+            values = values.float().cpu()
+        values = values[torch.isfinite(values)]
+        if values.numel() == 0:
+            return {}
+        qs = torch.tensor([p / 100.0 for p in percentiles], dtype=values.dtype)
+        try:
+            out = torch.quantile(values, qs)
+        except RuntimeError:
+            ordered = torch.sort(values).values
+            if ordered.numel() == 0:
+                return {}
+            ranks = (qs * (ordered.numel() - 1)).round().long().clamp_(0, ordered.numel() - 1)
+            out = ordered.index_select(0, ranks)
+        return {f"p{p}": _to_float(v) for p, v in zip(percentiles, out)}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 def _safe_mean(value):
@@ -634,6 +631,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, isotropic_gaussians,
              use_usplat=False, usplat_start_iter=10000, run_config_args=None):
     
+    time_duration = coerce_time_duration(time_duration)
+
     if gaussian_dim != 4:
         raise ValueError("Only 4D Gaussian training is supported.")
 
@@ -1945,6 +1944,7 @@ if __name__ == "__main__":
         args = checkpoint_args(checkpoint_payload)
         args.start_checkpoint = resume_checkpoint
         print(f"Loaded immutable run config from checkpoint: {resume_checkpoint}")
+    args.time_duration = coerce_time_duration(args.time_duration)
     if args.iterations not in args.save_iterations:
         args.save_iterations.append(args.iterations)
     if args.exhaust_test:

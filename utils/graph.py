@@ -28,12 +28,20 @@ class USplat4DGraph:
 
 
 def _percentiles_dict(values: Tensor, percentiles=(0, 1, 5, 25, 50, 75, 95, 99, 100)) -> dict:
-    values = values.detach().float().reshape(-1)
+    values = values.detach().reshape(-1)
+    if values.is_cuda:
+        values = values.cpu()
+    values = values.float()
     values = values[values.isfinite()]
     if values.numel() == 0:
         return {}
-    qs = torch.tensor([p / 100.0 for p in percentiles], device=values.device, dtype=values.dtype)
-    out = torch.quantile(values, qs)
+    qs = torch.tensor([p / 100.0 for p in percentiles], dtype=values.dtype)
+    try:
+        out = torch.quantile(values, qs)
+    except RuntimeError:
+        ordered = torch.sort(values).values
+        ranks = (qs * (ordered.numel() - 1)).round().long().clamp_(0, ordered.numel() - 1)
+        out = ordered.index_select(0, ranks)
     return {f"p{p}": float(v.item()) for p, v in zip(percentiles, out)}
 
 
@@ -42,7 +50,7 @@ def _safe_quantile(
     q: float,
     max_samples: int = 1_000_000,
 ) -> Tensor:
-    """Compute an approximate quantile without feeding huge tensors to torch.quantile."""
+    """Compute an approximate quantile without feeding huge CUDA tensors to torch.quantile."""
     values = values.reshape(-1)
     values = values[values.isfinite()]
     if values.numel() == 0:
@@ -52,7 +60,8 @@ def _safe_quantile(
         sample_idx = torch.randint(values.numel(), (max_samples,), device=values.device)
         values = values[sample_idx]
 
-    return torch.quantile(values, q)
+    # Small CPU transfer is safer than CUDA quantile during graph diagnostics.
+    return torch.quantile(values.detach().cpu().float(), q).to(device=values.device, dtype=values.dtype)
 
 
 def _camera_uncertainty_weighted_sq(
@@ -112,6 +121,7 @@ def build_graph(
         device = means_t.device
 
     G, T, _ = means_t.shape
+    spt_threshold = max(1, min(int(spt_threshold), max(int(T), 1)))
     means_t = torch.nan_to_num(means_t.to(device), nan=0.0, posinf=1e6, neginf=-1e6)
     u_scalar = torch.nan_to_num(u_scalar.to(device), nan=1e6, posinf=1e6, neginf=1e6).clamp_min(1e-8)
     if w2cs is None:
@@ -125,7 +135,12 @@ def build_graph(
     if u_tau_percentile is None or u_tau_percentile < 0:
         u_tau_percentile = key_ratio
     tau = _safe_quantile(finite_u, float(u_tau_percentile)).item()
-    low_u_mask = u_scalar < tau
+    low_u_mask = u_scalar <= tau
+    if not bool(low_u_mask.any()):
+        fallback_count = max(1, min(int(G), int(max(G * key_ratio, 1))))
+        flat = torch.argsort(u_scalar.reshape(-1))[:fallback_count]
+        low_u_mask = torch.zeros_like(u_scalar, dtype=torch.bool)
+        low_u_mask[flat // T, flat % T] = True
 
     if voxel_size is None:
         target_n_voxels = G * key_ratio * 5
@@ -156,15 +171,19 @@ def build_graph(
                 candidates.append(in_vox[torch.randint(in_vox.numel(), (1,), device=device)])
 
     if len(candidates) == 0:
-        raise RuntimeError("No key node candidates found; try relaxing u_tau_percentile.")
-    candidates = torch.unique(torch.cat(candidates))
+        flat = torch.argsort(u_scalar.reshape(-1))[:max(1, min(int(G), int(max(G * key_ratio, 1))))]
+        candidates = torch.unique(flat // T)
+    else:
+        candidates = torch.unique(torch.cat(candidates))
 
     sig_period = low_u_mask[candidates].sum(dim=1)
-    candidates = candidates[sig_period >= spt_threshold]
+    keep = sig_period >= spt_threshold
+    if not bool(keep.any()):
+        relaxed = max(1, min(int(sig_period.max().item()) if sig_period.numel() else 1, spt_threshold))
+        keep = sig_period >= relaxed
+    candidates = candidates[keep]
     if candidates.numel() == 0:
-        raise RuntimeError(
-            f"No key nodes survive SPT={spt_threshold} filter. Try reducing spt_threshold."
-        )
+        candidates = torch.argsort(u_scalar.mean(dim=1))[:max(1, min(int(G), int(max(G * key_ratio, 1))))]
 
     max_key = min(max(int(G * key_ratio), 1), max(int(max_key_nodes), 1))
     if candidates.numel() > max_key:
@@ -212,49 +231,55 @@ def build_graph(
         k_eff = 1
 
     N_n = nonkey_idx.shape[0]
-    nk_means_all = means_t[nonkey_idx]
-    nk_u_all = u_scalar[nonkey_idx]
+    if N_n == 0:
+        nonkey_key_local = torch.empty((0,), dtype=torch.long, device=device)
+        nonkey_nbrs = torch.empty((0, k_eff + 1), dtype=torch.long, device=device)
+        nonkey_nbr_weights = torch.empty((0, k_eff + 1), dtype=means_t.dtype, device=device)
+        nonkey_assignment_best_dist = torch.empty((0,), dtype=means_t.dtype, device=device)
+    else:
+        nk_means_all = means_t[nonkey_idx]
+        nk_u_all = u_scalar[nonkey_idx]
 
-    CHUNK = max(int(assignment_chunk_size), 1)
-    KEY_CHUNK = max(int(key_assignment_chunk_size), 1)
-    nonkey_key_local = torch.empty(N_n, dtype=torch.long, device=device)
-    nonkey_assignment_best_dist = torch.empty(N_n, dtype=means_t.dtype, device=device)
-    for start in range(0, N_n, CHUNK):
-        end = min(start + CHUNK, N_n)
-        best_dist = torch.full((end - start,), float("inf"), device=device)
-        best_key = torch.zeros((end - start,), dtype=torch.long, device=device)
-        nk_means_chunk = nk_means_all[start:end]
-        nk_u_chunk = nk_u_all[start:end]
-        for key_start in range(0, N_k, KEY_CHUNK):
-            key_end = min(key_start + KEY_CHUNK, N_k)
-            dist_chunk = torch.zeros((end - start, key_end - key_start), device=device, dtype=means_t.dtype)
-            for t_idx in range(T):
-                d = nk_means_chunk[:, None, t_idx, :] - key_means_all[None, key_start:key_end, t_idx, :]
-                u_s = nk_u_chunk[:, None, t_idx] + key_u_all[None, key_start:key_end, t_idx]
-                dist_chunk = dist_chunk + _camera_uncertainty_weighted_sq(d, u_s, w2cs[t_idx, :3, :3], r_scale)
-            local_dist, local_key = dist_chunk.min(dim=-1)
-            update = local_dist < best_dist
-            best_dist[update] = local_dist[update]
-            best_key[update] = local_key[update] + key_start
-        nonkey_key_local[start:end] = best_key
-        nonkey_assignment_best_dist[start:end] = best_dist
+        CHUNK = max(int(assignment_chunk_size), 1)
+        KEY_CHUNK = max(int(key_assignment_chunk_size), 1)
+        nonkey_key_local = torch.empty(N_n, dtype=torch.long, device=device)
+        nonkey_assignment_best_dist = torch.empty(N_n, dtype=means_t.dtype, device=device)
+        for start in range(0, N_n, CHUNK):
+            end = min(start + CHUNK, N_n)
+            best_dist = torch.full((end - start,), float("inf"), device=device)
+            best_key = torch.zeros((end - start,), dtype=torch.long, device=device)
+            nk_means_chunk = nk_means_all[start:end]
+            nk_u_chunk = nk_u_all[start:end]
+            for key_start in range(0, N_k, KEY_CHUNK):
+                key_end = min(key_start + KEY_CHUNK, N_k)
+                dist_chunk = torch.zeros((end - start, key_end - key_start), device=device, dtype=means_t.dtype)
+                for t_idx in range(T):
+                    d = nk_means_chunk[:, None, t_idx, :] - key_means_all[None, key_start:key_end, t_idx, :]
+                    u_s = nk_u_chunk[:, None, t_idx] + key_u_all[None, key_start:key_end, t_idx]
+                    dist_chunk = dist_chunk + _camera_uncertainty_weighted_sq(d, u_s, w2cs[t_idx, :3, :3], r_scale)
+                local_dist, local_key = dist_chunk.min(dim=-1)
+                update = local_dist < best_dist
+                best_dist[update] = local_dist[update]
+                best_key[update] = local_key[update] + key_start
+            nonkey_key_local[start:end] = best_key
+            nonkey_assignment_best_dist[start:end] = best_dist
 
-    assigned_key_nbrs = key_nbr_local[nonkey_key_local]
-    extra = nonkey_key_local.unsqueeze(-1)
-    nonkey_nbrs = torch.cat([assigned_key_nbrs, extra], dim=-1)
+        assigned_key_nbrs = key_nbr_local[nonkey_key_local]
+        extra = nonkey_key_local.unsqueeze(-1)
+        nonkey_nbrs = torch.cat([assigned_key_nbrs, extra], dim=-1)
 
-    nk_best_t = nk_u_all.argmin(dim=1)
-    nk_pos_best = nk_means_all[torch.arange(N_n, device=device), nk_best_t]
-    nk_u_best = nk_u_all[torch.arange(N_n, device=device), nk_best_t]
-    nbr_key_global = key_idx[nonkey_nbrs.reshape(-1)].reshape(N_n, k_eff + 1)
-    nbr_t = nk_best_t.unsqueeze(-1).expand(-1, k_eff + 1)
-    nbr_pos = means_t[nbr_key_global.reshape(-1), nbr_t.reshape(-1)].reshape(N_n, k_eff + 1, 3)
-    nbr_u = u_scalar[nbr_key_global.reshape(-1), nbr_t.reshape(-1)].reshape(N_n, k_eff + 1)
-    diff_nk = nk_pos_best.unsqueeze(1) - nbr_pos
-    u_sum_nk = nk_u_best.unsqueeze(1) + nbr_u
-    R_cw_nk = w2cs[nk_best_t, :3, :3].unsqueeze(1).expand(-1, k_eff + 1, -1, -1)
-    graph_dist_nk = _camera_uncertainty_weighted_sq(diff_nk, u_sum_nk, R_cw_nk, r_scale)
-    nonkey_nbr_weights = _softmax_neg_dist(graph_dist_nk, dim=-1)
+        nk_best_t = nk_u_all.argmin(dim=1)
+        nk_pos_best = nk_means_all[torch.arange(N_n, device=device), nk_best_t]
+        nk_u_best = nk_u_all[torch.arange(N_n, device=device), nk_best_t]
+        nbr_key_global = key_idx[nonkey_nbrs.reshape(-1)].reshape(N_n, k_eff + 1)
+        nbr_t = nk_best_t.unsqueeze(-1).expand(-1, k_eff + 1)
+        nbr_pos = means_t[nbr_key_global.reshape(-1), nbr_t.reshape(-1)].reshape(N_n, k_eff + 1, 3)
+        nbr_u = u_scalar[nbr_key_global.reshape(-1), nbr_t.reshape(-1)].reshape(N_n, k_eff + 1)
+        diff_nk = nk_pos_best.unsqueeze(1) - nbr_pos
+        u_sum_nk = nk_u_best.unsqueeze(1) + nbr_u
+        R_cw_nk = w2cs[nk_best_t, :3, :3].unsqueeze(1).expand(-1, k_eff + 1, -1, -1)
+        graph_dist_nk = _camera_uncertainty_weighted_sq(diff_nk, u_sum_nk, R_cw_nk, r_scale)
+        nonkey_nbr_weights = _softmax_neg_dist(graph_dist_nk, dim=-1)
 
     # Diagnostics for ablation summaries. Keep tensors out of the dataclass payload.
     key_row = torch.arange(N_k, device=device)

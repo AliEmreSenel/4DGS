@@ -43,6 +43,26 @@ def _finite_mean(x: Tensor, limit: float = 1e6) -> Tensor:
     return _finite_loss(torch.nan_to_num(x, nan=0.0, posinf=limit, neginf=-limit).clamp(-limit, limit).mean(), limit)
 
 
+def _sanitize_neighbors(nbr_idx: Tensor, weights: Tensor, n_neighbors: int) -> Tuple[Tensor, Tensor]:
+    """Clamp stale graph indices and zero their weights before CUDA indexing."""
+    if nbr_idx is None or weights is None or n_neighbors <= 0:
+        device = weights.device if isinstance(weights, torch.Tensor) else (nbr_idx.device if isinstance(nbr_idx, torch.Tensor) else torch.device("cpu"))
+        return torch.empty((0, 0), dtype=torch.long, device=device), torch.empty((0, 0), device=device)
+    if torch.is_floating_point(nbr_idx):
+        idx = torch.nan_to_num(nbr_idx, nan=-1.0, posinf=-1.0, neginf=-1.0).to(device=weights.device, dtype=torch.long)
+    else:
+        idx = nbr_idx.to(device=weights.device, dtype=torch.long)
+    w = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    invalid = (idx < 0) | (idx >= int(n_neighbors))
+    idx = idx.clamp(0, max(int(n_neighbors) - 1, 0))
+    w = torch.where(invalid, torch.zeros_like(w), w)
+    if w.dim() > 0 and w.shape[-1] > 0:
+        denom = w.sum(dim=-1, keepdim=True)
+        uniform = torch.full_like(w, 1.0 / float(w.shape[-1]))
+        w = torch.where(denom > 0, w / denom.clamp_min(1e-8), uniform)
+    return idx, w
+
+
 def quaternion_chordal_loss(q: Tensor, target: Tensor) -> Tensor:
     """Hemisphere-invariant unit-quaternion L2 loss."""
     q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
@@ -104,6 +124,11 @@ def isometry_loss(
         pos_nbr_t = pos_t
     if pos_o_nbr is None:
         pos_o_nbr = pos_o
+    if pos_nbr_t.shape[0] == 0:
+        return pos_t.new_zeros(())
+    nbr_idx, weights = _sanitize_neighbors(nbr_idx, weights, pos_nbr_t.shape[0])
+    if nbr_idx.numel() == 0:
+        return pos_t.new_zeros(())
     
     p_i_o = pos_o.unsqueeze(1)                   # (N, 1, 3)
     p_j_o = pos_o_nbr[nbr_idx]                   # (N, K, 3)
@@ -143,6 +168,11 @@ def rigidity_loss(
         pos_nbr_t = pos_t
     if transforms_nbr_t is None:
         transforms_nbr_t = transforms_t
+    if pos_nbr_t.shape[0] == 0:
+        return pos_t.new_zeros(())
+    nbr_idx, weights = _sanitize_neighbors(nbr_idx, weights, pos_nbr_t.shape[0])
+    if nbr_idx.numel() == 0:
+        return pos_t.new_zeros(())
     
     B = pos_t.shape[1]
     if B <= delta:
@@ -210,6 +240,11 @@ def rotation_loss(
     """
     if quats_nbr_t is None:
         quats_nbr_t = quats_t
+    if quats_nbr_t.shape[0] == 0:
+        return quats_t.new_zeros(())
+    nbr_idx, weights = _sanitize_neighbors(nbr_idx, weights, quats_nbr_t.shape[0])
+    if nbr_idx.numel() == 0:
+        return quats_t.new_zeros(())
     
     B = quats_t.shape[1]
     if B <= delta:

@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
-from scene.gaussian_model import BasicPointCloud
+from scene.gaussian_model import BasicPointCloud, coerce_time_duration
 from tqdm import tqdm
 import torch
 from utils.general_utils import fps
@@ -210,6 +210,8 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, num_pts=100_000, num_pts
     return scene_info
 
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png", time_duration=None, frame_ratio=1, dataloader=False):
+    if time_duration is not None:
+        time_duration = coerce_time_duration(time_duration)
     cam_infos = []
 
     with open(os.path.join(path, transformsfile)) as json_file:
@@ -308,6 +310,8 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
     return cam_infos
 
 def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False):
+    if time_duration is not None:
+        time_duration = coerce_time_duration(time_duration)
     
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader)
