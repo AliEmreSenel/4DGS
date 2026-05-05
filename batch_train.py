@@ -1503,6 +1503,7 @@ class GPUPeakMonitor:
 
 
 def run_subprocess_with_monitor(command: Sequence[str], cwd: Path, poll_interval: float) -> Dict[str, Any]:
+    start_wall = time.time()
     start = time.perf_counter()
     proc = subprocess.Popen(list(command), cwd=str(cwd))
     monitor = GPUPeakMonitor(proc.pid, poll_interval=poll_interval)
@@ -1514,9 +1515,12 @@ def run_subprocess_with_monitor(command: Sequence[str], cwd: Path, poll_interval
         raise
     peak_vram_mb = monitor.stop()
     elapsed = time.perf_counter() - start
+    end_wall = time.time()
     return {
         "returncode": returncode,
         "training_wall_clock_sec": elapsed,
+        "training_start_time_wall_sec": start_wall,
+        "training_end_time_wall_sec": end_wall,
         "peak_vram_mb": peak_vram_mb,
     }
 
@@ -1747,6 +1751,9 @@ def write_csv_summary(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         "quota_limit_gb",
         "quota_free_gb",
         "training_wall_clock_sec",
+        "training_wall_clock_sec_at_checkpoint",
+        "training_start_time_wall_sec",
+        "training_end_time_wall_sec",
         "action",
         "returncode",
         "metrics_json_path",
@@ -2006,11 +2013,59 @@ def evaluate_checkpoint(
     return metric_results
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def training_wall_clock_at_checkpoint(
+    checkpoint_path: Path,
+    *,
+    run_spec: RunSpec,
+    checkpoint_iteration: int | None,
+    training_timing: Mapping[str, Any] | None,
+) -> float | None:
+    """Best-effort elapsed training seconds when a checkpoint was created.
+
+    For newly trained runs, this uses the checkpoint mtime relative to the
+    training subprocess start wall time.  For pre-existing runs where only the
+    total duration is available, it falls back to a proportional estimate from
+    checkpoint iteration / total iterations.
+    """
+    timing = training_timing or {}
+    total_sec = _finite_float_or_none(timing.get("training_wall_clock_sec"))
+    start_wall = _finite_float_or_none(timing.get("training_start_time_wall_sec"))
+
+    if start_wall is not None:
+        try:
+            elapsed = float(checkpoint_path.stat().st_mtime) - start_wall
+        except FileNotFoundError:
+            elapsed = None
+        if elapsed is not None and math.isfinite(elapsed):
+            if total_sec is not None and total_sec > 0.0:
+                # Allow small timestamp skews, then clamp into the known run span.
+                if elapsed >= -5.0 and elapsed <= total_sec + 300.0:
+                    return max(0.0, min(elapsed, total_sec))
+            elif elapsed >= 0.0:
+                return elapsed
+
+    if total_sec is not None and total_sec > 0.0 and checkpoint_iteration is not None:
+        total_iterations = max(1, int(run_spec.iterations or 1))
+        bounded_iteration = max(0, min(int(checkpoint_iteration), total_iterations))
+        return total_sec * (float(bounded_iteration) / float(total_iterations))
+
+    return None
+
+
 def evaluate_checkpoint_history(
     *,
     repo_root: Path,
     run_spec: RunSpec,
     args: argparse.Namespace,
+    training_timing: Mapping[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     model_path = Path(run_spec.model_path)
     generated_config_path = Path(run_spec.generated_config_path)
@@ -2019,6 +2074,7 @@ def evaluate_checkpoint_history(
     checkpoint_paths = list_checkpoints_for_history(model_path)
 
     for checkpoint_index, checkpoint_path in enumerate(checkpoint_paths):
+        checkpoint_name_iteration = checkpoint_iteration_from_name(checkpoint_path)
         row: Dict[str, Any] = {
             "status": "ok",
             "run_hash": run_hash,
@@ -2029,7 +2085,13 @@ def evaluate_checkpoint_history(
             "checkpoint_index": checkpoint_index,
             "checkpoint_filename": checkpoint_path.name,
             "checkpoint_path": str(checkpoint_path.resolve()),
-            "checkpoint_name_iteration": checkpoint_iteration_from_name(checkpoint_path),
+            "checkpoint_name_iteration": checkpoint_name_iteration,
+            "training_wall_clock_sec_at_checkpoint": training_wall_clock_at_checkpoint(
+                checkpoint_path,
+                run_spec=run_spec,
+                checkpoint_iteration=checkpoint_name_iteration,
+                training_timing=training_timing,
+            ),
             "eval_requested_split": str(args.checkpoint_eval_split),
         }
         row.update(run_spec.variant_tags)
@@ -2043,6 +2105,13 @@ def evaluate_checkpoint_history(
                 render_fps_warmup=args.render_fps_warmup,
             )
             row.update(eval_result)
+            if row.get("training_wall_clock_sec_at_checkpoint") is None:
+                row["training_wall_clock_sec_at_checkpoint"] = training_wall_clock_at_checkpoint(
+                    checkpoint_path,
+                    run_spec=run_spec,
+                    checkpoint_iteration=row.get("eval_checkpoint_iteration"),
+                    training_timing=training_timing,
+                )
         except Exception as exc:
             row["status"] = "metrics_failed"
             row["metrics_error"] = str(exc)
@@ -2335,6 +2404,17 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
     }
     row.update(run_spec.variant_tags)
 
+    existing_metrics_payload = load_json_if_exists(model_path / "run_metrics.json") or {}
+    if pending.action != "train_metrics" and isinstance(existing_metrics_payload, Mapping):
+        for timing_key in (
+            "training_wall_clock_sec",
+            "training_start_time_wall_sec",
+            "training_end_time_wall_sec",
+            "peak_vram_mb",
+        ):
+            if timing_key in existing_metrics_payload:
+                row[timing_key] = existing_metrics_payload[timing_key]
+
     checkpoint_path = find_best_available_checkpoint(model_path, run_spec.iterations)
     reservation_id: str | None = None
 
@@ -2345,6 +2425,8 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
             train_result = run_subprocess_with_monitor(run_spec.command, repo_root, args.vram_poll_interval)
             row["returncode"] = train_result["returncode"]
             row["training_wall_clock_sec"] = train_result["training_wall_clock_sec"]
+            row["training_start_time_wall_sec"] = train_result.get("training_start_time_wall_sec")
+            row["training_end_time_wall_sec"] = train_result.get("training_end_time_wall_sec")
             row["peak_vram_mb"] = train_result["peak_vram_mb"]
             if train_result["returncode"] != 0:
                 row["status"] = "failed"
@@ -2397,6 +2479,7 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
                     repo_root=repo_root,
                     run_spec=run_spec,
                     args=args,
+                    training_timing=row,
                 )
                 row["checkpoint_metrics_rows"] = len(checkpoint_rows)
                 row["checkpoint_metrics_csv_path"] = str((model_path / str(args.checkpoint_metrics_filename)).resolve())
