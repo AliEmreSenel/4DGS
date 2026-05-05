@@ -28,6 +28,7 @@ import argparse
 import ast
 import csv
 import fcntl
+import hashlib
 import itertools
 import json
 import math
@@ -280,6 +281,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vram-poll-interval", type=float, default=1.0)
     parser.add_argument("--summary-filename", default="ablation_metrics.csv")
     parser.add_argument("--summary-jsonl-filename", default="ablation_metrics.jsonl")
+    parser.add_argument("--checkpoint-metrics-filename", default="checkpoint_eval_metrics.csv", help="CSV with one row per evaluated checkpoint across training.")
+    parser.add_argument("--checkpoint-metrics-jsonl-filename", default="checkpoint_eval_metrics.jsonl", help="JSONL with one row per evaluated checkpoint across training.")
+    parser.add_argument("--checkpoint-eval-split", choices=["test", "train"], default="test", help="Split used for per-checkpoint training-curve metrics. Defaults to test.")
+    parser.add_argument("--skip-checkpoint-metrics", action="store_true", help="Disable per-checkpoint training-curve metric CSV/JSONL generation.")
     parser.add_argument("--retry-failed-existing", action=argparse.BooleanOptionalAction, default=True, help="Retry runs whose run_metrics.json says failed. Use --no-retry-failed-existing to keep old skip-failed behavior.")
 
     # Mobile-GS compression/reporting controls. These run inside batch_train.py
@@ -1285,6 +1290,20 @@ def mobilegs_cli_args(args: argparse.Namespace) -> List[str]:
         out.append("--no-mobilegs-build-visibility-filter")
     return out
 
+
+def checkpoint_metrics_cli_args(args: argparse.Namespace) -> List[str]:
+    out = [
+        "--checkpoint-metrics-filename",
+        str(args.checkpoint_metrics_filename),
+        "--checkpoint-metrics-jsonl-filename",
+        str(args.checkpoint_metrics_jsonl_filename),
+        "--checkpoint-eval-split",
+        str(args.checkpoint_eval_split),
+    ]
+    if bool(getattr(args, "skip_checkpoint_metrics", False)):
+        out.append("--skip-checkpoint-metrics")
+    return out
+
 def build_option_map(args: argparse.Namespace) -> Dict[str, List[str]]:
     return {
         "isotropy": normalize_choice_list(args.isotropy_options),
@@ -1515,6 +1534,43 @@ def expected_final_checkpoint(model_path: Path, iterations: int) -> Path:
     return model_path / f"chkpnt{iterations}.pth"
 
 
+def checkpoint_iteration_from_name(path: Path) -> int | None:
+    stem = path.stem.replace("chkpnt", "", 1)
+    return int(stem) if stem.isdigit() else None
+
+
+def list_checkpoints_for_history(model_path: Path) -> List[Path]:
+    numeric: List[tuple[int, Path]] = []
+    for path in model_path.glob("chkpnt*.pth"):
+        iteration = checkpoint_iteration_from_name(path)
+        if iteration is not None:
+            numeric.append((iteration, path))
+    out = [path for _, path in sorted(numeric, key=lambda item: item[0])]
+    best = model_path / "chkpnt_best.pth"
+    if best.exists():
+        try:
+            best_resolved = best.resolve()
+            if all(path.resolve() != best_resolved for path in out):
+                out.append(best)
+        except FileNotFoundError:
+            pass
+    return out
+
+
+def run_hash_for_spec(run_spec: RunSpec) -> str:
+    payload = {
+        "config_path": str(run_spec.config_path),
+        "generated_config_path": str(run_spec.generated_config_path),
+        "model_path": str(run_spec.model_path),
+        "scene_name": str(run_spec.scene_name),
+        "variant_name": str(run_spec.variant_name),
+        "variant_tags": dict(run_spec.variant_tags),
+        "index": int(run_spec.index),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
 def find_best_available_checkpoint(model_path: Path, iterations: int) -> Path | None:
     exact = expected_final_checkpoint(model_path, iterations)
     if exact.exists():
@@ -1524,9 +1580,9 @@ def find_best_available_checkpoint(model_path: Path, iterations: int) -> Path | 
         return best
     numeric: List[tuple[int, Path]] = []
     for path in model_path.glob("chkpnt*.pth"):
-        stem = path.stem.replace("chkpnt", "")
-        if stem.isdigit():
-            numeric.append((int(stem), path))
+        iteration = checkpoint_iteration_from_name(path)
+        if iteration is not None:
+            numeric.append((iteration, path))
     if numeric:
         return max(numeric)[1]
     return None
@@ -1543,7 +1599,7 @@ def load_json_if_exists(path: Path) -> Dict[str, Any] | None:
         return None
 
 
-def detect_existing_state(run_spec: RunSpec, retry_failed_existing: bool) -> ExistingState:
+def detect_existing_state(run_spec: RunSpec, retry_failed_existing: bool, checkpoint_metrics_jsonl_filename: str | None = None) -> ExistingState:
     model_path = Path(run_spec.model_path)
     metrics_path = model_path / "run_metrics.json"
     metrics_payload = load_json_if_exists(metrics_path)
@@ -1552,6 +1608,13 @@ def detect_existing_state(run_spec: RunSpec, retry_failed_existing: bool) -> Exi
     if metrics_payload is not None:
         status = str(metrics_payload.get("status", ""))
         if status == "ok":
+            checkpoint_metrics_missing = (
+                checkpoint_metrics_jsonl_filename is not None
+                and checkpoint_path is not None
+                and not (model_path / checkpoint_metrics_jsonl_filename).exists()
+            )
+            if checkpoint_metrics_missing:
+                return ExistingState("metrics_only", str(metrics_path), str(checkpoint_path), metrics_payload)
             return ExistingState("complete", str(metrics_path), str(checkpoint_path) if checkpoint_path else None, metrics_payload)
         if status == "metrics_failed" and checkpoint_path is not None:
             return ExistingState("metrics_only", str(metrics_path), str(checkpoint_path), metrics_payload)
@@ -1585,11 +1648,11 @@ def estimated_run_cost(run_spec: RunSpec, action: str) -> float:
     return cost
 
 
-def build_pending_runs(run_specs: Sequence[RunSpec], retry_failed_existing: bool) -> tuple[List[PendingRun], List[Dict[str, Any]]]:
+def build_pending_runs(run_specs: Sequence[RunSpec], retry_failed_existing: bool, checkpoint_metrics_jsonl_filename: str | None = None) -> tuple[List[PendingRun], List[Dict[str, Any]]]:
     pending: List[PendingRun] = []
     existing_rows: List[Dict[str, Any]] = []
     for run_spec in run_specs:
-        existing_state = detect_existing_state(run_spec, retry_failed_existing)
+        existing_state = detect_existing_state(run_spec, retry_failed_existing, checkpoint_metrics_jsonl_filename)
         if existing_state.status == "complete":
             if existing_state.metrics_payload is not None:
                 existing_rows.append(dict(existing_state.metrics_payload))
@@ -1664,7 +1727,11 @@ def write_csv_summary(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         "usplat",
         "generated_config_path",
         "model_path",
+        "run_hash",
+        "checkpoint_index",
+        "checkpoint_filename",
         "checkpoint_path",
+        "eval_requested_split",
         "eval_split_used",
         "eval_checkpoint_iteration",
         "psnr",
@@ -1701,6 +1768,56 @@ def write_csv_summary(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         for row in rows:
             writer.writerow(row)
 
+
+
+def read_jsonl_rows(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+    return rows
+
+
+def write_checkpoint_metric_files(model_path: Path, args: argparse.Namespace, rows: Sequence[Mapping[str, Any]]) -> None:
+    csv_path = model_path / str(args.checkpoint_metrics_filename)
+    jsonl_path = model_path / str(args.checkpoint_metrics_jsonl_filename)
+    write_csv_summary(csv_path, rows)
+    append_jsonl(jsonl_path, rows)
+
+
+def collect_checkpoint_metric_rows(args: argparse.Namespace, run_specs: Sequence[RunSpec]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for run_spec in run_specs:
+        jsonl_path = Path(run_spec.model_path) / str(args.checkpoint_metrics_jsonl_filename)
+        rows.extend(read_jsonl_rows(jsonl_path))
+
+    dedup: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for row in rows:
+        run_hash = str(row.get("run_hash", ""))
+        checkpoint_path = str(row.get("checkpoint_path", ""))
+        if not run_hash or not checkpoint_path:
+            continue
+        dedup[(run_hash, checkpoint_path)] = row
+
+    def sort_key(item: Dict[str, Any]) -> tuple[str, str, int, str]:
+        iteration_value = item.get("eval_checkpoint_iteration")
+        try:
+            iteration = int(iteration_value)
+        except Exception:
+            iteration = 10**18
+        return (str(item.get("scene_name", "")), str(item.get("variant_name", "")), iteration, str(item.get("checkpoint_filename", "")))
+
+    return sorted(dedup.values(), key=sort_key)
 
 def collect_summary_rows(run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = [dict(row) for row in existing_rows]
@@ -1887,6 +2004,56 @@ def evaluate_checkpoint(
     metric_results["checkpoint_size_bytes"] = checkpoint_path.stat().st_size
     metric_results["checkpoint_path"] = str(checkpoint_path.resolve())
     return metric_results
+
+
+def evaluate_checkpoint_history(
+    *,
+    repo_root: Path,
+    run_spec: RunSpec,
+    args: argparse.Namespace,
+) -> List[Dict[str, Any]]:
+    model_path = Path(run_spec.model_path)
+    generated_config_path = Path(run_spec.generated_config_path)
+    run_hash = run_hash_for_spec(run_spec)
+    rows: List[Dict[str, Any]] = []
+    checkpoint_paths = list_checkpoints_for_history(model_path)
+
+    for checkpoint_index, checkpoint_path in enumerate(checkpoint_paths):
+        row: Dict[str, Any] = {
+            "status": "ok",
+            "run_hash": run_hash,
+            "scene_name": run_spec.scene_name,
+            "variant_name": run_spec.variant_name,
+            "generated_config_path": str(generated_config_path),
+            "model_path": str(model_path),
+            "checkpoint_index": checkpoint_index,
+            "checkpoint_filename": checkpoint_path.name,
+            "checkpoint_path": str(checkpoint_path.resolve()),
+            "checkpoint_name_iteration": checkpoint_iteration_from_name(checkpoint_path),
+            "eval_requested_split": str(args.checkpoint_eval_split),
+        }
+        row.update(run_spec.variant_tags)
+        try:
+            eval_result = evaluate_checkpoint(
+                repo_root=repo_root,
+                generated_config_path=generated_config_path,
+                model_path=model_path,
+                checkpoint_path=checkpoint_path,
+                split=str(args.checkpoint_eval_split),
+                render_fps_warmup=args.render_fps_warmup,
+            )
+            row.update(eval_result)
+        except Exception as exc:
+            row["status"] = "metrics_failed"
+            row["metrics_error"] = str(exc)
+            try:
+                row["checkpoint_size_bytes"] = checkpoint_path.stat().st_size
+            except FileNotFoundError:
+                pass
+        rows.append(row)
+
+    write_checkpoint_metric_files(model_path, args, rows)
+    return rows
 
 
 
@@ -2160,6 +2327,7 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
         "variant_name": run_spec.variant_name,
         "generated_config_path": str(generated_config_path),
         "model_path": str(model_path),
+        "run_hash": run_hash_for_spec(run_spec),
         "returncode": 0,
         "action": pending.action,
         "training_wall_clock_sec": 0.0,
@@ -2222,6 +2390,22 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
             except Exception as exc:
                 row["status"] = "metrics_failed"
                 row["metrics_error"] = str(exc)
+
+        if not args.skip_metrics and not bool(getattr(args, "skip_checkpoint_metrics", False)):
+            try:
+                checkpoint_rows = evaluate_checkpoint_history(
+                    repo_root=repo_root,
+                    run_spec=run_spec,
+                    args=args,
+                )
+                row["checkpoint_metrics_rows"] = len(checkpoint_rows)
+                row["checkpoint_metrics_csv_path"] = str((model_path / str(args.checkpoint_metrics_filename)).resolve())
+                row["checkpoint_metrics_jsonl_path"] = str((model_path / str(args.checkpoint_metrics_jsonl_filename)).resolve())
+            except Exception as exc:
+                row["checkpoint_metrics_status"] = "failed"
+                row["checkpoint_metrics_error"] = str(exc)
+        elif bool(getattr(args, "skip_checkpoint_metrics", False)):
+            row["checkpoint_metrics_status"] = "skipped"
 
         if should_run_mobilegs_report(run_spec, args):
             try:
@@ -2700,6 +2884,16 @@ def gather_and_write_summaries(args: argparse.Namespace, run_specs: Sequence[Run
     print(f"Wrote JSONL summary to {summary_jsonl_path}")
     print(f"Collected {len(rows)} rows")
 
+    if not bool(getattr(args, "skip_checkpoint_metrics", False)):
+        checkpoint_rows = collect_checkpoint_metric_rows(args, run_specs)
+        checkpoint_csv_path = summary_root / str(args.checkpoint_metrics_filename)
+        checkpoint_jsonl_path = summary_root / str(args.checkpoint_metrics_jsonl_filename)
+        write_csv_summary(checkpoint_csv_path, checkpoint_rows)
+        append_jsonl(checkpoint_jsonl_path, checkpoint_rows)
+        print(f"Wrote checkpoint CSV summary to {checkpoint_csv_path}")
+        print(f"Wrote checkpoint JSONL summary to {checkpoint_jsonl_path}")
+        print(f"Collected {len(checkpoint_rows)} checkpoint rows")
+
 
 def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]], pending_runs: Sequence[PendingRun]) -> int:
     summary_root = summary_output_root(args, run_specs)
@@ -2751,6 +2945,7 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
                     str(args.render_fps_warmup),
                     "--vram-poll-interval",
                     str(args.vram_poll_interval),
+                    *checkpoint_metrics_cli_args(args),
                     "--runner",
                     effective_runner(args),
                     "--uv-binary",
@@ -2950,10 +3145,13 @@ def main(args: argparse.Namespace) -> int:
                 print(shell_join(run_spec.command))
         return 0
 
-    if args.cleanup_existing_artifacts:
+    if args.cleanup_existing_artifacts and bool(getattr(args, "skip_checkpoint_metrics", False)):
         cleanup_existing_artifacts(run_specs, True)
+    elif args.cleanup_existing_artifacts:
+        print("[CLEANUP] Deferring existing-artifact cleanup until checkpoint history metrics are recorded.")
 
-    pending_runs, existing_rows = build_pending_runs(run_specs, args.retry_failed_existing)
+    checkpoint_metrics_required = None if bool(getattr(args, "skip_checkpoint_metrics", False)) else str(args.checkpoint_metrics_jsonl_filename)
+    pending_runs, existing_rows = build_pending_runs(run_specs, args.retry_failed_existing, checkpoint_metrics_required)
     print(
         f"[TOTAL PROGRESS] total={len(run_specs)} "
         f"already_complete={max(0, len(run_specs) - len(pending_runs))} "
