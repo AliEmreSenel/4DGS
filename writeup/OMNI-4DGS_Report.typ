@@ -139,16 +139,16 @@ Other optimizations have also been developed for the rendering (inference) opera
 
 == Training
 
-_Standard Backpropagation_ is used in the model to train the best parameters for scene fidelity, while loss can be measured using image similarity metrics. To reduce training instability, _Adam Optimizer_ and _Batch training_ are used @yang2024_4dgs, while loss choice depends on the architectural components.
+We use *Backpropagation* for training, minimizing image similarity metrics, but additional loss components are also introduced by the architecture,. We use *Adam Optimizer* and *Batch training* to improve instability @yang2024_4dgs.
 
-Since memory usage is proportional to the number of Gaussians, one seeks to minimize their number by pruning less relevant ones. *Opacity Pruning* drops gaussians with opacity value smaller than a chosen threshold @yang2024_4dgs @du2026_mobilegs. *Contribution Pruning* accumulates a contribution value over training steps, and drops gaussians that remain not relevant enough for enough iterations. *Spatio-Temporal Pruning* drops the bottom $~ 90%$ quantile, ranking higher more persistent and longer-lasting gaussians @luo2025_instant4d. Finally, *Grid Pruning* de-duplicates gaussians by position, velocity, temporal scale and position @luo2025_instant4d. Since pruning rules are correlated, we only re-implement Spatio-Temporal pruning, which had to be written from scratch, and maintain Opacity Pruning from 4DGS-Native. *Densification* is the opposite strategy, splitting gaussians with high loss gradient: although the reference papers skipped it for a faster training, we reintroduce it as a regularization technique.
+Memory usage is proportional to the number of Gaussians, so one seeks to minimize this number by pruning less relevant ones. *Opacity Pruning* drops gaussians with opacity value smaller than a chosen threshold @yang2024_4dgs @du2026_mobilegs. *Contribution Pruning* accumulates a contribution value over training steps, and drops gaussians that remain not relevant enough for enough iterations. *Spatio-Temporal Pruning* drops the bottom $~ 90%$ quantile, ranking higher more persistent and longer-lasting gaussians @luo2025_instant4d. Finally, *Grid Pruning* de-duplicates gaussians by position, velocity, temporal scale and time placement @luo2025_instant4d. Pruning rules are correlated, so we only implement Spatio-Temporal pruning, which had to be written from scratch, and maintain Opacity Pruning from 4DGS-Native. *Densification* is the operation of increasing the number of gaussians: our references skipped it to speed up generation, but we reintroduce it. We use *Edge Guided*, which adds gaussians near image edges @Xu_2025_CVPR, and *Loss Guided*, which propagates per-pixel error back to the gaussians @sun2024highfidelityslam.
 
 Custom CUDA kernels are used to compute pixel operations on the GPU directly, though it limits compatibility across codebases. For this reason, we opted for a mixed pruning-densify schedule, as opposed to MegaSAM @luo2025_instant4d.
 
 == Loss
 
 The primary objective is photometric fidelity, measured as a weighted
-combination of pixel-wise L1 error and structural similarity:
+combination of pixel-wise L1 norm between original and reconstructed and structural similarity, which penalizes perceived image structure such as luminance, contrast and texture:
 
 $
   cal(L)_"rgb" = (1 - lambda_"dssim") cal(L)_1 + lambda_"dssim" cal(L)_"SSIM"
@@ -163,22 +163,18 @@ $
   cal(L)_"opa" = -1 / abs(Omega) sum_(p in Omega) (1 - m_"gt"(p)) dot log(1 - alpha(p))
 $
 
-Dynamic Gaussians additionally require motion regularization to prevent
-physically implausible trajectories. A rigidity loss enforces that spatially
-proximate Gaussians move with coherent velocities, weighted by squared
-distance with $k = 20$ neighbours:
+Dynamic Gaussians additionally require motion regularization to prevent physically implausible trajectories. Rigidity loss encourages spatially proximate Gaussians to move with coherent velocities. This loss is weighted by the squared distance and averaged over $k = 20$ neighbors:
 
 $
   cal(L)_"rigid" =
   1 / (k dot G)
   sum_(i=1)^G
   sum_(j in cal(N)(i))
-  e^(-100 dot d_(i j)) dot
+  e^(-100 dot d (i,j)) dot
   norm(dot(mu)_i - dot(mu)_j)_2
 $
 
-A global motion loss further suppresses high-velocity Gaussians that are
-unlikely to correspond to real scene motion:
+A global motion loss further suppresses high-velocity Gaussians that are unlikely to correspond to real scene motion:
 
 $
   cal(L)_"motion" = 1 / G sum_(i=1)^G norm(dot(mu)_i)_2
@@ -189,83 +185,59 @@ terms are active throughout training.
 
 == Uncertainty-Aware Loss
 
-The baseline losses treat all Gaussians equally, but poorly-observed Gaussians, occluded, nearly transparent, or rarely visible, are underconstrained and
-tend to drift, producing artifacts at novel viewpoints. To address this, at
-$N_"start" = 15000$ (coinciding with the end of densification, when the
-Gaussian count is stable), we activate the uncertainty-aware graph losses of
-USplat4D:
-
-$
-  cal(L) =
-  cal(L)_"rgb"
-  + lambda_"key" cal(L)_"key"
-  + lambda_"non-key" cal(L)_"non-key"
-$
-
-with $lambda_"key" = lambda_"non-key" = 1.0$.
-
-
-The first step is identifying which Gaussians are reliable. Uncertainty is
-estimated per Gaussian per frame from alpha-blending weights. This shows
-us that well-observed
-Gaussians contribute strongly to many pixels and thus have low uncertainty:
+If loss minimization is applied to all Gaussians equally, low-importance splats are unconstrained, producing visual artifacts. Uncertainty Awareness addresses this problem, activating after base-model convergence. First, uncertainty $u_(i,t)$ is estimated per Gaussian per frame from alpha-blending weights: well-observed Gaussians contribute strongly to many pixels, thus receiving a low uncertainty score:
 
 $
   sigma^2_(i,t) =
   1 / (sum_(h in P_(i,t)) (T^h_(i,t) dot alpha_i)^2),
   quad
   u_(i,t) = cases(
-    sigma^2_(i,t) & "if " bb(1)_(i,t) = 1,
-    phi & "otherwise"
+    sigma^2_(i,t) & " " bb(I)_(i,t),
+    phi & 
   )
 $
 
-with $phi = 10^6$. The convergence indicator $bb(1)_(i,t)$ forces $u = phi$
-if any pixel in the Gaussian footprint exceeds color residual $eta_c = 0.5$,
-preventing unconverged Gaussians from becoming anchors. The top $2%$ by
-confidence with significant period $>= 5$ frames become key nodes $V_k$;
-UA-kNN with $k = 8$ builds key-key edges; each non-key node is assigned to
-its closest key over all frames.
+with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest confidence gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes, 
+The kNN algorithm is used with $k = 8$ to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
 
-*Key node loss.* Reliable Gaussians should not drift from their well-trained
-positions, and their neighbourhoods should move geometrically consistently.
-This is enforced by anchoring them to their pretrained positions $bold(p)^circle$
+*Key-node loss* ensures that reliable Gaussians do not drift from their well-trained and certain positions, while their neighbourhoods move consistently.
+This is enforced by anchoring them to their pretrained positions $bold(mu)^circle$
 and applying motion locality constraints:
 
 $
   cal(L)_"key" =
   sum_t sum_(i in V_k)
-  norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,t,i))
+  norm(bold(mu)_(i,t) - bold(mu)^circle_(i,t))^2_(U^(-1)_(w,t,i))
   + cal(L)_"motion,key"
 $
 
 The uncertainty matrix $U_(i,t) = R_"wc" op("diag")(u, u, 0.01 u) R_"wc"^T$
-down-weights depth corrections by $100 times$, reflecting monocular depth
+encodes the special treatment of the depth direction under monocular depth
 unreliability. $cal(L)_"motion,key"$ combines isometry, rigidity, rotation,
 velocity and acceleration constraints ($lambda_"iso" = lambda_"rigid" = 1.0$,
 $lambda_"rot" = lambda_"vel" = lambda_"acc" = 0.01$).
 
-*Non-key node loss.* Uncertain Gaussians have no reliable photometric signal
-to constrain their motion. Rather than leaving them free, we pull them toward
-positions predicted by interpolating the motion of their key neighbours via
-DQB, which correctly handles rotation
-and translation jointly:
+*Non-key node loss* pulls uncertain Gaussians toward positions predicted by interpolating the motion of their key neighbours. It uses Dual Quaternion Blending (DQB) to interpolate multiple rotations:
 
 $
-  cal(L)_"non-key" =
-  sum_t sum_(i in.not V_k)
-  norm(bold(p)_(i,t) - bold(p)^circle_(i,t))^2_(U^(-1)_(w,i))
-  + sum_t sum_(i in.not V_k)
-  norm(bold(p)_(i,t) - bold(p)^"DQB"_(i,t))^2_(U^(-1)_(w,i))
+cal(L)_"non-key" =
+  cal(L)_"pretrain,non-key" + cal(L)_"DQB,non-key"
   + cal(L)_"motion,non-key"
 $
 
-As Gaussians are isotropic, DQB interpolation reduces to a weighted blend of key
-node positions in our isotropic setting. The DQB target is soft;
-$bold(p)_(i,t)$ remains free and may deviate when the photometric loss
-provides a stronger signal, preserving non-rigid deformation. Density control
-is disabled in the first $10%$ and last $20%$ of USplat iterations to protect
-graph index integrity.
+$
+cal(L)_"pretrain,non-key" =
+  sum_t sum_(i in.not V_k)
+    norm(bold(mu)_(i,t) - bold(mu)^circle_(i,t))^2_(U^(-1)_(w,t,i))
+$
+
+$
+cal(L)_"DQB,non-key" =
+  sum_t sum_(i in.not V_k)
+    norm(bold(mu)_(i,t) - bold(mu)^"DQB"_(i,t))^2_(U^(-1)_(w,t,i))
+$
+
+DQB is a soft interpolation, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USplat iterations to protect graph index integrity.
 
 == At-Rest Compression
 
@@ -277,7 +249,7 @@ The complete model is stored as the combination of compression MLPs, and lossy c
 
 == Points of Improvement
 
-Several techniques have been developed to improve the known limitations of GS, but any addition may negate the contribution of another. For example, Isotropic Gaussians allow for faster training and smaller memory footprint, but reduce the model's capacity. We propose a shared parametrization model to test each architectural component in relation to the others, in a unified system.
+Several techniques have been developed to improve the known limitations of GS, but any addition may negate the contribution of another. For example, Isotropic Gaussians allow for faster training and smaller memory footprint, but reduce the model's capacity. We run a shared parametrization model to test each architectural component in relation to the others, in a unified system.
 
 = Model Parametrization
 
@@ -443,11 +415,11 @@ We combine the papers into a single architecture, which can be studied through a
 
     SEC(3, [*Compress*]),
 
-    C([SH], bg: light-blue),
-    L([MLP Distillation], bg: light-blue),
+    C([SH], bg: light-orange),
+    L([MLP Distillation], bg: light-orange),
     E, E, E, X, E, XR,
 
-    table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Quantize],
+    table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Codebook],
     L([K-means ], bg: light-orange),
     E, E, E, X, E, XR,
 
