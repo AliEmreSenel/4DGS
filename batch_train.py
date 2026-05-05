@@ -154,7 +154,7 @@ class ScheduleOptions:
     interleaved_prune_until_iter: int = 7500
     interleaved_prune_ratio: float = 0.15
     interleaved_prune_interval: int = 2000
-    interleaved_prune_min_points: int = 1000
+    interleaved_prune_min_points: int = 1
     interleaved_densify_from_iter: int = 500
     interleaved_densify_until_iter: int = 7500
     interleaved_densification_interval: int = 100
@@ -267,7 +267,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interleaved-prune-until-iter", type=int, default=7500)
     parser.add_argument("--interleaved-prune-ratio", type=float, default=0.15)
     parser.add_argument("--interleaved-prune-interval", type=int, default=2000)
-    parser.add_argument("--interleaved-prune-min-points", type=int, default=1000)
+    parser.add_argument("--interleaved-prune-min-points", type=int, default=1)
     parser.add_argument("--interleaved-densify-from-iter", type=int, default=500)
     parser.add_argument("--interleaved-densify-until-iter", type=int, default=7500)
     parser.add_argument("--interleaved-densification-interval", type=int, default=100)
@@ -464,7 +464,7 @@ def build_pruning_registry(total_iterations: int, options: ScheduleOptions) -> D
             "spatio_temporal_pruning_until_iter": interleaved_prune_until_iter,
             "spatio_temporal_pruning_interval": options.interleaved_prune_interval,
             "spatio_temporal_pruning_min_points": options.interleaved_prune_min_points,
-            "spatio_temporal_pruning_max_total_ratio": 0.50,
+            "spatio_temporal_pruning_max_total_ratio": 1.0,
             "densify_from_iter": interleaved_densify_from_iter,
             "densify_until_iter": interleaved_densify_until_iter,
             "densification_interval": options.interleaved_densification_interval,
@@ -533,14 +533,10 @@ def _with_clean_method_defaults(overrides: Mapping[str, Any]) -> Dict[str, Any]:
 def _paper_pruning_overrides(total_iterations: int, schedule_options: ScheduleOptions) -> Dict[str, Any]:
     registry = build_pruning_registry(total_iterations, schedule_options)
     out = dict(registry["interleaved_prune_densify"])
-    # 4DGS-1K is explicitly a compression method; keep the default sweep safe by
-    # limiting cumulative pruning while still creating a genuine ST-score signal.
-    out["spatio_temporal_pruning_max_total_ratio"] = min(
-        float(out.get("spatio_temporal_pruning_max_total_ratio", 0.50)), 0.40
-    )
-    out["spatio_temporal_pruning_min_points"] = max(
-        int(out.get("spatio_temporal_pruning_min_points", 1000)), 5000
-    )
+    # 4DGS-1K is explicitly a compression method. Do not impose a cumulative
+    # safety floor here; let the configured pruning ratio do the compression.
+    out["spatio_temporal_pruning_max_total_ratio"] = 1.0
+    out["spatio_temporal_pruning_min_points"] = 1
     return out
 
 
@@ -880,6 +876,59 @@ def build_model_path(output_root: Path, scene_name: str, variant: AblationVarian
     return output_root / scene_name / variant_suffix
 
 
+def resolve_against_repo(path_text: str | None, repo_root: Path) -> Path | None:
+    if not path_text:
+        return None
+    path = Path(str(path_text)).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    return path.resolve()
+
+
+def paths_overlap(a: Path, b: Path) -> bool:
+    try:
+        a = a.resolve()
+        b = b.resolve()
+    except FileNotFoundError:
+        a = a.absolute()
+        b = b.absolute()
+    return a == b or a in b.parents or b in a.parents
+
+
+def looks_like_scene_source(path: Path) -> bool:
+    return (
+        (path / "transforms_train.json").exists()
+        or (path / "sparse").exists()
+        or (path / "transforms_test.json").exists()
+    )
+
+
+def validate_run_paths(derived_cfg: Mapping[str, Any], repo_root: Path) -> None:
+    flat = flatten_cfg(derived_cfg)
+    source_path = resolve_against_repo(flat.get("source_path"), repo_root)
+    model_path = resolve_against_repo(flat.get("model_path"), repo_root)
+
+    if source_path is None:
+        raise ValueError("Generated config does not define source_path.")
+    if not source_path.exists():
+        raise FileNotFoundError(
+            f"Dataset source_path does not exist: {source_path}. "
+            "The ablation runner will not start training jobs that would all fail."
+        )
+    if not looks_like_scene_source(source_path):
+        raise FileNotFoundError(
+            f"Dataset source_path exists but is not a recognized 4DGS scene: {source_path}. "
+            "Expected either transforms_train.json or sparse/."
+        )
+    if model_path is None:
+        raise ValueError("Generated config does not define model_path.")
+    if paths_overlap(source_path, model_path):
+        raise ValueError(
+            "Refusing to run because model_path overlaps source_path. This would make cleanup dangerous. "
+            f"source_path={source_path} model_path={model_path}"
+        )
+
+
 def generated_config_root(output_root: Path, explicit_root: str | None) -> Path:
     if explicit_root:
         return Path(explicit_root)
@@ -1138,6 +1187,7 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
     if unknown_axes:
         raise ValueError(f"Unknown axes: {', '.join(unknown_axes)}")
 
+    repo_root = repo_root_from_args(args)
     option_map = build_option_map(args)
     global_overrides = parse_key_value_list(args.global_overrides)
     run_specs: List[RunSpec] = []
@@ -1183,6 +1233,7 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
                 run_overrides["seed"] = base_seed + args.seed_offset + index
 
             derived_cfg = apply_flat_overrides(cfg, run_overrides)
+            validate_run_paths(derived_cfg, repo_root)
             generated_config_path = config_root / f"{variant.name}.yaml"
             write_yaml(generated_config_path, derived_cfg)
 
@@ -2373,6 +2424,39 @@ def remove_path(path: Path) -> None:
             pass
 
 
+def looks_like_training_output(path: Path) -> bool:
+    if not path.exists():
+        return False
+    output_markers = [
+        "cfg_args",
+        "gaussian_args",
+        "cameras.json",
+        "input.ply",
+        "run_metrics.json",
+        "training_diagnostics.json",
+    ]
+    if any((path / marker).exists() for marker in output_markers):
+        return True
+    return any(path.glob("chkpnt*.pth"))
+
+
+def cleanup_is_safe_for_model_path(model_path: Path) -> bool:
+    if not model_path.exists():
+        return False
+    if looks_like_scene_source(model_path):
+        print(
+            f"[CLEANUP] Refusing to clean {model_path}: it looks like a dataset source "
+            "(transforms_train.json/transforms_test.json/sparse present)."
+        )
+        return False
+    if not looks_like_training_output(model_path):
+        print(
+            f"[CLEANUP] Refusing to clean {model_path}: no training-output markers found."
+        )
+        return False
+    return True
+
+
 def directory_size_bytes(path: Path) -> int:
     if not path.exists():
         return 0
@@ -2390,6 +2474,8 @@ def directory_size_bytes(path: Path) -> int:
 
 def cleanup_model_artifacts(model_path: Path, keep_checkpoint: Path | None) -> None:
     if not model_path.exists():
+        return
+    if not cleanup_is_safe_for_model_path(model_path):
         return
     keep_resolved = keep_checkpoint.resolve() if keep_checkpoint and keep_checkpoint.exists() else None
     for ckpt in model_path.glob("chkpnt*.pth"):

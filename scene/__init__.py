@@ -52,7 +52,16 @@ class Scene:
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, num_pts=num_pts, time_duration=time_duration, extension=args.extension, num_extra_pts=args.num_extra_pts, frame_ratio=args.frame_ratio, dataloader=args.dataloader)
         else:
-            assert False, "Could not recognize scene type!"
+            expected = [
+                os.path.join(args.source_path, "sparse"),
+                os.path.join(args.source_path, "transforms_train.json"),
+            ]
+            raise FileNotFoundError(
+                "Could not recognize scene type for source_path="
+                f"{args.source_path!r}. Expected one of: {expected}. "
+                "Check that the dataset folder still exists and that model_path "
+                "does not point at the dataset root."
+            )
 
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:

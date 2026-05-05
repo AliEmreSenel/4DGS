@@ -146,10 +146,10 @@ class OptimizationParams(ParamGroup):
         # Spatio-temporal pruning parameters
         self.enable_spatio_temporal_pruning = False
         self.spatio_temporal_pruning_ratio = 0.80
-        # Safety floor for iterative ST pruning. A value of 1 preserves
-        # previous behavior while preventing accidental empty scenes.
-        self.spatio_temporal_pruning_min_points = 1000
-        self.spatio_temporal_pruning_max_total_ratio = 0.50
+        # Safety floor for iterative ST pruning. Keep at 1 so pruning can
+        # remove as many low-score Gaussians as the requested ratio permits.
+        self.spatio_temporal_pruning_min_points = 1
+        self.spatio_temporal_pruning_max_total_ratio = 1.0
         self.spatio_temporal_pruning_random = False
         self.spatio_temporal_pruning_from_iter = -1
         self.spatio_temporal_pruning_until_iter = -1

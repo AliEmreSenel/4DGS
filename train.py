@@ -11,7 +11,6 @@
 
 import os
 import json
-import math
 import random
 import torch
 from torch import nn
@@ -61,15 +60,50 @@ def _to_float(value):
     return float(value)
 
 
-def _safe_percentiles(tensor, percentiles=(0, 1, 5, 25, 50, 75, 95, 99, 100)):
+def _safe_percentiles(
+    tensor,
+    percentiles=(0, 1, 5, 25, 50, 75, 95, 99, 100),
+    max_samples=1_000_000,
+):
+    """Return lightweight diagnostic percentiles without crashing on huge tensors.
+
+    torch.quantile can fail on very large CUDA tensors. These values are only
+    written to diagnostics, so a deterministic subsample is preferable to
+    stopping training.
+    """
     if tensor is None:
         return {}
     values = tensor.detach().float().reshape(-1)
+    total = values.numel()
+    if total == 0:
+        return {}
+
+    if total > max_samples:
+        idx = torch.linspace(
+            0,
+            total - 1,
+            steps=max_samples,
+            device=values.device,
+            dtype=torch.float32,
+        ).long()
+        values = values.index_select(0, idx)
+
     values = values[torch.isfinite(values)]
     if values.numel() == 0:
         return {}
-    qs = torch.tensor([p / 100.0 for p in percentiles], device=values.device, dtype=values.dtype)
-    out = torch.quantile(values, qs)
+
+    # Compute on CPU after the cap to avoid CUDA quantile size limits.
+    values = values.cpu()
+    qs = torch.tensor([p / 100.0 for p in percentiles], dtype=values.dtype)
+    try:
+        out = torch.quantile(values, qs)
+    except RuntimeError:
+        # Last-resort fallback for older PyTorch builds: nearest-rank quantiles.
+        ordered = torch.sort(values).values
+        if ordered.numel() == 0:
+            return {}
+        ranks = (qs * (ordered.numel() - 1)).round().long().clamp_(0, ordered.numel() - 1)
+        out = ordered.index_select(0, ranks)
     return {f"p{p}": _to_float(v) for p, v in zip(percentiles, out)}
 
 
@@ -493,8 +527,16 @@ def _current_means_and_quats_for_timestamps(
                 float(timestamp),
                 indices=idx,
             )
-            mean_chunks.append(xyz_all[idx] + delta)
-            ref_quat = _indexed_rotation(gaussians, idx)
+            mean = xyz_all[idx] + delta
+            mean = torch.where(torch.isfinite(mean), mean, xyz_all[idx].detach())
+            mean = torch.nan_to_num(mean, nan=0.0, posinf=1e6, neginf=-1e6)
+            mean_chunks.append(mean)
+            ref_quat = torch.nan_to_num(_indexed_rotation(gaussians, idx), nan=0.0, posinf=0.0, neginf=0.0)
+            zero_ref = ref_quat.norm(dim=-1, keepdim=True) < 1e-8
+            if zero_ref.any():
+                identity = torch.zeros_like(ref_quat)
+                identity[:, 0] = 1.0
+                ref_quat = torch.where(zero_ref, identity, ref_quat)
             if use_time_varying_rot:
                 quat_chunks.append(
                     _covariance_quat_from_cov6(
@@ -514,9 +556,18 @@ def _current_means_and_quats_for_timestamps(
 def _make_rigid_transforms(pos_t, pos_o, quats_t):
     """Build canonical-to-current SE(3) transforms."""
     N, B = pos_t.shape[:2]
-    R = quat_to_rotmat(quats_t.reshape(-1, 4)).reshape(N, B, 3, 3)
+    pos_t = torch.nan_to_num(pos_t, nan=0.0, posinf=1e6, neginf=-1e6)
+    pos_o = torch.nan_to_num(pos_o, nan=0.0, posinf=1e6, neginf=-1e6)
+    quats_t = torch.nan_to_num(quats_t, nan=0.0, posinf=0.0, neginf=0.0)
+    q_flat = quats_t.reshape(-1, 4)
+    zero_q = q_flat.norm(dim=-1, keepdim=True) < 1e-8
+    if zero_q.any():
+        identity = torch.zeros_like(q_flat)
+        identity[:, 0] = 1.0
+        q_flat = torch.where(zero_q, identity, q_flat)
+    R = torch.nan_to_num(quat_to_rotmat(q_flat), nan=0.0, posinf=0.0, neginf=0.0).reshape(N, B, 3, 3)
     Rp0 = (R @ pos_o[:, None, :, None]).squeeze(-1)
-    t = pos_t - Rp0
+    t = torch.nan_to_num(pos_t - Rp0, nan=0.0, posinf=1e6, neginf=-1e6)
     T_mat = torch.zeros(N, B, 3, 4, device=pos_t.device, dtype=pos_t.dtype)
     T_mat[..., :3, :3] = R
     T_mat[..., 3] = t
@@ -686,10 +737,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     usplat_state_dirty = False
     usplat_graph_rebuild_count = 0
     usplat_diag_stats = {}
+    skipped_nonfinite_losses = 0
     dropout_stats_accum = {"count": 0.0}
     ess_stats_accum = {"runs": 0, "selected_total": 0}
     st_prune_score_percentiles = {}
-    initial_gaussian_count_for_st_prune = None
     
     if checkpoint:
         checkpoint_payload = load_checkpoint(checkpoint, map_location="cuda")
@@ -843,6 +894,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             Lkey = torch.tensor(0.0, device=background.device)
             Lnon_key = torch.tensor(0.0, device=background.device)
+            skip_optimizer_step = False
 
             for batch_idx in range(current_batch_size):
                 gt_image, viewpoint_cam = batch_data[batch_idx]
@@ -1054,8 +1106,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                                 nonkey_nbrs_global=graph.nonkey_nbrs[nk_start:nk_end],
                             )
                             chunk_weight = float(nk_count) / float(N_n)
-                            (opt.lambda_non_key * chunk_weight * Lnon_key_chunk / current_batch_size).backward()
-                            Lnon_key_accum = Lnon_key_accum + Lnon_key_chunk.detach() * nk_count
+                            if torch.isfinite(Lnon_key_chunk):
+                                (opt.lambda_non_key * chunk_weight * Lnon_key_chunk / current_batch_size).backward()
+                                Lnon_key_accum = Lnon_key_accum + Lnon_key_chunk.detach() * nk_count
+                            else:
+                                skipped_nonfinite_losses += 1
+                                usplat_state_dirty = True
+                                if skipped_nonfinite_losses <= 5 or iteration % 100 == 0:
+                                    print(
+                                        f"[WARN] Skipping non-finite USplat non-key chunk at iter {iteration}; "
+                                        "continuing with RGB/RDR gradients."
+                                    )
 
                             del (
                                 pos_nk_t,
@@ -1085,8 +1146,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             key_nbrs_local=graph.key_nbrs,
                             key_nbr_weights=graph.key_nbr_weights,
                         )
-                        (opt.lambda_key * Lkey / current_batch_size).backward()
-                        usplat_loss_for_log = usplat_loss_for_log + opt.lambda_key * Lkey.detach()
+                        if torch.isfinite(Lkey):
+                            (opt.lambda_key * Lkey / current_batch_size).backward()
+                            usplat_loss_for_log = usplat_loss_for_log + opt.lambda_key * Lkey.detach()
+                        else:
+                            skipped_nonfinite_losses += 1
+                            usplat_state_dirty = True
+                            if skipped_nonfinite_losses <= 5 or iteration % 100 == 0:
+                                print(
+                                    f"[WARN] Skipping non-finite USplat key loss at iter {iteration}; "
+                                    "continuing with RGB/RDR gradients."
+                                )
                     else:
                         Lkey = torch.tensor(0.0, device=background.device)
 
@@ -1097,9 +1167,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_psnr += psnr(image, gt_image).mean().detach()
 
                 loss = loss / current_batch_size
-                batch_loss += loss.detach() + usplat_loss_for_log / current_batch_size
-                loss.backward()
-                if should_densify:
+                if torch.isfinite(loss):
+                    batch_loss += loss.detach() + usplat_loss_for_log / current_batch_size
+                    loss.backward()
+                else:
+                    skipped_nonfinite_losses += 1
+                    skip_optimizer_step = True
+                if should_densify and not skip_optimizer_step:
                     batch_point_grad.append(
                         torch.norm(viewspace_point_tensor.grad[:, :2], dim=-1)
                     )
@@ -1156,8 +1230,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ########################
 
             if opt.lambda_rigid > 0 or opt.lambda_motion > 0:
-                batch_loss += reg_loss.detach()
-                if reg_loss.requires_grad:
+                if torch.isfinite(reg_loss):
+                    batch_loss += reg_loss.detach()
+                else:
+                    skipped_nonfinite_losses += 1
+                    skip_optimizer_step = True
+                if reg_loss.requires_grad and torch.isfinite(reg_loss):
                     reg_loss.backward()
 
             Ll1 = batch_Ll1 / current_batch_size
@@ -1174,7 +1252,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Lrdr = batch_Lrdr / current_batch_size
             Lmobile_sh_distill = batch_Lmobile_sh_distill / current_batch_size
             Lmobile_depth_distill = batch_Lmobile_depth_distill / current_batch_size
-            if should_densify:
+            if should_densify and not skip_optimizer_step:
                 if current_batch_size > 1:
                     visibility_count = torch.stack(batch_visibility_filter, 1).sum(1)
                     visibility_filter = visibility_count > 0
@@ -1301,7 +1379,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     scene.save(iteration)
 
                 # Densification
-                if should_densify:
+                if should_densify and not skip_optimizer_step:
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(
                         gaussians.max_radii2D[visibility_filter],
@@ -1383,16 +1461,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # Optimizer step
                 if iteration < opt.iterations:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none=True)
-                    if gaussians.mobilegs_opacity_phi_optimizer is not None:
-                        gaussians.mobilegs_opacity_phi_optimizer.step()
-                        gaussians.mobilegs_opacity_phi_optimizer.zero_grad(
-                            set_to_none=True
-                        )
-                    if pipe.env_map_res and iteration < pipe.env_optimize_until:
-                        env_map_optimizer.step()
-                        env_map_optimizer.zero_grad(set_to_none=True)
+                    if skip_optimizer_step:
+                        if skipped_nonfinite_losses <= 5 or iteration % 100 == 0:
+                            print(
+                                f"[WARN] Skipping optimizer step at iter {iteration} "
+                                "because a non-finite loss was detected."
+                            )
+                        gaussians.optimizer.zero_grad(set_to_none=True)
+                        if gaussians.mobilegs_opacity_phi_optimizer is not None:
+                            gaussians.mobilegs_opacity_phi_optimizer.zero_grad(
+                                set_to_none=True
+                            )
+                        if pipe.env_map_res and iteration < pipe.env_optimize_until:
+                            env_map_optimizer.zero_grad(set_to_none=True)
+                    else:
+                        gaussians.optimizer.step()
+                        gaussians.optimizer.zero_grad(set_to_none=True)
+                        if gaussians.mobilegs_opacity_phi_optimizer is not None:
+                            gaussians.mobilegs_opacity_phi_optimizer.step()
+                            gaussians.mobilegs_opacity_phi_optimizer.zero_grad(
+                                set_to_none=True
+                            )
+                        if pipe.env_map_res and iteration < pipe.env_optimize_until:
+                            env_map_optimizer.step()
+                            env_map_optimizer.zero_grad(set_to_none=True)
 
                 should_final_st_prune = (
                     opt.final_prune_from_iter >= 0
@@ -1418,13 +1510,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         )
                     )
                     st_prune_score_percentiles = _safe_percentiles(spatio_temporal_scores)
-                    if initial_gaussian_count_for_st_prune is None:
-                        initial_gaussian_count_for_st_prune = int(gaussians.get_xyz.shape[0])
-                    max_total_ratio = max(0.0, min(1.0, float(getattr(opt, "spatio_temporal_pruning_max_total_ratio", 0.50))))
-                    min_from_total_cap = int(math.ceil(float(initial_gaussian_count_for_st_prune) * (1.0 - max_total_ratio)))
-                    min_remaining_points = max(
-                        int(getattr(opt, "spatio_temporal_pruning_min_points", 1)),
-                        min_from_total_cap,
+                    min_remaining_points = int(
+                        getattr(opt, "spatio_temporal_pruning_min_points", 1)
                     )
                     print(
                         f"[ITER {iteration}] Pruning Gaussians with ratio {opt.spatio_temporal_pruning_ratio} "

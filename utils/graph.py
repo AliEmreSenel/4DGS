@@ -68,9 +68,29 @@ def _camera_uncertainty_weighted_sq(
     from the training loss, which uses U^{-1} to down-weight uncertain residuals.
     """
     r = torch.tensor(r_scale, dtype=delta_world.dtype, device=delta_world.device)
+    delta_world = torch.nan_to_num(delta_world, nan=0.0, posinf=1e6, neginf=-1e6)
+    u_sum = torch.nan_to_num(u_sum, nan=1e6, posinf=1e6, neginf=1e6).clamp_min(1e-8)
+    R_cw = torch.nan_to_num(R_cw, nan=0.0, posinf=0.0, neginf=0.0)
     delta_cam = torch.einsum("...ij,...j->...i", R_cw, delta_world)
     weight = (r * u_sum.unsqueeze(-1)).clamp_min(1e-8)
-    return (delta_cam.square() * weight).sum(dim=-1)
+    dist = (delta_cam.square() * weight).sum(dim=-1)
+    return torch.nan_to_num(dist, nan=1e30, posinf=1e30, neginf=1e30)
+
+
+def _softmax_neg_dist(dist: Tensor, dim: int = -1) -> Tensor:
+    """Softmax over negative distances with finite fallback.
+
+    If every candidate distance in a row is invalid/huge, return a uniform row
+    instead of NaNs.  This prevents a bad graph rebuild from poisoning DQB.
+    """
+    dist = torch.nan_to_num(dist, nan=1e30, posinf=1e30, neginf=1e30)
+    logits = -dist.clamp(min=1e-8, max=1e30)
+    weights = F.softmax(logits, dim=dim)
+    bad = ~torch.isfinite(weights).all(dim=dim, keepdim=True)
+    if bad.any():
+        uniform = torch.ones_like(weights) / float(max(weights.shape[dim], 1))
+        weights = torch.where(bad, uniform, weights)
+    return weights
 
 
 def build_graph(
@@ -92,8 +112,8 @@ def build_graph(
         device = means_t.device
 
     G, T, _ = means_t.shape
-    means_t = means_t.to(device)
-    u_scalar = u_scalar.to(device)
+    means_t = torch.nan_to_num(means_t.to(device), nan=0.0, posinf=1e6, neginf=-1e6)
+    u_scalar = torch.nan_to_num(u_scalar.to(device), nan=1e6, posinf=1e6, neginf=1e6).clamp_min(1e-8)
     if w2cs is None:
         w2cs = torch.eye(4, device=device, dtype=means_t.dtype).unsqueeze(0).repeat(T, 1, 1)
     else:
@@ -180,9 +200,10 @@ def build_graph(
 
     graph_dist.fill_diagonal_(float("inf"))
     if k_eff > 0:
+        graph_dist = torch.nan_to_num(graph_dist, nan=1e30, posinf=1e30, neginf=1e30)
         _, key_nbr_local = graph_dist.topk(k_eff, dim=-1, largest=False)
         nbr_dists = graph_dist.gather(1, key_nbr_local)
-        key_nbr_weights = F.softmax(-nbr_dists.clamp(min=1e-8), dim=-1)
+        key_nbr_weights = _softmax_neg_dist(nbr_dists, dim=-1)
     else:
         # Single-key-node scenes cannot have a non-self key edge. Keep a benign
         # self-neighbor with unit weight so downstream tensor shapes remain valid.
@@ -233,7 +254,7 @@ def build_graph(
     u_sum_nk = nk_u_best.unsqueeze(1) + nbr_u
     R_cw_nk = w2cs[nk_best_t, :3, :3].unsqueeze(1).expand(-1, k_eff + 1, -1, -1)
     graph_dist_nk = _camera_uncertainty_weighted_sq(diff_nk, u_sum_nk, R_cw_nk, r_scale)
-    nonkey_nbr_weights = F.softmax(-graph_dist_nk.clamp(min=1e-8), dim=-1)
+    nonkey_nbr_weights = _softmax_neg_dist(graph_dist_nk, dim=-1)
 
     # Diagnostics for ablation summaries. Keep tensors out of the dataclass payload.
     key_row = torch.arange(N_k, device=device)

@@ -29,13 +29,29 @@ from utils.uncertainty import mahalanobis_sq
 from utils.dqb import apply_dqb_to_batch
 
 
+def _finite_loss(x: Tensor, limit: float = 1e6) -> Tensor:
+    """Return a scalar loss with NaN/Inf replaced by bounded values."""
+    if x.numel() == 0:
+        return x.new_zeros(())
+    x = torch.nan_to_num(x, nan=0.0, posinf=limit, neginf=0.0)
+    return x.clamp_min(0.0).clamp_max(limit)
+
+
+def _finite_mean(x: Tensor, limit: float = 1e6) -> Tensor:
+    if x.numel() == 0:
+        return x.new_zeros(())
+    return _finite_loss(torch.nan_to_num(x, nan=0.0, posinf=limit, neginf=-limit).clamp(-limit, limit).mean(), limit)
+
+
 def quaternion_chordal_loss(q: Tensor, target: Tensor) -> Tensor:
     """Hemisphere-invariant unit-quaternion L2 loss."""
-    q = F.normalize(q, p=2, dim=-1)
-    target = F.normalize(target, p=2, dim=-1)
+    q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
+    target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
+    q = F.normalize(q, p=2, dim=-1, eps=1e-8)
+    target = F.normalize(target, p=2, dim=-1, eps=1e-8)
     same = (q - target).square().sum(dim=-1)
     flipped = (q + target).square().sum(dim=-1)
-    return torch.minimum(same, flipped).mean()
+    return _finite_mean(torch.minimum(same, flipped))
 
 
 def quaternion_identity_chordal_loss(q: Tensor) -> Tensor:
@@ -45,12 +61,13 @@ def quaternion_identity_chordal_loss(q: Tensor) -> Tensor:
     no-motion relative quaternion q_rel=(1,0,0,0), that produces a non-zero
     penalty. This helper is exactly zero for identity (and -identity).
     """
-    q = F.normalize(q, p=2, dim=-1)
+    q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
+    q = F.normalize(q, p=2, dim=-1, eps=1e-8)
     identity = torch.zeros_like(q)
     identity[..., 0] = 1.0
     same = (q - identity).square().sum(dim=-1)
     flipped = (q + identity).square().sum(dim=-1)
-    return torch.minimum(same, flipped).mean()
+    return _finite_mean(torch.minimum(same, flipped))
 
 
 def quat_mul(a: Tensor, b: Tensor) -> Tensor:
@@ -99,8 +116,8 @@ def isometry_loss(
     dist_t = torch.linalg.norm(p_i_t - p_j_t, dim=-1)  # (N, B, K)
 
     diff = dist_o.unsqueeze(1) - dist_t                   # (N, B, K)
-    loss = (weights.unsqueeze(1) * diff).abs().mean()
-    return loss
+    loss = (weights.unsqueeze(1) * torch.nan_to_num(diff, nan=0.0, posinf=1e6, neginf=-1e6)).abs().mean()
+    return _finite_loss(loss)
 
 
 def rigidity_loss(
@@ -172,8 +189,8 @@ def rigidity_loss(
     pred = (R_prev_exp @ step1.unsqueeze(-1)).squeeze(-1) + t_prev_exp  # (N, B-Δ, K, 3)
 
     diff_sq = ((p_j_prev - pred) ** 2).sum(-1)  # (N, B-Δ, K)
-    loss = (weights.unsqueeze(1).expand_as(diff_sq) * diff_sq).mean()
-    return loss
+    loss = (weights.unsqueeze(1).expand_as(diff_sq) * torch.nan_to_num(diff_sq, nan=0.0, posinf=1e6, neginf=0.0)).mean()
+    return _finite_loss(loss)
 
 
 def rotation_loss(
@@ -231,8 +248,8 @@ def rotation_loss(
     # Difference: ||q_j_rel - q_i_rel||^2   (broadcast i over K)
     diff = q_j_rel - q_i_rel.unsqueeze(2)                 # (N, B-Δ, K, 4)
     diff_sq = (diff ** 2).sum(-1)                         # (N, B-Δ, K)
-    loss = (weights.unsqueeze(1).expand_as(diff_sq) * diff_sq).mean()
-    return loss
+    loss = (weights.unsqueeze(1).expand_as(diff_sq) * torch.nan_to_num(diff_sq, nan=0.0, posinf=1e6, neginf=0.0)).mean()
+    return _finite_loss(loss)
 
 
 def velocity_loss(
@@ -255,7 +272,7 @@ def velocity_loss(
     q_curr_inv = torch.cat([q_curr[..., :1], -q_curr[..., 1:]], dim=-1)
     q_rel = quat_mul(q_prev, q_curr_inv)
     dq = quaternion_identity_chordal_loss(q_rel)
-    return dp + dq
+    return _finite_loss(dp + dq)
 
 
 def acceleration_loss(
@@ -291,7 +308,7 @@ def acceleration_loss(
     rel12_inv = torch.cat([rel12[..., :1], -rel12[..., 1:]], dim=-1)
     acc_q = quaternion_identity_chordal_loss(quat_mul(rel01, rel12_inv))
 
-    return acc_p + acc_q
+    return _finite_loss(acc_p + acc_q)
 
 
 def motion_loss_key(
@@ -319,7 +336,7 @@ def motion_loss_key(
         loss = loss + lambda_vel * velocity_loss(pos_t, quats_t)
     if lambda_acc > 0:
         loss = loss + lambda_acc * acceleration_loss(pos_t, quats_t)
-    return loss
+    return _finite_loss(loss)
 
 
 def motion_loss_non_key(
@@ -363,7 +380,7 @@ def motion_loss_non_key(
         loss = loss + lambda_vel * velocity_loss(pos_t, quats_t)
     if lambda_acc > 0:
         loss = loss + lambda_acc * acceleration_loss(pos_t, quats_t)
-    return loss
+    return _finite_loss(loss)
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +416,7 @@ def key_node_loss(
     # R_wc_t: (B, 3, 3) → expand to (N_k, B, 3, 3)
     R_wc = R_wc_t.unsqueeze(0).expand(N_k, -1, -1, -1)  # (N_k, B, 3, 3)
     mah = mahalanobis_sq(delta, u_key, R_wc, r_scale)    # (N_k, B)
-    pos_dev_loss = torch.sqrt(mah + 1e-8).mean()
+    pos_dev_loss = _finite_mean(torch.sqrt(torch.nan_to_num(mah, nan=0.0, posinf=1e12, neginf=0.0).clamp_min(0.0) + 1e-8))
 
     # --- Motion loss ---
     mot = motion_loss_key(
@@ -415,7 +432,7 @@ def key_node_loss(
         lambda_vel=lambda_vel,
         lambda_acc=lambda_acc,
     )
-    return pos_dev_loss + mot
+    return _finite_loss(pos_dev_loss + mot)
 
 
 # --------------------------------------------------------------------------- #
@@ -461,7 +478,7 @@ def non_key_node_loss(
     delta_pre = pos_nk_t - pos_nk_pretrained          # (N_n, B, 3)
     R_wc = R_wc_t.unsqueeze(0).expand(N_n, -1, -1, -1)
     mah_pre = mahalanobis_sq(delta_pre, u_nk, R_wc, r_scale)  # (N_n, B)
-    loss_pre = torch.sqrt(mah_pre + 1e-8).mean()
+    loss_pre = _finite_mean(torch.sqrt(torch.nan_to_num(mah_pre, nan=0.0, posinf=1e12, neginf=0.0).clamp_min(0.0) + 1e-8))
 
     # --- Mahalanobis deviation from DQB interpolation ---
     # Compute DQB position and rotation targets for each sampled frame.
@@ -484,7 +501,7 @@ def non_key_node_loss(
 
     delta_dqb = pos_nk_t - pos_dqb              # (N_n, B, 3)
     mah_dqb = mahalanobis_sq(delta_dqb, u_nk, R_wc, r_scale)  # (N_n, B)
-    loss_dqb = torch.sqrt(mah_dqb + 1e-8).mean()
+    loss_dqb = _finite_mean(torch.sqrt(torch.nan_to_num(mah_dqb, nan=0.0, posinf=1e12, neginf=0.0).clamp_min(0.0) + 1e-8))
     loss_dqb_rot = quaternion_chordal_loss(quats_nk_t, quat_dqb)
 
     # --- Motion loss ---
@@ -506,4 +523,4 @@ def non_key_node_loss(
         lambda_vel=lambda_vel,
         lambda_acc=lambda_acc,
     )
-    return loss_pre + loss_dqb + lambda_rot * loss_dqb_rot + mot
+    return _finite_loss(loss_pre + loss_dqb + lambda_rot * loss_dqb_rot + mot)

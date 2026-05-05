@@ -229,10 +229,19 @@ def mahalanobis_sq(
     R_wc: Tensor,
     r_scale: Tuple[float, float, float] = (1.0, 1.0, 100.0),
 ) -> Tensor:
-    """Compute Mahalanobis squared distance ||delta||^2_{U^{-1}}."""
+    """Compute Mahalanobis squared distance ||delta||^2_{U^{-1}}.
+
+    USplat is a regularizer, not the primary rendering objective.  Treat
+    singular uncertainty/pose values as low-confidence residuals rather than
+    returning NaN and stopping all training.
+    """
     rx, ry, rz = r_scale
     device = delta.device
+    delta = torch.nan_to_num(delta, nan=0.0, posinf=1e6, neginf=-1e6)
+    R_wc = torch.nan_to_num(R_wc, nan=0.0, posinf=0.0, neginf=0.0)
+    u_scalar = torch.nan_to_num(u_scalar, nan=1e6, posinf=1e6, neginf=1e6).clamp_min(1e-8)
     delta_cam = (R_wc.transpose(-1, -2) @ delta.unsqueeze(-1)).squeeze(-1)
     r = torch.tensor([rx, ry, rz], device=device, dtype=delta.dtype)
-    inv_ru = 1.0 / (r * u_scalar.unsqueeze(-1).clamp(min=1e-8))
-    return (delta_cam ** 2 * inv_ru).sum(dim=-1)
+    inv_ru = 1.0 / (r * u_scalar.unsqueeze(-1)).clamp_min(1e-8)
+    out = (delta_cam ** 2 * inv_ru).sum(dim=-1)
+    return torch.nan_to_num(out, nan=0.0, posinf=1e12, neginf=0.0).clamp_min(0.0)

@@ -84,8 +84,8 @@ OptimizationParams:
   lambda_mobilegs_depth_distill: 0.0
   enable_spatio_temporal_pruning: false
   spatio_temporal_pruning_ratio: 0.15
-  spatio_temporal_pruning_min_points: 5000
-  spatio_temporal_pruning_max_total_ratio: 0.4
+  spatio_temporal_pruning_min_points: 1
+  spatio_temporal_pruning_max_total_ratio: 1.0
   spatio_temporal_pruning_random: false
   spatio_temporal_pruning_from_iter: 2000
   spatio_temporal_pruning_until_iter: 7500

@@ -241,10 +241,15 @@ def apply_dqb_to_batch(
 
     # Collect neighbor R and t for all non-key nodes at once
     # nonkey_nbrs: (N_n, K+1) indices into key arrays
+    nonkey_nbrs = nonkey_nbrs.clamp(0, max(R_key_t.shape[0] - 1, 0))
     flat_idx = nonkey_nbrs.reshape(-1)                           # (N_n*(K+1),)
     R_nbr = R_key_t[flat_idx].reshape(N_n, Kp1, 3, 3)          # (N_n, K+1, 3, 3)
     t_nbr = t_key_t[flat_idx].reshape(N_n, Kp1, 3)             # (N_n, K+1, 3)
-    w_nbr = nonkey_nbr_weights                                   # (N_n, K+1)
+    R_nbr = torch.nan_to_num(R_nbr, nan=0.0, posinf=0.0, neginf=0.0)
+    t_nbr = torch.nan_to_num(t_nbr, nan=0.0, posinf=1e6, neginf=-1e6)
+    w_nbr = torch.nan_to_num(nonkey_nbr_weights, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    w_sum = w_nbr.sum(dim=-1, keepdim=True)
+    w_nbr = torch.where(w_sum > 0, w_nbr / w_sum.clamp_min(1e-8), torch.ones_like(w_nbr) / float(max(Kp1, 1)))
 
     # Dual quaternion encoding: (N_n, K+1, 8)
     dq = se3_to_dual_quat(R_nbr, t_nbr)  # (N_n, K+1, 8)
@@ -261,6 +266,7 @@ def apply_dqb_to_batch(
     # Normalize
     norm_r = dq_blend[:, :4].norm(dim=-1, keepdim=True).clamp(min=1e-8)  # (N_n, 1)
     dq_blend = dq_blend / norm_r.expand(-1, 8)
+    dq_blend = torch.nan_to_num(dq_blend, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Decode to R, t
     q_r = dq_blend[:, :4]    # (N_n, 4)
@@ -268,10 +274,13 @@ def apply_dqb_to_batch(
     q_r_norm = F.normalize(q_r, p=2, dim=-1)
     # t = 2 * q_d * conj(q_r)  [imaginary part]
     t_blend = 2.0 * quat_mul(q_d, quat_conj(q_r_norm))[..., 1:]  # (N_n, 3)
-    R_blend = quat_to_rotmat(q_r_norm)                             # (N_n, 3, 3)
+    t_blend = torch.nan_to_num(t_blend, nan=0.0, posinf=1e6, neginf=-1e6)
+    R_blend = torch.nan_to_num(quat_to_rotmat(q_r_norm), nan=0.0, posinf=0.0, neginf=0.0)
 
     # Apply transform to canonical positions: p_dqb = R_blend @ p_canon + t_blend
+    p_canon = torch.nan_to_num(p_canon, nan=0.0, posinf=1e6, neginf=-1e6)
     p_dqb = (R_blend @ p_canon.unsqueeze(-1)).squeeze(-1) + t_blend  # (N_n, 3)
+    p_dqb = torch.nan_to_num(p_dqb, nan=0.0, posinf=1e6, neginf=-1e6)
 
     # Convert quaternion back (w,x,y,z) for SoM compatibility
     q_dqb = q_r_norm    # (N_n, 4) already (w,x,y,z)

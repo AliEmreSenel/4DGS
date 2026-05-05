@@ -102,15 +102,33 @@ class GaussianModel:
             cov_11 = actual_covariance[:, :3, :3]
             cov_12 = actual_covariance[:, 0:3, 3:4]
             cov_t = actual_covariance[:, 3:4, 3:4]
-            current_covariance = cov_11 - cov_12 @ cov_12.transpose(1, 2) / cov_t
+
+            # The conditional 4D->3D formulas divide by the temporal
+            # covariance.  Late in optimization, ESS/pruning/USplat can drive
+            # some temporal scales extremely close to zero.  A zero or
+            # non-finite cov_t creates NaN mean offsets/conditional covariances
+            # and then USplat losses become non-finite forever.  Clamp only the
+            # denominator; this is equivalent to a tiny temporal variance floor.
+            cov_t_safe = torch.nan_to_num(
+                cov_t, nan=1e-8, posinf=1e8, neginf=1e-8
+            ).clamp_min(1e-8)
+            current_covariance = cov_11 - cov_12 @ cov_12.transpose(1, 2) / cov_t_safe
+            current_covariance = torch.nan_to_num(
+                current_covariance, nan=0.0, posinf=1e8, neginf=-1e8
+            )
             symm = strip_symmetric(current_covariance)
+            ratio = torch.nan_to_num(
+                cov_12.squeeze(-1) / cov_t_safe.squeeze(-1),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
             if dt.shape[1] > 1:
-                mean_offset = (cov_12.squeeze(-1) / cov_t.squeeze(-1))[:, None, :] * dt[
-                    ..., None
-                ]
+                mean_offset = ratio[:, None, :] * dt[..., None]
                 mean_offset = mean_offset[..., None]  # [num_pts, num_time, 3, 1]
             else:
-                mean_offset = cov_12.squeeze(-1) / cov_t.squeeze(-1) * dt
+                mean_offset = ratio * dt
+            mean_offset = torch.nan_to_num(mean_offset, nan=0.0, posinf=0.0, neginf=0.0)
             return symm, mean_offset.squeeze(-1)
 
         self.scaling_activation = torch.exp
@@ -387,9 +405,10 @@ class GaussianModel:
         sigma = self.get_cov_t(scaling_modifier)
         if self.prefilter_var > 0.0:
             sigma += self.prefilter_var
-        return torch.exp(
-            -0.5 * (self.get_t - timestamp) ** 2 / sigma
-        )  # / torch.sqrt(2*torch.pi*sigma)
+        sigma = torch.nan_to_num(sigma, nan=1e-8, posinf=1e8, neginf=1e-8).clamp_min(1e-8)
+        exponent = -0.5 * (self.get_t - timestamp) ** 2 / sigma
+        exponent = torch.nan_to_num(exponent, nan=-1e8, posinf=0.0, neginf=-1e8)
+        return torch.exp(exponent)  # / torch.sqrt(2*torch.pi*sigma)
 
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(
@@ -732,7 +751,13 @@ class GaussianModel:
             gaussian_scores = render_pkg.get("gaussian_scores")
             if gaussian_scores is None or gaussian_scores.numel() == 0:
                 continue
-            spatial_scores = spatial_scores + gaussian_scores.to(spatial_scores.device)
+            gaussian_scores = torch.nan_to_num(
+                gaussian_scores.to(spatial_scores.device, dtype=spatial_scores.dtype),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0)
+            spatial_scores = spatial_scores + gaussian_scores
 
         timestamps = torch.tensor(
             [
@@ -744,23 +769,64 @@ class GaussianModel:
         )
         unique_timestamps = torch.unique(timestamps)
 
-        mu_t = self.get_t.squeeze(-1)
-        sigma_t = self.get_cov_t(scaling_modifier=1.0).squeeze(-1).clamp_min(1e-6)
+        mu_t = torch.nan_to_num(
+            self.get_t.squeeze(-1), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        sigma_t = torch.nan_to_num(
+            self.get_cov_t(scaling_modifier=1.0).squeeze(-1),
+            nan=1e-6,
+            posinf=1e6,
+            neginf=1e-6,
+        ).clamp_min(1e-6)
         temporal_variation = torch.zeros_like(mu_t)
         for timestamp in unique_timestamps:
             diff = timestamp - mu_t
             p_i_t = torch.exp(-0.5 * (diff ** 2) / sigma_t)
             second_derivative = (((diff**2) / (sigma_t**2)) - (1.0 / sigma_t)) * p_i_t
+            second_derivative = torch.nan_to_num(
+                second_derivative, nan=0.0, posinf=0.0, neginf=0.0
+            )
             temporal_variation = temporal_variation + 1.0 / (
                 0.5 * torch.tanh(torch.abs(second_derivative)) + 0.5
             )
 
         volume_4d = torch.prod(self.get_scaling, dim=1) * self.get_scaling_t.squeeze(-1)
-        volume_4d = volume_4d.clamp_min(1e-8)
+        volume_4d = torch.nan_to_num(
+            volume_4d, nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp_min(1e-8)
         volume_normalized = volume_4d / (torch.norm(volume_4d, p=2) + 1e-8)
 
         temporal_score = temporal_variation * volume_normalized
-        return spatial_scores * temporal_score
+        scores = spatial_scores * temporal_score
+        return torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+
+    @staticmethod
+    def _finite_pruning_scores(scores):
+        """Return finite 1D pruning scores without changing valid ordering.
+
+        CUDA multinomial asserts when any sampling probability is NaN, Inf, or
+        negative.  Spatio-temporal scores are derived from renderer outputs, so a
+        single unstable Gaussian can contaminate the vector.  Map non-finite
+        values to the finite score range instead of crashing inside the CUDA
+        sampling kernel.
+        """
+        scores = scores.detach().reshape(-1)
+        if scores.numel() == 0:
+            return scores
+        finite = torch.isfinite(scores)
+        if finite.any():
+            finite_scores = scores[finite]
+            finite_min = finite_scores.min()
+            finite_max = finite_scores.max()
+            scores = torch.nan_to_num(
+                scores,
+                nan=float(finite_min.item()),
+                posinf=float(finite_max.item()),
+                neginf=float(finite_min.item()),
+            )
+        else:
+            scores = torch.zeros_like(scores)
+        return scores
 
     @torch.no_grad()
     def prune_with_spatio_temporal_score(
@@ -773,6 +839,8 @@ class GaussianModel:
     ):
         if scores.numel() == 0:
             return
+
+        scores = self._finite_pruning_scores(scores)
 
         num_points = scores.shape[0]
         min_remaining_points = int(max(1, min(min_remaining_points, num_points)))
@@ -799,13 +867,38 @@ class GaussianModel:
             # Lower score -> higher chance to be pruned. Convert scores to a
             # sampling probability by inverting and normalizing.
             max_s = scores.max()
-            raw = (max_s - scores).clamp_min(0.0)
-            if raw.sum().item() == 0:
+            raw = torch.nan_to_num(
+                (max_s - scores).clamp_min(0.0),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            raw_sum = raw.sum()
+            if (not torch.isfinite(raw_sum)) or raw_sum.item() <= 0:
                 # All scores equal: fallback to uniform random pruning
                 prune_indices = torch.randperm(num_points, device=scores.device)[:num_to_prune]
             else:
-                probs = raw / (raw.sum() + 1e-12)
-                prune_indices = torch.multinomial(probs, num_samples=num_to_prune, replacement=False)
+                positive = raw > 0
+                if int(positive.sum().item()) < num_to_prune:
+                    # Without replacement, multinomial cannot draw more
+                    # positive-probability samples than exist. Fall back to the
+                    # deterministic lowest-score pruning for this degenerate case.
+                    prune_indices = torch.topk(scores, k=num_to_prune, largest=False).indices
+                else:
+                    probs = torch.nan_to_num(
+                        raw / (raw_sum + 1e-12),
+                        nan=0.0,
+                        posinf=0.0,
+                        neginf=0.0,
+                    ).clamp_min(0.0)
+                    probs_sum = probs.sum()
+                    if (not torch.isfinite(probs_sum)) or probs_sum.item() <= 0:
+                        prune_indices = torch.randperm(num_points, device=scores.device)[:num_to_prune]
+                    else:
+                        probs = probs / probs_sum
+                        prune_indices = torch.multinomial(
+                            probs, num_samples=num_to_prune, replacement=False
+                        )
 
             prune_mask = torch.zeros(num_points, dtype=torch.bool, device=scores.device)
             prune_mask[prune_indices] = True
