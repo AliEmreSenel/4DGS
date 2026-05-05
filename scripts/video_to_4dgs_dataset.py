@@ -185,8 +185,80 @@ def detect_peak_in_window(y: np.ndarray, sr: int, duration: float, window_start:
     coarse = float(times[peak_index])
     fine = refine_peak_time(y, sr, coarse)
     return fine, float(onset[peak_index])
+def detect_start_clap(y: np.ndarray, sr: int, duration: float, start_window: float, start_after: float = 0.0) -> tuple[float, float]:
+    return detect_peak_in_window(y, sr, duration, max(0.0, start_after), min(start_window, duration), "start")
 def detect_end_clap(y: np.ndarray, sr: int, duration: float, end_window: float) -> tuple[float, float]:
     return detect_peak_in_window(y, sr, duration, max(0.0, duration - min(end_window, duration)), duration, "end")
+def detect_peak_candidates_in_window(
+    y: np.ndarray,
+    sr: int,
+    duration: float,
+    window_start: float,
+    window_end: float,
+    label: str,
+    max_candidates: int = 24,
+    min_separation: float = 0.25,
+) -> list[tuple[float, float]]:
+    onset, times = onset_envelope(y, sr)
+    window_start = max(0.0, min(window_start, duration))
+    window_end = max(window_start, min(window_end, duration))
+    mask = (times >= window_start) & (times <= window_end)
+    if not np.any(mask):
+        raise RuntimeError(f"No samples available while searching for {label} clap in [{window_start:.3f}, {window_end:.3f}]")
+    indices = np.flatnonzero(mask)
+    sorted_indices = indices[np.argsort(onset[indices])[::-1]]
+    candidates: list[tuple[float, float]] = []
+    for idx in sorted_indices:
+        coarse = float(times[int(idx)])
+        if any(abs(coarse - existing_time) < min_separation for existing_time, _ in candidates):
+            continue
+        fine = refine_peak_time(y, sr, coarse)
+        if any(abs(fine - existing_time) < min_separation for existing_time, _ in candidates):
+            continue
+        candidates.append((float(fine), float(onset[int(idx)])))
+        if len(candidates) >= max_candidates:
+            break
+    if not candidates:
+        raise RuntimeError(f"No {label} clap candidates found in [{window_start:.3f}, {window_end:.3f}]")
+    return candidates
+def detect_start_end_claps(
+    y: np.ndarray,
+    sr: int,
+    duration: float,
+    start_window: float,
+    end_window: float,
+    min_interval: float,
+    start_after: float = 0.0,
+) -> tuple[float, float, float, float]:
+    start_candidates = detect_peak_candidates_in_window(
+        y, sr, duration, max(0.0, start_after), min(start_window, duration), "start"
+    )
+    end_candidates = detect_peak_candidates_in_window(
+        y, sr, duration, max(0.0, duration - min(end_window, duration)), duration, "end"
+    )
+    best: tuple[float, float, float, float, float] | None = None
+    for start_time, start_strength in start_candidates:
+        for end_time, end_strength in end_candidates:
+            interval = float(end_time) - float(start_time)
+            if interval < min_interval:
+                continue
+            score = float(start_strength) + float(end_strength)
+            # Prefer the strongest pair. For ties, prefer an earlier start and later end.
+            key = (score, -float(start_time), float(end_time), interval)
+            if best is None or key > best[0:4]:
+                best = (score, -float(start_time), float(end_time), interval, float(start_strength) + float(end_strength))
+                best_pair = (float(start_time), float(start_strength), float(end_time), float(end_strength))
+    if best is None:
+        start_preview = [{"time": round(t, 6), "strength": round(v, 6)} for t, v in start_candidates[:5]]
+        end_preview = [{"time": round(t, 6), "strength": round(v, 6)} for t, v in end_candidates[:5]]
+        raise RuntimeError(
+            "Could not find distinct start/end clap pair "
+            f"at least {min_interval:.3f}s apart. "
+            f"Top start candidates={start_preview}; top end candidates={end_preview}. "
+            "Try reducing --clap-min-interval, narrowing the overlapping window, "
+            "or increasing --clap-end-window if the end clap is earlier than expected."
+        )
+    return best_pair
 def resolve_video_inputs(items: Sequence[str]) -> list[Path]:
     resolved: list[Path] = []
     seen: set[Path] = set()
@@ -239,6 +311,53 @@ def maybe_clear_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 def camera_name_from_index(idx: int) -> str:
     return f"cam{idx:02d}"
+def parse_per_video_float_overrides(items: Sequence[str] | None, videos: list[Path], option_name: str) -> dict[int, float]:
+    """Parse KEY=SECONDS overrides where KEY can be camNN, index, filename, stem, or path.
+
+    The argparse option uses action=append, but each item may also contain a
+    comma-separated list so both of these work:
+      --clap-start-after cam02=3.0 --clap-start-after cam04=2.5
+      --clap-start-after cam02=3.0,cam04=2.5
+    """
+    overrides: dict[int, float] = {}
+    if not items:
+        return overrides
+    key_to_index: dict[str, int] = {}
+    for i, video in enumerate(videos):
+        aliases = {
+            str(i),
+            camera_name_from_index(i),
+            video.name,
+            video.stem,
+            str(video),
+            str(video.resolve()),
+        }
+        for alias in aliases:
+            key_to_index[alias] = i
+    parts: list[str] = []
+    for item in items:
+        parts.extend([piece.strip() for piece in str(item).split(",") if piece.strip()])
+    for part in parts:
+        if "=" not in part:
+            raise ValueError(f"{option_name} expects KEY=SECONDS, got {part!r}")
+        raw_key, raw_value = part.split("=", 1)
+        key = raw_key.strip()
+        if key not in key_to_index:
+            available = []
+            for i, video in enumerate(videos):
+                available.append(f"{camera_name_from_index(i)} / {video.name} / {video.stem}")
+            raise ValueError(
+                f"Unknown video key {key!r} in {option_name}. "
+                f"Use one of: {available}"
+            )
+        try:
+            value = float(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"{option_name} value for {key!r} must be a number of seconds, got {raw_value!r}") from exc
+        if value < 0.0:
+            raise ValueError(f"{option_name} value for {key!r} must be non-negative, got {value}")
+        overrides[key_to_index[key]] = value
+    return overrides
 def collect_image_inventory(root: Path) -> dict[str, Any]:
     counts: dict[str, int] = {}
     total = 0
@@ -291,13 +410,15 @@ def build_pose_indices(nframes: int, fps_final: float, fps_colmap: float) -> lis
     if indices[-1] != nframes - 1:
         indices.append(nframes - 1)
     return sorted(set(indices))
-def extract_synced_pngs(videos: list[Path], starts: list[float], overlap_duration: float, out_root: Path, fps: float, width: int | None, jpeg_quality: int, logger: Logger, force: bool) -> int:
+def extract_synced_pngs(videos: list[Path], starts: list[float], overlap_duration: float, out_root: Path, fps: float, width: int | None, jpeg_quality: int, logger: Logger, force: bool, source_ends: list[float] | None = None, time_warp: bool = False) -> int:
     meta_path = out_root.parent / f"{out_root.name}_meta.json"
     inventory_path = out_root.parent / f"{out_root.name}_inventory.json"
     meta = {
         "videos": [str(v.resolve()) for v in videos],
         "starts": [round(x, 6) for x in starts],
+        "source_ends": None if source_ends is None else [round(x, 6) for x in source_ends],
         "duration": round(overlap_duration, 6),
+        "time_warp": bool(time_warp),
         "fps": round(float(fps), 6),
         "width": width,
         "jpeg_quality": int(jpeg_quality),
@@ -314,21 +435,34 @@ def extract_synced_pngs(videos: list[Path], starts: list[float], overlap_duratio
             return nframes
         if same_cam_count:
             logger.log(
-                f"Reusing existing extracted images under {out_root} despite metadata mismatch because camera folders already exist for all inputs and --force-reextract was not set. "
-                f"Old meta={old_meta} new meta={meta}"
+                f"Existing extracted images under {out_root} have all camera folders but extraction metadata changed; "
+                f"re-extracting to avoid stale synchronization. Old meta={old_meta} new meta={meta}"
             )
-            nframes, counts = harmonize_extracted_images(out_root, logger, trim=True)
-            write_json(meta_path, meta)
-            write_json(inventory_path, collect_image_inventory(out_root))
-            return nframes
-        logger.log(f"Extraction cache miss for {out_root}: old_meta={old_meta} current_meta={meta} inventory={inv}")
+        else:
+            logger.log(f"Extraction cache miss for {out_root}: old_meta={old_meta} current_meta={meta} inventory={inv}")
     maybe_clear_dir(out_root)
     for i, video in enumerate(videos):
         cam_dir = out_root / camera_name_from_index(i)
         cam_dir.mkdir(parents=True, exist_ok=True)
         src_w, src_h = ffprobe_video_size(video, logger)
         out_w, out_h = output_size_from_width(src_w, src_h, width)
-        vf = f"trim=start={starts[i]:.6f}:duration={overlap_duration:.6f},setpts=PTS-STARTPTS,fps={fps:.8f}"
+        if source_ends is not None:
+            source_duration = float(source_ends[i]) - float(starts[i])
+            if source_duration <= 0.0:
+                raise RuntimeError(
+                    f"Invalid synchronized source interval for {video}: "
+                    f"start={starts[i]:.6f}, end={source_ends[i]:.6f}"
+                )
+            if time_warp:
+                # Both-clap mode uses an affine per-video time mapping so the
+                # detected start clap lands at t=0 and the detected end clap
+                # lands at the shared output duration for every camera.
+                scale = float(overlap_duration) / source_duration
+                vf = f"trim=start={starts[i]:.6f}:end={source_ends[i]:.6f},setpts=(PTS-STARTPTS)*{scale:.12f},fps={fps:.8f}"
+            else:
+                vf = f"trim=start={starts[i]:.6f}:duration={overlap_duration:.6f},setpts=PTS-STARTPTS,fps={fps:.8f}"
+        else:
+            vf = f"trim=start={starts[i]:.6f}:duration={overlap_duration:.6f},setpts=PTS-STARTPTS,fps={fps:.8f}"
         if out_w != src_w or out_h != src_h:
             vf += f",scale={out_w}:{out_h}:flags=lanczos"
         pattern = str(cam_dir / "%06d.png")
@@ -930,25 +1064,116 @@ OptimizationParams:
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-def determine_sync_from_end_claps(videos: list[Path], audio_dir: Path, audio_sr: int, clap_end_window: float, logger: Logger) -> tuple[list[float], float, list[float], list[float], list[float]]:
+def _common_overlap_from_sync_points(durations: list[float], sync_points: list[float]) -> tuple[list[float], float]:
+    if len(durations) != len(sync_points):
+        raise ValueError("durations and sync_points must have the same length")
+    # Treat each sync point as the same real-world event.  Local video time t
+    # maps to event-relative global time g = t - sync_point.  The common
+    # interval is the intersection of all event-relative video intervals.
+    global_start = max(-float(t) for t in sync_points)
+    global_end = min(float(durations[i]) - float(sync_points[i]) for i in range(len(durations)))
+    overlap = global_end - global_start
+    starts = [float(sync_points[i]) + global_start for i in range(len(sync_points))]
+    return starts, float(overlap)
+def _extract_audio_for_videos(videos: list[Path], audio_dir: Path, audio_sr: int, logger: Logger) -> tuple[list[float], list[Path]]:
     durations = [ffprobe_duration(v, logger) for v in videos]
-    wavs = []
-    end_claps = []
-    end_strengths = []
+    wavs: list[Path] = []
     for v in videos:
         wav_path = audio_dir / f"{v.stem}.wav"
         extract_audio(v, wav_path, audio_sr, logger)
         wavs.append(wav_path)
-    for wav_path, duration in zip(wavs, durations):
+    return durations, wavs
+def determine_sync_from_claps(
+    videos: list[Path],
+    audio_dir: Path,
+    audio_sr: int,
+    sync_mode: str,
+    clap_start_window: float,
+    clap_end_window: float,
+    clap_min_interval: float,
+    clap_start_after: dict[int, float],
+    logger: Logger,
+) -> dict[str, Any]:
+    normalized_mode = "both" if sync_mode == "both_claps" else sync_mode
+    durations, wavs = _extract_audio_for_videos(videos, audio_dir, audio_sr, logger)
+    start_claps: list[float] | None = None
+    end_claps: list[float] | None = None
+    start_strengths: list[float] | None = None
+    end_strengths: list[float] | None = None
+    if normalized_mode in {"start_clap", "both"}:
+        start_claps = []
+        start_strengths = []
+    if normalized_mode in {"end_clap", "both"}:
+        end_claps = []
+        end_strengths = []
+    for idx, (wav_path, duration) in enumerate(zip(wavs, durations)):
         y, sr = load_wav_mono_pcm16(wav_path)
-        clap_time, strength = detect_end_clap(y, sr, duration, clap_end_window)
-        end_claps.append(float(clap_time))
-        end_strengths.append(float(strength))
-    anchor = end_claps[0]
-    starts = [max(0.0, end_claps[i] - anchor) for i in range(len(videos))]
-    overlap = min(durations[i] - starts[i] for i in range(len(videos)))
-    offsets = [end_claps[i] - anchor for i in range(len(videos))]
-    return starts, float(overlap), durations, end_claps, offsets
+        start_after = float(clap_start_after.get(idx, 0.0))
+        if normalized_mode == "both":
+            assert start_claps is not None and start_strengths is not None
+            assert end_claps is not None and end_strengths is not None
+            start_time, start_strength, end_time, end_strength = detect_start_end_claps(
+                y, sr, duration, clap_start_window, clap_end_window, clap_min_interval, start_after=start_after
+            )
+            start_claps.append(float(start_time))
+            start_strengths.append(float(start_strength))
+            end_claps.append(float(end_time))
+            end_strengths.append(float(end_strength))
+            continue
+        if start_claps is not None and start_strengths is not None:
+            clap_time, strength = detect_start_clap(y, sr, duration, clap_start_window, start_after=start_after)
+            start_claps.append(float(clap_time))
+            start_strengths.append(float(strength))
+        if end_claps is not None and end_strengths is not None:
+            clap_time, strength = detect_end_clap(y, sr, duration, clap_end_window)
+            end_claps.append(float(clap_time))
+            end_strengths.append(float(strength))
+    source_ends: list[float] | None = None
+    time_warp = False
+    if normalized_mode == "start_clap":
+        assert start_claps is not None
+        starts, overlap = _common_overlap_from_sync_points(durations, start_claps)
+        offsets = [float(t) - float(start_claps[0]) for t in start_claps]
+    elif normalized_mode == "end_clap":
+        assert end_claps is not None
+        starts, overlap = _common_overlap_from_sync_points(durations, end_claps)
+        offsets = [float(t) - float(end_claps[0]) for t in end_claps]
+    elif normalized_mode == "both":
+        assert start_claps is not None and end_claps is not None
+        source_ends = [float(t) for t in end_claps]
+        intervals = [source_ends[i] - float(start_claps[i]) for i in range(len(videos))]
+        bad = [i for i, interval in enumerate(intervals) if interval < clap_min_interval]
+        if bad:
+            details = {camera_name_from_index(i): {"start": start_claps[i], "end": source_ends[i], "interval": intervals[i], "min_interval": clap_min_interval} for i in bad}
+            raise RuntimeError(f"Invalid start/end clap ordering or too-small clap interval: {details}")
+        starts = [float(t) for t in start_claps]
+        overlap = min(intervals)
+        offsets = [float(t) - float(start_claps[0]) for t in start_claps]
+        time_warp = True
+    else:
+        raise ValueError(f"Unsupported sync mode: {sync_mode}")
+    if overlap <= 0.0:
+        raise RuntimeError(f"No shared synchronized interval found for sync mode {sync_mode}: overlap={overlap:.6f}s")
+    sync_info: dict[str, Any] = {
+        "mode": normalized_mode,
+        "videos": [str(v) for v in videos],
+        "durations": durations,
+        "start_claps": start_claps,
+        "end_claps": end_claps,
+        "start_strengths": start_strengths,
+        "end_strengths": end_strengths,
+        "clap_start_after": {camera_name_from_index(i): float(v) for i, v in sorted(clap_start_after.items())},
+        "offsets_vs_video0": offsets,
+        "starts": starts,
+        "source_ends": source_ends,
+        "time_warp": time_warp,
+        "overlap_duration": float(overlap),
+    }
+    if normalized_mode == "both" and start_claps is not None and end_claps is not None:
+        intervals = [float(end_claps[i]) - float(start_claps[i]) for i in range(len(videos))]
+        sync_info["clap_intervals"] = intervals
+        sync_info["time_scales"] = [float(overlap) / interval for interval in intervals]
+    return sync_info
 def colmap_help(logger: Logger, subcommand: str) -> str:
     return logger.capture(["colmap", subcommand, "-h"], label=f"colmap_{subcommand}_help")
 def colmap_option_supported(help_text: str, option: str) -> bool:
@@ -979,8 +1204,11 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=None)
     ap.add_argument("--jpeg-quality", type=int, default=2)
     ap.add_argument("--audio-sr", type=int, default=16000)
-    ap.add_argument("--sync-mode", choices=["end_clap"], default="end_clap")
+    ap.add_argument("--sync-mode", choices=["start_clap", "end_clap", "both", "both_claps"], default="end_clap")
+    ap.add_argument("--clap-start-window", type=float, default=8.0)
     ap.add_argument("--clap-end-window", type=float, default=8.0)
+    ap.add_argument("--clap-min-interval", type=float, default=1.0, help="Minimum seconds between detected start and end claps in --sync-mode both")
+    ap.add_argument("--clap-start-after", action="append", default=[], metavar="VIDEO=SECONDS", help="Ignore start-clap candidates before SECONDS for one video. VIDEO can be camNN, zero-based index, filename, stem, or path. May be repeated or comma-separated.")
     ap.add_argument("--mask-frac", type=float, default=0.35)
     ap.add_argument("--camera-model", default="SIMPLE_PINHOLE")
     ap.add_argument("--test-camera", type=int, default=0)
@@ -1010,17 +1238,27 @@ def main() -> int:
     logger.log(f"Resolved videos: {[str(v) for v in videos]}")
     audio_dir = prep_dir / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
-    starts, overlap_duration, durations, end_claps, offsets = determine_sync_from_end_claps(
-        videos, audio_dir, args.audio_sr, args.clap_end_window, logger
+    clap_start_after = parse_per_video_float_overrides(args.clap_start_after, videos, "--clap-start-after")
+    if clap_start_after:
+        start_after_summary = {camera_name_from_index(i): v for i, v in sorted(clap_start_after.items())}
+        logger.log(f"Per-video start-clap lower bounds: {start_after_summary}")
+    sync_info = determine_sync_from_claps(
+        videos=videos,
+        audio_dir=audio_dir,
+        audio_sr=args.audio_sr,
+        sync_mode=args.sync_mode,
+        clap_start_window=args.clap_start_window,
+        clap_end_window=args.clap_end_window,
+        clap_min_interval=args.clap_min_interval,
+        clap_start_after=clap_start_after,
+        logger=logger,
     )
-    sync_info = {
-        "videos": [str(v) for v in videos],
-        "durations": durations,
-        "end_claps": end_claps,
-        "offsets_vs_video0": offsets,
-        "starts": starts,
-        "overlap_duration": overlap_duration,
-    }
+    starts = [float(x) for x in sync_info["starts"]]
+    overlap_duration = float(sync_info["overlap_duration"])
+    source_ends = sync_info.get("source_ends")
+    if source_ends is not None:
+        source_ends = [float(x) for x in source_ends]
+    time_warp = bool(sync_info.get("time_warp", False))
     write_json(prep_dir / "sync.json", sync_info)
     logger.log(f"Sync summary: {sync_info}")
     if overlap_duration <= 0.1:
@@ -1037,6 +1275,8 @@ def main() -> int:
         jpeg_quality=args.jpeg_quality,
         logger=logger,
         force=args.force_reextract,
+        source_ends=source_ends,
+        time_warp=time_warp,
     )
     logger.log(f"Final dataset extraction frame count: {nframes}")
     if nframes < 2:
