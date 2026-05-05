@@ -318,17 +318,17 @@ We combine the papers into a single architecture, which can be studied through a
 
   #let C(body, bg: none) = table.cell(align: center + horizon, fill: bg)[#body]
   #let L(body, bg: none) = table.cell(align: left + horizon, fill: bg)[#body]
-  #let X = table.cell(align: center + horizon, fill: rgb("#dff3df"))[
-    #text(fill: black, weight: "bold")[×]
+  #let X = table.cell(align: center + horizon, fill: rgb("#b4b6b4"))[
+    #text(fill: black, weight: "bold")[]
   ]
   #let XG = table.cell(align: center + horizon, fill: rgb("#56aa68"))[
-    #text(fill: white, weight: "bold")[×]
+    #text(fill: white, weight: "bold")[]
   ]
   #let XB = table.cell(align: center + horizon, fill: rgb("#5698df"))[
-    #text(fill: white, weight: "bold")[×]
+    #text(fill: white, weight: "bold")[]
   ]
   #let XR = table.cell(align: center + horizon, fill: rgb("#df6f6f"))[
-    #text(fill: white, weight: "bold")[×]
+    #text(fill: white, weight: "bold")[]
   ]
   #let KG(body) = box(
     fill: rgb("#56aa68"),

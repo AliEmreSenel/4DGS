@@ -172,103 +172,128 @@ digraph gs_evolution {
   #let base = 0.6pt
 
   #let soft-thick = 0.8pt + black
-  #let soft-green = rgb("#5f9f6e")
   #let light-blue = rgb("#eaf3ff")
   #let light-orange = rgb("#fff1e6")
 
   #let C(body, bg: none) = table.cell(align: center + horizon, fill: bg)[#body]
   #let L(body, bg: none) = table.cell(align: left + horizon, fill: bg)[#body]
-  #let X = table.cell(align: center + horizon, fill: rgb("#dff3df"))[
-    #text(fill: black, weight: "bold")[×]
+
+  #let X = table.cell(align: center + horizon, fill: rgb("#b6b8b6"))[
+    #text(fill: black, weight: "bold")[ ]
+  ]
+  #let XG = table.cell(align: center + horizon, fill: rgb("#56aa68"))[
+    #text(fill: white, weight: "bold")[]
+  ]
+  #let XB = table.cell(align: center + horizon, fill: rgb("#5698df"))[
+    #text(fill: white, weight: "bold")[]
+  ]
+  #let XR = table.cell(align: center + horizon, fill: rgb("#df6f6f"))[
+    #text(fill: white, weight: "bold")[]
   ]
   #let E = table.cell(align: center + horizon)[]
 
-  #let VH(body) = table.cell(align: center + horizon)[
+  #let KG(body) = box(
+    fill: rgb("#56aa68"),
+    inset: (x: 3pt, y: 3pt),
+    radius: 4pt,
+  )[#text(fill: white)[#body]]
+
+  #let KB(body) = box(
+    fill: rgb("#5698df"),
+    inset: (x: 3pt, y: 3pt),
+    radius: 4pt,
+  )[#text(fill: white)[#body]]
+
+  #let KR(body) = box(
+    fill: rgb("#df6f6f"),
+    inset: (x: 3pt, y: 3pt),
+    radius: 4pt,
+  )[#text(fill: white)[#body]]
+
+  #let VH(body, bg: none) = table.cell(align: center + horizon, fill: bg)[
     #rotate(-90deg, reflow: true)[#body]
   ]
 
-  #let SEC(rows, body) = table.cell(
-    rowspan: rows,
-    align: center + horizon,
-  )[#rotate(-90deg, reflow: true)[#body]]
-
-  #let MGL(rows, body, bg: none) = table.cell(
-    rowspan: rows,
-    align: center + horizon,
-    stroke: soft-thick,
-    fill: bg,
-  )[#body]
-
-  #let MGO(body, bg: none) = table.cell(align: left + horizon, fill: bg)[#body]
-
   #table(
-    columns: (120pt,) + (auto,) * 29,
+    columns: (120pt,) + (auto,) * 28,
     stroke: base,
     align: center + horizon,
     inset: (x: 3pt, y: 3pt),
-    fill: (x, y) => if (x == 0 and y >= 3) or (y == 0 and x > 0) { luma(230) } else { none },
+    fill: (x, y) => if (x == 0 and y >= 2) or (y == 0 and x > 0) {
+      luma(230)
+    } else {
+      none
+    },
 
     table.cell(
       rowspan: 2,
       inset: (x: 5pt, y: 3pt),
       stroke: none,
       align: left + horizon,
-    )[],
+    )[
+      #par(justify: false)[
+        #KG[existing] #KR[modified] #KB[rewritten]
+      ]
+    ],
 
     table.cell(colspan: 9, align: center + horizon)[*Gaussians*],
-    table.cell(colspan: 3, align: center + horizon)[*Init*],
-    table.cell(colspan: 3, align: center + horizon)[*Compress*],
+    table.cell(colspan: 2, align: center + horizon)[*Init*],
+    table.cell(colspan: 3, align: center + horizon)[*Compr*],
     table.cell(colspan: 3, align: center + horizon)[*Train*],
     table.cell(colspan: 8, align: center + horizon)[*Prune*],
     table.cell(colspan: 3, align: center + horizon)[*Render*],
 
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[4D]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[3D]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Quaternion]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Rotation Matrix]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Isotropic]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Anisotropic]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[RGB]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[SH(1)]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[SH(3)]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Random]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[MegaSAM]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Uncertainty]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[MLP Distillation]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[K-means ]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Spatial GPCC]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Uncertainty]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Batch in Time]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Voxelization]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Contribution]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Gradient Loss]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Spatio-Temporal]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Opacity]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[One-shot]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Scheduled]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Densify]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Dropout]],
-    table.cell(align: center + horizon, fill: light-blue)[#rotate(-90deg, reflow: true)[Visibility Mask]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Sort-based]],
-    table.cell(align: center + horizon, fill: light-orange)[#rotate(-90deg, reflow: true)[Sort-free]],
+    VH([4D], bg: light-blue),
+    VH([3D], bg: light-blue),
+    VH([Quaternion], bg: light-orange),
+    VH([Rotation Matrix], bg: light-orange),
+    VH([Isotropic], bg: light-blue),
+    VH([Anisotropic], bg: light-blue),
+    VH([RGB], bg: light-orange),
+    VH([SH(1)], bg: light-orange),
+    VH([SH(3)], bg: light-orange),
+
+    VH([Random], bg: light-blue),
+    VH([MegaSAM], bg: light-blue),
+
+    VH([MLP Distillation], bg: light-blue),
+    VH([K-means], bg: light-orange),
+    VH([Spatial GPCC], bg: light-orange),
+
+    VH([Uncertainty], bg: light-blue),
+    VH([Batch in Time], bg: light-orange),
+    VH([Voxelization], bg: light-blue),
+
+    VH([Contribution], bg: light-orange),
+    VH([Gradient Loss], bg: light-orange),
+    VH([Spatio-Temporal], bg: light-blue),
+    VH([Opacity], bg: light-blue),
+    VH([One-shot], bg: light-orange),
+    VH([Scheduled], bg: light-orange),
+    VH([Densify], bg: light-blue),
+    VH([Dropout], bg: light-orange),
+
+    VH([Visibility Mask], bg: light-blue),
+    VH([Sort-based], bg: light-orange),
+    VH([Sort-free], bg: light-orange),
 
     L([*4DGS-Nat.*], bg: luma(230)),
-    X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, E, X, E, X, X, E, E, E, E, X, E, E, X, E,
+    X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, X, E, X, X, E, E, E, E, X, E, E, X, E,
 
     L([*1000FPS*], bg: luma(230)),
-    X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, E, X, E, E, E, E, E, X, E, E, E, X, X, E,
+    X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, X, E, E, E, E, E, X, E, E, E, X, X, E,
 
     L([*Instant4D*], bg: luma(230)),
-    X, E, X, E, X, E, X, E, E, E, X, E, E, E, E, E, E, X, E, E, X, X, X, E, E, E, E, X, E,
+    X, E, X, E, X, E, X, E, E, E, X, E, E, E, E, E, X, E, E, X, X, X, E, E, E, E, X, E,
 
     L([*MobileGS*], bg: luma(230)),
-    E, X, E, X, E, X, E, X, X, E, E, E, X, X, X, E, E, X, X, E, X, E, E, E, E, E, E, E, X,
+    E, X, E, X, E, X, E, X, X, E, E, X, X, X, E, E, X, X, E, X, E, E, E, E, E, E, E, X,
 
     L([*Usplat4D*], bg: luma(230)),
-    X, E, X, E, E, X, E, E, X, E, E, X, E, E, E, X, E, X, E, E, E, E, X, E, E, E, E, X, E,
+    X, E, X, E, E, X, E, E, X, E, E, E, E, E, X, E, X, E, E, E, E, X, E, E, E, E, X, E,
 
     L([*Omni-4DGS*], bg: luma(230)),
-    X, E, X, E, X, X, X, X, X, X, E, X, X, X, X, X, X, X, E, X, X, X, X, X, X, X, X, X, X,
+    XG, E, XG, E, XG, XR, XG, XG, XG, XG, E, XR, XR, XR, XR, XG, XR, E, XG, XB, XG, XG, XB, XG, XB, XB, XG, XR,
 
     // Inner-table outline.
     table.vline(x: 1, start: 1, end: 8, stroke: soft-thick),
@@ -276,19 +301,47 @@ digraph gs_evolution {
     table.hline(y: 1, start: 1, end: 29, stroke: soft-thick),
     table.hline(y: 8, start: 1, end: 29, stroke: soft-thick),
 
-    // Group boundaries.
+    // Extended mutually-exclusive group boundaries.
     table.vline(x: 3, start: 1, end: 8, stroke: soft-thick),
     table.vline(x: 5, start: 1, end: 8, stroke: soft-thick),
     table.vline(x: 7, start: 1, end: 8, stroke: soft-thick),
     table.vline(x: 10, start: 1, end: 8, stroke: soft-thick),
     table.vline(x: 12, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 26, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 28, start: 1, end: 8, stroke: soft-thick),
+    table.vline(x: 25, start: 1, end: 8, stroke: soft-thick),
+    table.vline(x: 27, start: 1, end: 8, stroke: soft-thick),
 
     // Outline around bottom row.
-    table.hline(y: 7, start: 0, end: 30, stroke: luma(100) + thick),
-    table.hline(y: 8, start: 0, end: 30, stroke: luma(100) + thick),
+    table.hline(y: 7, start: 0, end: 29, stroke: luma(100) + thick),
+    table.hline(y: 8, start: 0, end: 29, stroke: luma(100) + thick),
     table.vline(x: 0, start: 7, end: 8, stroke: luma(100) + thick),
-    table.vline(x: 30, start: 7, end: 8, stroke: luma(100) + thick),
+    table.vline(x: 29, start: 7, end: 8, stroke: luma(100) + thick),
+
+    // Thick black separators before/after bottom-row color bands.
+    table.vline(x: 1, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 3, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 5, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 7, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 10, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 13, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 15, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 16, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 17, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 18, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 20, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 22, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 24, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 25, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 26, start: 1, end: 8, stroke: black + thick),
+
+    table.vline(x: 27, start: 1, end: 8, stroke: black + thick),
+    table.vline(x: 29, start: 1, end: 8, stroke: black + thick),
   )
 ]
