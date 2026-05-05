@@ -48,6 +48,10 @@ def coerce_time_duration(value, default=(-0.5, 0.5)):
         value = value.detach().cpu().reshape(-1).tolist()
     elif isinstance(value, np.ndarray):
         value = value.reshape(-1).tolist()
+    elif not isinstance(value, (str, bytes, bytearray, dict)) and hasattr(value, "__iter__"):
+        # OmegaConf ListConfig and similar sequence-like config values print like
+        # [0.0, 1.0] but are not plain list/tuple, so normalize before validation.
+        value = list(value)
     elif isinstance(value, str):
         text = value.strip()
         if not text:
