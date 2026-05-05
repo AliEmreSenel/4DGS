@@ -68,6 +68,10 @@ def coerce_time_duration(value, default=(-0.5, 0.5)):
 
     if isinstance(value, (int, float, np.integer, np.floating)):
         raise ValueError(f"time_duration must contain two values, got scalar {value!r}")
+    if not isinstance(value, (str, bytes, bytearray, dict, list, tuple)) and hasattr(value, "__iter__"):
+        # OmegaConf ListConfig and similar sequence-like config values print as
+        # [0.0, 1.0] but are not plain list/tuple.
+        value = list(value)
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         raise ValueError(f"time_duration must contain two numeric values, got {value!r}")
     out = [float(value[0]), float(value[1])]

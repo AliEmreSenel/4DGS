@@ -394,49 +394,39 @@ def _append_default_override(args: argparse.Namespace, key: str, value: Any) -> 
 
 
 def apply_laptop_8gb_defaults(args: argparse.Namespace, matrix_flag_supplied: bool) -> None:
-    """Bias the batch driver toward safe local smoke tests on an 8GB GPU."""
+    """Bias the batch driver toward local execution without turning ablations into smoke tests."""
     if not _cli_option_supplied("--runner"):
         args.runner = "python"
     if not _cli_option_supplied("--quota-reservation", "--no-quota-reservation"):
         args.quota_reservation = False
     if not matrix_flag_supplied and not _cli_option_supplied("--matrix-preset"):
         args.matrix_preset = "essential"
-    if not _cli_option_supplied("--eval-split"):
-        args.eval_split = "train"
-    if not _cli_option_supplied("--render-fps-warmup"):
-        args.render_fps_warmup = 0
     if not _cli_option_supplied("--vram-poll-interval"):
         args.vram_poll_interval = 0.5
-    if not _cli_option_supplied("--mobilegs-report", "--no-mobilegs-report"):
-        args.mobilegs_report = False
-    if not _cli_option_supplied("--mobilegs-build-visibility-filter", "--no-mobilegs-build-visibility-filter"):
-        args.mobilegs_build_visibility_filter = False
-    if not _cli_option_supplied("--mobilegs-quality-samples"):
-        args.mobilegs_quality_samples = 0
-    if not _cli_option_supplied("--mobilegs-benchmark-warmup"):
-        args.mobilegs_benchmark_warmup = 0
-    if not _cli_option_supplied("--mobilegs-benchmark-repeats"):
-        args.mobilegs_benchmark_repeats = min(int(args.mobilegs_benchmark_repeats), 20)
 
+    # Keep laptop mode useful for real ablation evidence: do not disable metrics,
+    # Mobile-GS compression, visibility masks, or quality/FPS benchmarks.  Only
+    # constrain the memory-heavy knobs while preserving >=10k iterations and
+    # >=50k initialization points as requested.
     laptop_defaults = {
-        "iterations": 1500,
-        "test_iterations": [1500],
-        "save_iterations": [1500],
+        "iterations": 10000,
+        "test_iterations": [10000],
+        "save_iterations": [10000],
         "batch_size": 1,
-        "num_pts": 20000,
-        "num_pts_ratio": 0.25,
+        "num_pts": 50000,
+        "num_pts_ratio": 1.0,
         "resolution": 4,
-        "densify_from_iter": 250,
-        "densify_until_iter": 900,
+        "densify_from_iter": 500,
+        "densify_until_iter": 7000,
         "densification_interval": 100,
-        "densify_until_num_points": 75000,
-        "position_lr_max_steps": 1500,
-        "usplat_start_iter": 900,
-        "usplat_max_key_nodes": 512,
-        "usplat_assignment_chunk_size": 4,
-        "usplat_key_assignment_chunk_size": 128,
-        "usplat_nonkey_loss_chunk_size": 4096,
-        "usplat_quat_chunk_size": 8192,
+        "densify_until_num_points": 150000,
+        "position_lr_max_steps": 10000,
+        "usplat_start_iter": 3000,
+        "usplat_max_key_nodes": 1024,
+        "usplat_assignment_chunk_size": 8,
+        "usplat_key_assignment_chunk_size": 256,
+        "usplat_nonkey_loss_chunk_size": 8192,
+        "usplat_quat_chunk_size": 16384,
     }
     for key, value in laptop_defaults.items():
         _append_default_override(args, key, value)
@@ -689,7 +679,6 @@ def build_matrix_preset_variants(
         "mobilegs_opacity_phi_lr": 1e-3,
         "lambda_depth": 0.0,
         "lambda_opa_mask": 0.0,
-        "use_usplat": False,
     }
     usplat = {
         "use_usplat": True,
@@ -765,13 +754,27 @@ def build_matrix_preset_variants(
         ),
     ]
     if preset == "essential":
-        keep = {
-            "paper_4dgs_native",
-            "paper_dropout_rdr_ess",
-            "paper_4dgs1k_st_prune",
-            "paper_instant4d_lite",
-        }
-        rows = [row for row in rows if row[0] in keep]
+        # Essential now means exhaustive single-scene coverage, not smoke test:
+        # baseline plus every on/off combination of the implemented ablation
+        # families.  Invalid combinations are still filtered later unless
+        # --include-invalid-combinations is explicitly supplied.
+        features: List[tuple[str, str, Dict[str, Any]]] = [
+            ("st_prune", "4dgs_1k", pruning),
+            ("dropout_rdr", "dropoutgs_rdr", dropout),
+            ("ess", "dropoutgs_ess", ess),
+            ("usplat", "usplat4d", usplat),
+            ("instant4d", "instant4d", instant),
+            ("mobilegs", "mobilegs", mobile),
+        ]
+        rows = [("essential_4dgs_native", "4dgs", {})]
+        for width in range(1, len(features) + 1):
+            for combo in itertools.combinations(features, width):
+                parts = [item[0] for item in combo]
+                family = combo[0][1] if width == 1 else "hybrid"
+                overrides: Dict[str, Any] = {}
+                for _, _, feature_overrides in combo:
+                    overrides.update(feature_overrides)
+                rows.append(("essential_" + "__".join(parts), family, overrides))
     elif preset == "compact":
         keep = {
             "paper_4dgs_native",
@@ -1308,11 +1311,17 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
         config_path = Path(config_raw)
         cfg = load_yaml(config_path)
         flat_cfg = flatten_cfg(cfg)
+        # Matrix schedules must be derived from the effective base config after
+        # global overrides such as --laptop-8gb or --set iterations=... are
+        # applied. Otherwise ESS/USplat/pruning schedules can be generated past
+        # the final training iteration.
+        effective_base_cfg = normalize_generated_config_types(apply_flat_overrides(cfg, global_overrides))
+        effective_flat_cfg = flatten_cfg(effective_base_cfg)
         if str(args.matrix_preset).lower() == "cartesian":
             variants = build_cartesian_variants(
                 requested_axes,
                 option_map,
-                flat_cfg,
+                effective_flat_cfg,
                 schedule_options,
                 dropout_prob=args.dropout_prob,
                 dropout_lambda_rdr=args.dropout_lambda_rdr,
@@ -1320,20 +1329,20 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
         else:
             variants = build_matrix_preset_variants(
                 preset=args.matrix_preset,
-                flat_cfg=flat_cfg,
+                flat_cfg=effective_flat_cfg,
                 schedule_options=schedule_options,
                 dropout_prob=args.dropout_prob,
                 dropout_lambda_rdr=args.dropout_lambda_rdr,
             )
-        variants = filter_valid_variants(flat_cfg, variants, args.include_invalid_combinations)
+        variants = filter_valid_variants(effective_flat_cfg, variants, args.include_invalid_combinations)
         if args.limit is not None:
             variants = variants[: args.limit]
 
-        scene_name = infer_scene_name(config_path, flat_cfg, args.scene_name)
-        output_root = get_output_root(flat_cfg, args.output_root)
+        scene_name = infer_scene_name(config_path, effective_flat_cfg, args.scene_name)
+        output_root = get_output_root(effective_flat_cfg, args.output_root)
         config_root = generated_config_root(output_root, args.generated_config_root) / scene_name
-        base_seed = int(flat_cfg.get("seed", 6666))
-        iterations = int(flat_cfg.get("iterations", 0))
+        base_seed = int(effective_flat_cfg.get("seed", 6666))
+        iterations = int(effective_flat_cfg.get("iterations", 0))
 
         for index, variant in enumerate(variants):
             model_path = build_model_path(output_root, scene_name, variant)
@@ -2768,11 +2777,20 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
 
 def local_serial_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]], pending_runs: Sequence[PendingRun]) -> int:
     repo_root = repo_root_from_args(args)
-    for pending in pending_runs:
+    total = len(run_specs)
+    already_done = max(0, total - len(pending_runs))
+    for offset, pending in enumerate(pending_runs, start=1):
+        run_spec = pending.run_spec
+        current = already_done + offset
+        print(
+            f"[TOTAL PROGRESS] {current}/{total} "
+            f"pending={len(pending_runs) - offset + 1} "
+            f"variant={run_spec.variant_name} action={pending.action}"
+        )
         try:
-            run_one_pending(pending, args, repo_root)
+            row = run_one_pending(pending, args, repo_root)
+            print(f"[TOTAL PROGRESS] {current}/{total} finished={run_spec.variant_name} status={row.get('status')}")
         except Exception as exc:
-            run_spec = pending.run_spec
             fallback = {
                 "status": "failed",
                 "scene_name": run_spec.scene_name,
@@ -2785,6 +2803,7 @@ def local_serial_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], 
             }
             write_run_metrics_json(Path(run_spec.model_path), fallback)
             print(f"[LOCAL] Exception in {run_spec.variant_name}: {exc}")
+            print(f"[TOTAL PROGRESS] {current}/{total} finished={run_spec.variant_name} status=failed")
     gather_and_write_summaries(args, run_specs, existing_rows)
     return 0
 
@@ -2932,6 +2951,11 @@ def main(args: argparse.Namespace) -> int:
         cleanup_existing_artifacts(run_specs, True)
 
     pending_runs, existing_rows = build_pending_runs(run_specs, args.retry_failed_existing)
+    print(
+        f"[TOTAL PROGRESS] total={len(run_specs)} "
+        f"already_complete={max(0, len(run_specs) - len(pending_runs))} "
+        f"pending={len(pending_runs)}"
+    )
 
     if args.submit_slurm:
         print_slurm_capacity_plan(args, run_specs)
