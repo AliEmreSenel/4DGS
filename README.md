@@ -1,110 +1,45 @@
-# Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting
-### [Project page](https://fudan-zvg.github.io/4d-gaussian-splatting/) | [Paper](https://arxiv.org/abs/2310.10642)
-> [**Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting**](https://arxiv.org/abs/2310.10642),  
-> Zeyu Yang, Hongye Yang, Zijie Pan, [Li Zhang](https://lzrobots.github.io)  
-> **Fudan University**  
-> **ICLR 2024**
+# Abstract
 
-> [**4D Gaussian Splatting: Modeling Dynamic Scenes with Native 4D Primitives**](https://arxiv.org/abs/2412.20720),  
-> Zeyu Yang, Zijie Pan, Xiatian Zhu, [Li Zhang](https://lzrobots.github.io), Jianfeng Feng, Yu-Gang Jiang, Philip H.S. Torr  
-> **Fudan University, University of Surrey, University of Oxford**  
-> **Arxiv preprint**
+# Feature Matrix
 
+I didn’t edit `README.md`; here’s a drop-in version with a new `Code reference` column.
 
-**This repository is the official implementation of "Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting".** In this paper, we propose coherent integrated modeling of the space and time dimensions for dynamic scenes by formulating unbiased 4D Gaussian primitives along with a dedicated rendering pipeline.
+| Feature                      | 1000FPS | Instant4D | MobileGS | Usplat4D | Code reference                                                                                                                                                                                                                                                                                                 |
+| ---------------------------- | ------- | --------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gaussians <br> 4D              | ✓       | ✓         |          | ✓        | **Existing** <br> [`GaussianModel.__init__`](scene/gaussian_model.py#L198-L237), [`get_xyzt`](scene/gaussian_model.py#L422-L424), [`render`](gaussian_renderer/__init__.py#L159-L174)                                                                                                                            |
+| Gaussians <br> 3D              |         |           | ✓        |          | Not implemented as a mode: [`4D-only guard`](scene/gaussian_model.py#L198-L219), [`--gaussian_dim choices=[4]`](train.py#L1924-L1931)                                                                                                                                                                          |
+| Gaussians <br> Quaternion      | ✓       | ✓         |          | ✓        | **Existing** <br> [`get_rotation`](scene/gaussian_model.py#L372-L385), [`build_rotation_4d`](utils/general_utils.py#L113-L133)                                                                                                                                                                                   |
+| Gaussians <br> Rotation Matrix |         |           | ✓        |          | Derived only, not optimized as parameters: [`build_rotation`](utils/general_utils.py#L79-L100), [`build_rotation_4d`](utils/general_utils.py#L113-L133)                                                                                                                                                        |
+| Gaussians <br> Isotropic       |         | ✓         |          |          | **Existing** <br> [`isotropic_gaussians`](scene/gaussian_model.py#L198-L237), [`get_scaling`](scene/gaussian_model.py#L357-L362), [`_to_isotropic_scaling`](scene/gaussian_model.py#L392-L397)                                                                                                                   |
+| Gaussians <br> Anisotropic     | ✓       |           | ✓        | ✓        | **Heavily modified** <br> [`get_scaling`](scene/gaussian_model.py#L357-L362), [`build_scaling_rotation`](utils/general_utils.py#L102-L111), [`build_scaling_rotation_4d`](utils/general_utils.py#L135-L145)                                                                                                      |
+| Gaussians <br> RGB             |         | ✓         |          |          | **Existing** <br> [`RGB2SH`](utils/sh_utils.py#L225-L226), [`create_from_pcd`](scene/gaussian_model.py#L484-L555), [`override_color`](gaussian_renderer/__init__.py#L307-L334)                                                                                                                                   |
+| Gaussians <br> SH(1)           |         |           | ✓        |          | **Existing** <br> [`_first_order_features`](utils/mobile_compression.py#L65-L84), [`eval_sh`](utils/sh_utils.py#L58-L113)                                                                                                                                                                                        |
+| Gaussians <br> SH(3)           | ✓       |           | ✓        | ✓        | **Existing** <br> [`sh_degree = 3`](arguments/__init__.py#L54-L56), [`eval_shfs_4d`](utils/sh_utils.py#L115-L223), [`get_max_sh_channels`](scene/gaussian_model.py#L436-L441)                                                                                                                                    |
+| Init <br> Random               | ✓       |           |          |          | **Existing** <br> [`readNerfSyntheticInfo`](scene/dataset_readers.py#L312-L337), [`create_from_pcd`](scene/gaussian_model.py#L484-L555)                                                                                                                                                                          |
+| Init <br> MegaSAM              |         | ✓         |          |          | Not found in repo                                                                                                                                                                                                                                                                                              |
+| Compress <br> MLP Distillation |         |           | ✓        |          | **Heavily modified** <br> [`MobileOpacityPhiNN`](scene/gaussian_model.py#L85-L128), [`_load_mobilegs_teacher`](train.py#L132-L141), [`MobileGS distillation setup`](train.py#L720-L729), [`distillation loss`](train.py#L941-L950)                                                                               |
+| Compress <br> K-means          |         |           | ✓        |          | **Heavily modified** <br> [`_run_kmeans`](utils/mobile_compression.py#L131-L159), [`nvq_encode_tensor`](utils/mobile_compression.py#L162-L209)                                                                                                                                                                   |
+| Compress <br> Spatial GPCC     |         |           | ✓        |          | **Heavily modified** <br> [`compress_gpcc`](utils/gpcc_utils.py#L250-L262), [`capture_mobile_payload`](utils/mobile_compression.py#L241-L345)                                                                                                                                                                    |
+| Train <br> Uncertainty         |         |           |          | ✓        | **Heavily modified** <br> [`compute_uncertainty_all_frames`](utils/uncertainty.py#L150-L206), [`compute_uncertainty_single_frame`](utils/uncertainty.py#L76-L148), [`build_graph`](utils/graph.py#L105-L204)                                                                                                     |
+| Train <br> Batch in Time       | ✓       |           |          |          | **Existing** <br> [`DataLoader batch_size`](train.py#L808-L833), [`batch render loop`](train.py#L902-L903)                                                                                                                                                                                                       |
+| Train <br> Voxelization        |         | ✓         | ✓        | ✓        | **Heavily modified** <br> [`build_graph`](utils/graph.py#L145-L171), [`voxelize`](utils/gpcc_utils.py#L79-L88)                                                                                                                                                                                                   |
+| Prune <br> Contribution        |         |           | ✓        |          | [`render gaussian_scores`](gaussian_renderer/__init__.py#L523-L541), [`compute_spatio_temporal_variation_score`](scene/gaussian_model.py#L785-L852)                                                                                                                                                            |
+| Prune <br> Gradient Loss       |         |           |          |          | **Existing** <br> [`add_densification_stats`](scene/gaussian_model.py#L1337-L1364), [`densify_and_prune`](scene/gaussian_model.py#L1292-L1334)                                                                                                                                                                   |
+| Prune <br> Spatio-Temporal     |         | ✓         | ✓        |          | **Re-implemented** <br> [`compute_spatio_temporal_variation_score`](scene/gaussian_model.py#L785-L852), [`prune_with_spatio_temporal_score`](scene/gaussian_model.py#L883-L964), [`scheduled pruning call`](train.py#L1508-L1541)                                                                                |
+| Prune <br> Opacity             |         | ✓         |          |          | **Existing** <br> Threshold-based in code: [`densify_and_prune`](scene/gaussian_model.py#L1292-L1334), [`thresh_opa_prune`](arguments/__init__.py#L113-L114)                                                                                                                                                     |
+| Prune <br> One-shot            | ✓       | ✓         |          | ✓        | **Existing** <br> [`final_prune_from_iter <br> final_prune_ratio`](arguments/__init__.py#L121-L122), [`final ST prune`](train.py#L1594-L1617)                                                                                                                                                                      |
+| Prune <br> Scheduled           |         |           |          |          | **Re-implemented** <br> [`ST pruning args`](arguments/__init__.py#L151-L161), [`scheduled pruning loop`](train.py#L1508-L1541)                                                                                                                                                                                   |
+| Prune <br> Densify             |         |           |          |          | **Existing** <br> [`densify_and_clone`](scene/gaussian_model.py#L1249-L1290), [`densify_and_split`](scene/gaussian_model.py#L1065-L1154), [`training call`](train.py#L1394-L1437)                                                                                                                                |
+| Prune <br> Edge-guided         |         |           |          |          | **Re-implemented** <br> [`compute_edge_guided_split_mask`](train.py#L199-L294), [`split_points_by_mask`](scene/gaussian_model.py#L1156-L1247), [`ESS schedule`](train.py#L1551-L1578)                                                                                                                            |
+| Prune <br> Dropout             |         |           |          |          | **Re-implemented** <br> [`render dropout mask`](gaussian_renderer/__init__.py#L360-L382), [`RDR dropout loss`](train.py#L957-L982), [`random_dropout_prob`](arguments/__init__.py#L78-L91)                                                                                                                       |
+| Render <br> Visibility Mask    | ✓       |           |          |          | **Re-implemented** <br> [`build_temporal_visibility_filter`](utils/mobile_compression.py#L450-L535), [`attach_temporal_visibility_filter`](utils/mobile_compression.py#L538-L553), [`_select_temporal_active_mask`](gaussian_renderer/__init__.py#L85-L156)                                                      |
+| Render <br> Sort-based         | ✓       | ✓         |          | ✓        | **Existing** <br> [`sorted render path`](gaussian_renderer/__init__.py#L231-L253), [`duplicateWithKeys`](diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu#L70-L113), [`SortPairs`](diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu#L184-L197)                                       |
+| Render <br> Sort-free          |         |           | ✓        |          | **Heavily modified** <br> [`sort_free_render`](gaussian_renderer/__init__.py#L195-L213), [`duplicateWithTileKeys`](diff-gaussian-rasterization-ms-nosorting/cuda_rasterizer/rasterizer_impl.cu#L127-L166), [`OIT render`](diff-gaussian-rasterization-ms-nosorting/cuda_rasterizer/rasterizer_impl.cu#L460-L555) |
 
+# Conclusion
 
-## 🛠️ Pipeline
-<div align="center">
-  <img src="assets/pipeline.png"/>
-</div><br/>
+# Code Visualization
 
+![](writeup/img/treemap.png)
 
-## Get started
-
-### Environment
-
-The hardware and software requirements are the same as those of the [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting), which this code is built upon. The repository now includes `pyproject.toml` files for the root project and all local CUDA extensions, so a non-conda setup with `uv` is supported.
-
-```shell
-git clone https://github.com/fudan-zvg/4d-gaussian-splatting
-cd 4d-gaussian-splatting
-uv python pin 3.11
-uv sync
-```
-
-Notes:
-- The root `pyproject.toml` is configured for the CUDA 13.0 PyTorch wheel index.
-- `simple-knn`, `pointops2`, and `diff-gaussian-rasterization` are installed as editable local packages, but their CUDA code is compiled lazily on first import via `torch.utils.cpp_extension.load`.
-- To see compiler output during the first build, set `VERBOSE_CUDA_BUILD=1`.
-
-### Data preparation
-
-**DyNeRF dataset:**
-
-Download the [Neural 3D Video dataset](https://github.com/facebookresearch/Neural_3D_Video) and extract each scene to `data/N3V`. After that, preprocess the raw video by executing:
-
-```shell
-python scripts/n3v2blender.py data/N3V/$scene_name
-```
-
-**DNeRF dataset:**
-
-The dataset can be downloaded from [drive](https://drive.google.com/file/d/19Na95wk0uikquivC7uKWVqllmTx-mBHt/view?usp=sharing) or [dropbox](https://www.dropbox.com/s/0bf6fl0ye2vz3vr/data.zip?dl=0). Then, unzip each scene into `data/dnerf`.
-
-
-### Running
-
-After the installation and data preparation, you can train the model by running:
-
-```shell
-python train.py --config $config_path
-```
-
-For the isotropic Gaussian ablation (single spatial scale per Gaussian and fixed identity rotations), add:
-
-```shell
-python train.py --config $config_path --isotropic_gaussians
-```
-
-## 🎥 Videos
-
-### 🎞️ Demo
-
-[![Demo Video](https://i3.ytimg.com/vi/3cXC9e4CujM/maxresdefault.jpg)](https://www.youtube.com/embed/3cXC9e4CujM)
-
-### 🎞️ Dynamic novel view synthesis
-
-https://github.com/fudan-zvg/4d-gaussian-splatting/assets/45744267/5e163b88-4f70-4157-b9f5-8431b13c26b7
-
-### 🎞️ Bullet time
-
-https://github.com/fudan-zvg/4d-gaussian-splatting/assets/45744267/ac5bc3b2-dd17-446d-9ee6-6efcc871eb84
-
-### 🎞️ Free view synthesis from a teleporting camera
-
-https://github.com/fudan-zvg/4d-gaussian-splatting/assets/45744267/6bd0b57b-4857-4722-9851-61250a2521ab
-
-### 🎞️ Monocular dynamic scene reconstruction
-
-https://github.com/fudan-zvg/4d-gaussian-splatting/assets/45744267/2c79974c-1867-4ce6-848b-5d31679b6067
-
-
-## 📜 BibTex
-```bibtex
-@inproceedings{yang2023gs4d,
-  title={Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting},
-  author={Yang, Zeyu and Yang, Hongye and Pan, Zijie and Zhang, Li},
-  booktitle={International Conference on Learning Representations (ICLR)},
-  year={2024}
-}
-```
-
-```bibtex
-@article{yang20244dgs,
-    title={4D Gaussian Splatting: Modeling Dynamic Scenes with Native 4D Primitives},
-    author={Yang, Zeyu and Pan, Zijie and Zhu, Xiatian and Zhang, Li and Feng, Jianfeng and Jiang, Yu-Gang and Torr, Philip HS},
-    journal={arXiv preprint},
-    year={2024},
-}
-```
+# References
