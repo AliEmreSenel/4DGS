@@ -193,11 +193,11 @@ $
   quad
   u_(i,t) = cases(
     sigma^2_(i,t) & " " bb(I)_(i,t),
-    phi & 
+    phi &
   )
 $
 
-with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest confidence gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes, 
+with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest confidence gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes,
 The kNN algorithm is used with $k = 8$ to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
 
 *Key-node loss* ensures that reliable Gaussians do not drift from their well-trained and certain positions, while their neighbourhoods move consistently.
@@ -220,21 +220,21 @@ $lambda_"rot" = lambda_"vel" = lambda_"acc" = 0.01$).
 *Non-key node loss* pulls uncertain Gaussians toward positions predicted by interpolating the motion of their key neighbours. It uses Dual Quaternion Blending (DQB) to interpolate multiple rotations:
 
 $
-cal(L)_"non-key" =
+  cal(L)_"non-key" =
   cal(L)_"pretrain,non-key" + cal(L)_"DQB,non-key"
   + cal(L)_"motion,non-key"
 $
 
 $
-cal(L)_"pretrain,non-key" =
+  cal(L)_"pretrain,non-key" =
   sum_t sum_(i in.not V_k)
-    norm(bold(mu)_(i,t) - bold(mu)^circle_(i,t))^2_(U^(-1)_(w,t,i))
+  norm(bold(mu)_(i,t) - bold(mu)^circle_(i,t))^2_(U^(-1)_(w,t,i))
 $
 
 $
-cal(L)_"DQB,non-key" =
+  cal(L)_"DQB,non-key" =
   sum_t sum_(i in.not V_k)
-    norm(bold(mu)_(i,t) - bold(mu)^"DQB"_(i,t))^2_(U^(-1)_(w,t,i))
+  norm(bold(mu)_(i,t) - bold(mu)^"DQB"_(i,t))^2_(U^(-1)_(w,t,i))
 $
 
 DQB is a soft interpolation, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USplat iterations to protect graph index integrity.
@@ -439,7 +439,7 @@ We combine the papers into a single architecture, which can be studied through a
     L([Voxelization], bg: light-blue),
     E, E, X, X, X, XR,
 
-    SEC(8, [*Prune*]),
+    SEC(9, [*Prune*]),
 
     table.cell(rowspan: 2, align: center + horizon, fill: light-orange)[Criterion],
     L([Contribution], bg: light-orange),
@@ -462,9 +462,12 @@ We combine the papers into a single architecture, which can be studied through a
     L([Scheduled], bg: light-orange),
     E, E, E, E, E, XB,
 
-    C([Increase], bg: light-blue),
+    table.cell(rowspan: 2, align: center + horizon, fill: light-blue)[Increase],
     L([Densify], bg: light-blue),
     X, E, E, E, E, XG,
+
+    L([Edge-guided], bg: light-blue),
+    E, E, E, E, E, XB,
 
     C([Dropout], bg: light-orange),
     L([Dropout], bg: light-orange),
@@ -485,9 +488,9 @@ We combine the papers into a single architecture, which can be studied through a
 
     // Inner-table outline.
     table.hline(y: 1, start: 1, end: 9, stroke: soft-thick),
-    table.hline(y: 28, start: 1, end: 9, stroke: soft-thick),
-    table.vline(x: 1, start: 1, end: 28, stroke: soft-thick),
-    table.vline(x: 9, start: 1, end: 28, stroke: soft-thick),
+    table.hline(y: 29, start: 1, end: 9, stroke: soft-thick),
+    table.vline(x: 1, start: 1, end: 29, stroke: soft-thick),
+    table.vline(x: 9, start: 1, end: 29, stroke: soft-thick),
 
     // Extended mutually-exclusive group boundaries.
     table.hline(y: 3, start: 1, end: 9, stroke: soft-thick),
@@ -495,14 +498,14 @@ We combine the papers into a single architecture, which can be studied through a
     table.hline(y: 7, start: 1, end: 9, stroke: soft-thick),
     table.hline(y: 10, start: 1, end: 9, stroke: soft-thick),
     table.hline(y: 12, start: 1, end: 9, stroke: soft-thick),
-    table.hline(y: 25, start: 1, end: 9, stroke: soft-thick),
-    table.hline(y: 27, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 26, start: 1, end: 9, stroke: soft-thick),
+    table.hline(y: 28, start: 1, end: 9, stroke: soft-thick),
 
     // Thin red outline around the rightmost column.
-    table.vline(x: 8, start: 0, end: 29, stroke: luma(100) + thick),
-    table.vline(x: 9, start: 0, end: 29, stroke: luma(100) + thick),
+    table.vline(x: 8, start: 0, end: 30, stroke: luma(100) + thick),
+    table.vline(x: 9, start: 0, end: 30, stroke: luma(100) + thick),
     table.hline(y: 0, start: 8, end: 9, stroke: luma(100) + thick),
-    table.hline(y: 29, start: 8, end: 9, stroke: luma(100) + thick),
+    table.hline(y: 30, start: 8, end: 9, stroke: luma(100) + thick),
   )
 ]
 == Loss
