@@ -647,7 +647,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     mobilegs_first_order = bool(getattr(opt, "mobilegs_force_first_order_sh", False))
     if mobilegs_first_order:
-        dataset.sh_degree = min(int(dataset.sh_degree), 1)
+        # Mobile-GS first-order export serializes DC + SH1, i.e. 4 SH
+        # coefficients per RGB channel. Force sh_degree=1 instead of merely
+        # capping it so RGB/DC-only runs do not train an incompatible MLP
+        # input layout (16 trained inputs vs 25 exported inputs).
+        dataset.sh_degree = 1
         force_sh_3d = True
         pipe.eval_shfs_4d = False
 

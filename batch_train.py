@@ -2185,6 +2185,29 @@ def _pipe_from_checkpoint(checkpoint_payload: Mapping[str, Any], args: argparse.
     )
 
 
+def _mobilegs_export_first_order_for_checkpoint(gaussians: Any, requested_first_order: bool) -> bool:
+    """Choose an SH export layout compatible with the trained Mobile-GS MLP."""
+    requested_first_order = bool(requested_first_order)
+    mlp = getattr(gaussians, "mobilegs_opacity_phi_nn", None)
+    if mlp is None or not requested_first_order:
+        return requested_first_order
+
+    trained_input_dim = int(mlp.backbone[0].weight.shape[1])
+    first_order_input_dim = 3 * 4 + 3 + 3 + 4 + 3
+    native_input_dim = 3 * int(gaussians.get_max_sh_channels) + 3 + 3 + 4 + 3
+
+    if trained_input_dim == first_order_input_dim:
+        return True
+    if trained_input_dim == native_input_dim:
+        return False
+
+    raise ValueError(
+        "The Mobile-GS opacity/phi MLP input dimension does not match any supported SH layout: "
+        f"trained_input_dim={trained_input_dim}, first_order_input_dim={first_order_input_dim}, "
+        f"native_input_dim={native_input_dim}."
+    )
+
+
 def run_mobilegs_export_benchmark(
     *,
     repo_root: Path,
@@ -2270,9 +2293,14 @@ def run_mobilegs_export_benchmark(
             views_per_keyframe=int(args.mobilegs_views_per_keyframe),
         )
 
+    export_first_order_sh = _mobilegs_export_first_order_for_checkpoint(
+        gaussians,
+        bool(args.mobilegs_force_first_order_sh),
+    )
+
     payload = capture_mobile_payload(
         gaussians,
-        first_order_sh=bool(args.mobilegs_force_first_order_sh),
+        first_order_sh=export_first_order_sh,
         codebook_size=int(args.mobilegs_codebook_size),
         block_size=int(args.mobilegs_block_size),
         kmeans_iters=int(args.mobilegs_kmeans_iters),
@@ -2338,7 +2366,8 @@ def run_mobilegs_export_benchmark(
         "payload_serialized_bytes": int(serialized_size(restored_payload)),
         "file_bytes": int(mobile_path.stat().st_size),
         "compression_vs_raw_gaussian_tensors": float(raw_gaussian_size) / max(float(mobile_path.stat().st_size), 1.0),
-        "first_order_sh": bool(args.mobilegs_force_first_order_sh),
+        "first_order_sh": bool(export_first_order_sh),
+        "first_order_sh_requested": bool(args.mobilegs_force_first_order_sh),
         "source_sort_free_render": bool(source_sort_free),
         "benchmark_render_mode_requested": render_mode,
         "benchmark_sort_free_render": bool(mobile_pipe.sort_free_render),
