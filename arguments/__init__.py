@@ -127,6 +127,11 @@ class OptimizationParams(ParamGroup):
 
         self.lambda_depth = 0.0
         self.lambda_rdr = 1.0
+        # Match the official DropoutGS consistency path by default: the full
+        # render is not detached, so RDR contributes gradients to the full
+        # render graph and therefore to density-control screen-space gradients.
+        # Set this only for one-sided teacher-student experiments.
+        self.rdr_detach_full_render = False
         # DropoutGS ESS-style refinement. Disabled by default; the ablation
         # preset enables it only for DropoutGS rows after a coarse RDR phase.
         self.enable_edge_guided_splitting = False

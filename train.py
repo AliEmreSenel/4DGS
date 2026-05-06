@@ -961,7 +961,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         apply_random_dropout=True,
                     )
                     dropout_image = dropout_pkg["render"]
-                    full_teacher = image.detach()
+                    # RDR is a consistency loss between the full render and a
+                    # dropout submodel.  Do not detach the full render by
+                    # default: the official DropoutGS training code optimizes
+                    # both sides of this consistency loss, and this lets the
+                    # full-render screen-space tensor receive RDR gradients for
+                    # densification.  Detaching turns RDR into a one-sided
+                    # teacher-student loss where dropped Gaussians get no RDR
+                    # signal on that iteration, which tends to starve
+                    # densification and encourages opacity pruning.
+                    full_teacher = image.detach() if bool(getattr(opt, "rdr_detach_full_render", False)) else image
                     Lrdr_l1 = l1_loss(dropout_image, full_teacher)
                     Lrdr_ssim = 1.0 - ssim(dropout_image, full_teacher)
                     Lrdr_i = (1.0 - opt.lambda_dssim) * Lrdr_l1 + opt.lambda_dssim * Lrdr_ssim
@@ -970,8 +979,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     with torch.no_grad():
                         dropout_stats_accum["count"] += 1.0
                         dropout_stats_accum["rdr_loss_sum"] = dropout_stats_accum.get("rdr_loss_sum", 0.0) + float(Lrdr_i.detach().item())
-                        dropout_stats_accum["full_vs_dropout_psnr_sum"] = dropout_stats_accum.get("full_vs_dropout_psnr_sum", 0.0) + float(psnr(dropout_image.detach(), full_teacher).mean().item())
-                        dropout_stats_accum["full_vs_dropout_ssim_sum"] = dropout_stats_accum.get("full_vs_dropout_ssim_sum", 0.0) + float(ssim(dropout_image.detach(), full_teacher).mean().item())
+                        full_teacher_detached = full_teacher.detach()
+                        dropout_stats_accum["full_vs_dropout_psnr_sum"] = dropout_stats_accum.get("full_vs_dropout_psnr_sum", 0.0) + float(psnr(dropout_image.detach(), full_teacher_detached).mean().item())
+                        dropout_stats_accum["full_vs_dropout_ssim_sum"] = dropout_stats_accum.get("full_vs_dropout_ssim_sum", 0.0) + float(ssim(dropout_image.detach(), full_teacher_detached).mean().item())
                         survival = dropout_pkg.get("dropout_survival_rate")
                         if survival is not None:
                             dropout_stats_accum["survival_rate_sum"] = dropout_stats_accum.get("survival_rate_sum", 0.0) + float(survival)

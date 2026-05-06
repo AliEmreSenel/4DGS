@@ -476,7 +476,7 @@ def build_temporal_visibility_filter(
     try:
         setattr(pipe, "temporal_mask_keyframes", 0)
         setattr(pipe, "temporal_mask_mode", "marginal")
-        with torch.no_grad():
+        with torch.inference_mode():
             for kt in times.tolist():
                 # Prefer views naturally captured near this timestamp.  If a
                 # dataset has only one camera per time, this behaves like the
@@ -493,7 +493,25 @@ def build_temporal_visibility_filter(
                 mask = torch.zeros(n, dtype=torch.bool, device=gaussians.get_xyz.device)
                 for cam in cams_use:
                     cam_kt = _copy_camera_with_timestamp(cam, kt)
-                    pkg = render_fn(cam_kt, gaussians, pipe, background)
+                    # Request the score path only while exporting masks so
+                    # render() returns the full-scene radii vector even when the
+                    # temporal marginal mask is active.  Otherwise no-grad
+                    # render-only calls return the compact masked radii, making
+                    # radii.numel() != n and silently falling back to the much
+                    # looser marginal mask.  That defeated the 4DGS-1K-style
+                    # visibility filter and left sort-free inference processing
+                    # too many inactive Gaussians.
+                    pkg = render_fn(
+                        cam_kt,
+                        gaussians,
+                        pipe,
+                        background,
+                        return_gaussian_scores=True,
+                    )
+                    scores = pkg.get("gaussian_scores")
+                    if scores is not None and scores.numel() == n:
+                        mask |= scores.reshape(-1) > 0
+                        continue
                     radii = pkg.get("radii")
                     if radii is not None and radii.numel() == n:
                         mask |= radii.reshape(-1) > 0
@@ -551,14 +569,22 @@ def benchmark_renderer(gaussians, cameras, pipe, background, render_fn, warmup=1
         raise ValueError("No cameras available for benchmarking")
     warmup = max(0, int(warmup))
     repeats = max(1, int(repeats))
-    for i in range(warmup):
-        render_fn(cameras[i % len(cameras)], gaussians, pipe, background)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    start = time.perf_counter()
-    for i in range(repeats):
-        render_fn(cameras[i % len(cameras)], gaussians, pipe, background)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+
+    # Benchmark inference, not the training graph.  Leaving grad enabled makes
+    # render() allocate screen-space gradient tensors, disables the forward
+    # workspace cache, keeps MLP activations for backward, and prevents the
+    # cached visibility filter from being used.  That overhead is especially
+    # visible for the sort-free Mobile-GS path and can make it appear slower
+    # than sorted alpha blending even when the CUDA rasterizer is faster.
+    with torch.inference_mode():
+        for i in range(warmup):
+            render_fn(cameras[i % len(cameras)], gaussians, pipe, background)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        for i in range(repeats):
+            render_fn(cameras[i % len(cameras)], gaussians, pipe, background)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
     return {"frames": repeats, "seconds": elapsed, "fps": repeats / max(elapsed, 1e-9)}

@@ -57,6 +57,7 @@ namespace CudaRasterizer
 			const float* score_error_map,
 			float* gaussian_score_max_error,
 			float* out_color,
+			const bool use_scatter_order_independent,
 
 			float* kernel_times,
 			int* radii = nullptr,

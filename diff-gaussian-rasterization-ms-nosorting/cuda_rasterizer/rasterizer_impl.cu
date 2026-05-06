@@ -122,6 +122,49 @@ __global__ void duplicateWithKeys(
 	}
 }
 
+__device__ inline int effectiveOITRadius(int radius, float threshold);
+
+// Generates one key/value pair for all Gaussian / tile overlaps, keyed only
+// by tile.  The Mobile-GS OIT compositor is order independent, so depth bits
+// are deliberately left zero and the following radix pass only groups by tile.
+__global__ void duplicateWithTileKeys(
+	int P,
+	const float2* points_xy,
+	const uint32_t* offsets,
+	uint64_t* gaussian_keys_unsorted,
+	uint32_t* gaussian_values_unsorted,
+	int* radii,
+	const float2* precomp_w_thres,
+	dim3 grid)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	if (radii[idx] > 0)
+	{
+		const float2 wt = precomp_w_thres[idx];
+		if (!(wt.x > 0.0f) || !(wt.y < 0.0f)) return;
+		int r = radii[idx];
+		if (r <= 0) return;
+
+		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
+		uint2 rect_min, rect_max;
+		getRect(points_xy[idx], r, rect_min, rect_max, grid);
+
+		for (int y = rect_min.y; y < rect_max.y; y++)
+		{
+			for (int x = rect_min.x; x < rect_max.x; x++)
+			{
+				uint64_t key = y * grid.x + x;
+				gaussian_keys_unsorted[off] = key << 32;
+				gaussian_values_unsorted[off] = idx;
+				off++;
+			}
+		}
+	}
+}
+
 // Check keys to see if it is at the start/end of one tile's range in 
 // the full sorted list. If yes, write start/end of this tile. 
 // Run once per instanced (duplicated) Gaussian ID.
@@ -215,39 +258,21 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 
 
 struct ChunkRenderWorkspace {
-	size_t tile_scan_size;
-	char* tile_scanning_space;
-	int* tile_offsets_tmp;
-	int* temp_counts;
-	uint2* d_tile_ranges;
 	float2* precomp_w_thres;
 
-	static ChunkRenderWorkspace fromChunk(char*& chunk, size_t num_tiles, size_t num_points)
+	static ChunkRenderWorkspace fromChunk(char*& chunk, size_t num_points)
 	{
 		ChunkRenderWorkspace ws;
-		CudaRasterizer::obtain(chunk, ws.tile_offsets_tmp, num_tiles, 128);
-		CudaRasterizer::obtain(chunk, ws.temp_counts, num_tiles, 128);
-		CudaRasterizer::obtain(chunk, ws.d_tile_ranges, num_tiles, 128);
 		CudaRasterizer::obtain(chunk, ws.precomp_w_thres, num_points, 128);
-		cub::DeviceScan::InclusiveSum(nullptr, ws.tile_scan_size, ws.temp_counts, ws.tile_offsets_tmp, num_tiles);
-		CudaRasterizer::obtain(chunk, ws.tile_scanning_space, ws.tile_scan_size, 256);
 		return ws;
 	}
 };
 
-static size_t requiredChunkRenderWorkspace(size_t num_tiles, size_t num_points)
+static size_t requiredChunkRenderWorkspace(size_t num_points)
 {
 	char* size = nullptr;
-	ChunkRenderWorkspace::fromChunk(size, num_tiles, num_points);
+	ChunkRenderWorkspace::fromChunk(size, num_points);
 	return ((size_t)size) + 128;
-}
-
-// Init Ranges
-__global__ void initOITRangesKernel(int n, const int* inclusive_offsets, uint2* ranges) {
-    int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i >= n) return;
-    const unsigned int start = (i == 0) ? 0u : (unsigned int)inclusive_offsets[i - 1];
-    ranges[i] = make_uint2(start, start);
 }
 
 
@@ -296,6 +321,60 @@ __global__ void precomputeGaussianData(
     }
 
     precomp_w_thres[idx] = make_float2(weight, threshold);
+}
+
+__device__ inline int effectiveOITRadius(int radius, float threshold)
+{
+	if (radius <= 0) return 0;
+	if (!(threshold < 0.0f)) return 0;
+	// preprocessCUDA stores a conservative 3-sigma radius.  The OIT kernel later
+	// rejects pixels whose Gaussian power falls below ``threshold``.  Shrink the
+	// tile footprint to the same support before binning so sort-free rendering
+	// does not spend most of its time looping over splats that will be discarded
+	// by the per-pixel support test.  Never expand beyond the original 3-sigma
+	// footprint; high-weight splats keep the same conservative support as before.
+	float sigma_radius = float(radius) * (1.0f / 3.0f);
+	float support_radius = sigma_radius * sqrtf(fmaxf(0.0f, -2.0f * threshold));
+	int out = (int)ceilf(support_radius);
+	out = out < 1 ? 1 : out;
+	return out > radius ? radius : out;
+}
+
+__global__ void updateOITTilesTouched(
+	int P,
+	const float2* points_xy,
+	int* radii,
+	uint32_t* tiles_touched,
+	const float2* precomp_w_thres,
+	dim3 grid)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P) return;
+	if (radii[idx] <= 0)
+	{
+		tiles_touched[idx] = 0;
+		return;
+	}
+
+	const float2 wt = precomp_w_thres[idx];
+	if (!(wt.x > 0.0f) || !(wt.y < 0.0f))
+	{
+		radii[idx] = 0;
+		tiles_touched[idx] = 0;
+		return;
+	}
+
+	int r = effectiveOITRadius(radii[idx], wt.y);
+	if (r <= 0)
+	{
+		radii[idx] = 0;
+		tiles_touched[idx] = 0;
+		return;
+	}
+	radii[idx] = r;
+	uint2 rect_min, rect_max;
+	getRect(points_xy[idx], r, rect_min, rect_max, grid);
+	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
 }
 
 
@@ -374,6 +453,108 @@ __global__ void fillOITTiles(
     }
 }
 
+
+template <uint32_t CHANNELS>
+__global__ void __launch_bounds__(128) scatterOITGaussians(
+    int P,
+    int W, int H,
+    const float2* __restrict__ means2D,
+    const int* __restrict__ radii,
+    const float* __restrict__ features,
+    const float4* __restrict__ conic_opacity,
+    const float2* __restrict__ precomp_w_thres,
+    float* __restrict__ out_num,
+    float* __restrict__ w_fg,
+    float* __restrict__ log_T,
+    float* __restrict__ gaussian_scores,
+    const bool compute_score_squares,
+    const float* __restrict__ score_error_map,
+    float* __restrict__ gaussian_score_max_error
+) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int idx = blockIdx.x * 4 + warp;
+    if (idx >= P) return;
+
+    int r = radii[idx];
+    if (r <= 0) return;
+
+    const float2 center = means2D[idx];
+    const float4 con_o = conic_opacity[idx];
+    const float2 wt = precomp_w_thres[idx];
+    if (!(wt.x > 0.0f) || !(wt.y < 0.0f)) return;
+
+    const int x0 = max(0, (int)floorf(center.x - (float)r));
+    const int y0 = max(0, (int)floorf(center.y - (float)r));
+    const int x1 = min(W, (int)ceilf(center.x + (float)r + 1.0f));
+    const int y1 = min(H, (int)ceilf(center.y + (float)r + 1.0f));
+    const int bw = x1 - x0;
+    const int bh = y1 - y0;
+    if (bw <= 0 || bh <= 0) return;
+
+    float3 feat = make_float3(0.0f, 0.0f, 0.0f);
+    if (CHANNELS == 3) {
+        feat = reinterpret_cast<const float3*>(features)[idx];
+    }
+
+    float local_score = 0.0f;
+    float local_max_err = 0.0f;
+    const int total = bw * bh;
+    for (int linear = lane; linear < total; linear += 32) {
+        const int lx = linear - (linear / bw) * bw;
+        const int ly = linear / bw;
+        const int px = x0 + lx;
+        const int py = y0 + ly;
+        const float dx = center.x - (float)px;
+        const float dy = center.y - (float)py;
+
+        const float power = -0.5f * con_o.x * dx * dx - con_o.y * dx * dy - 0.5f * con_o.z * dy * dy;
+        if (power > 0.0f || power < wt.y) continue;
+
+        const float alpha = fminf(0.99f, con_o.w * __expf(power));
+        const float blend_weight = alpha * wt.x;
+        if (alpha < OIT_ALPHA_EPS && blend_weight < OIT_ALPHA_EPS) continue;
+
+        const int pix = py * W + px;
+        atomicAdd(out_num + 0 * W * H + pix, feat.x * blend_weight);
+        atomicAdd(out_num + 1 * W * H + pix, feat.y * blend_weight);
+        atomicAdd(out_num + 2 * W * H + pix, feat.z * blend_weight);
+        atomicAdd(w_fg + pix, blend_weight);
+        atomicAdd(log_T + pix, __logf(fmaxf(1.0f - alpha, 1e-6f)));
+
+        if (gaussian_scores != nullptr) {
+            local_score += compute_score_squares ? blend_weight * blend_weight : blend_weight;
+        }
+        if (gaussian_score_max_error != nullptr && score_error_map != nullptr) {
+            local_max_err = fmaxf(local_max_err, score_error_map[pix]);
+        }
+    }
+
+    if (gaussian_scores != nullptr) {
+        atomicAdd(gaussian_scores + idx, local_score);
+    }
+    if (gaussian_score_max_error != nullptr && score_error_map != nullptr) {
+        atomicMaxFloatNonnegative(gaussian_score_max_error + idx, local_max_err);
+    }
+}
+
+__global__ void __launch_bounds__(256) finalizeOITPixels(
+    int N,
+    const float* __restrict__ background,
+    float* __restrict__ out_color,
+    float* __restrict__ w_fg,
+    float* __restrict__ log_T
+) {
+    int pix = cg::this_grid().thread_rank();
+    if (pix >= N) return;
+    const float final_T = __expf(log_T[pix]);
+    const float inv_w = 1.0f / fmaxf(w_fg[pix], 1e-5f);
+    out_color[0 * N + pix] = (out_color[0 * N + pix] * inv_w) * (1.0f - final_T) + final_T * background[0];
+    out_color[1 * N + pix] = (out_color[1 * N + pix] * inv_w) * (1.0f - final_T) + final_T * background[1];
+    out_color[2 * N + pix] = (out_color[2 * N + pix] * inv_w) * (1.0f - final_T) + final_T * background[2];
+    log_T[pix] = final_T;
+}
+
 template <uint32_t CHANNELS>
 __global__ void __launch_bounds__(256) renderTileOIT(
     const uint2* __restrict__ ranges,
@@ -416,20 +597,22 @@ __global__ void __launch_bounds__(256) renderTileOIT(
     int rounds = (count + 255) / 256;
 
     // Double Buffered Shared Memory
-    __shared__ float4 s_geom[2][256];     
-    __shared__ float4 s_weight[2][256];   
-    __shared__ float4 s_color[2][256];    
+    __shared__ float4 s_geom[2][256];
+    __shared__ float4 s_weight[2][256];
+    __shared__ float4 s_color[2][256];
+    __shared__ int s_id[2][256];
 
     // Initial preload for Buffer 0
     if (tr < count) {
         int p_idx = point_list[tile_range.x + tr];
+        s_id[0][tr] = p_idx;
         float2 center = means2D[p_idx];
         float4 con_o = conic_opacity[p_idx];
         float2 pt = precomp_w_thres[p_idx];
-        
+
         s_geom[0][tr] = make_float4(center.x, center.y, -0.5f * con_o.x, -con_o.y);
         s_weight[0][tr] = make_float4(-0.5f * con_o.z, con_o.w, pt.x, pt.y);
-        
+
         if (CHANNELS == 3) {
             float3 feat = reinterpret_cast<const float3*>(features)[p_idx];
             s_color[0][tr] = make_float4(feat.x * pt.x, feat.y * pt.x, feat.z * pt.x, 0.0f);
@@ -448,7 +631,8 @@ __global__ void __launch_bounds__(256) renderTileOIT(
             int load_idx = next_r * 256 + tr;
             if (load_idx < count) {
                 int p_idx = point_list[tile_range.x + load_idx];
-                
+                s_id[next_db][tr] = p_idx;
+
                 float2 center = means2D[p_idx];
                 float4 con_o = conic_opacity[p_idx];
                 float2 pt = precomp_w_thres[p_idx];
@@ -484,18 +668,19 @@ __global__ void __launch_bounds__(256) renderTileOIT(
             if (alpha < OIT_ALPHA_EPS && blend_weight < OIT_ALPHA_EPS) continue;
             
             float4 col = s_color[db][i];
-			int p_idx = point_list[tile_range.x + r * 256 + i];
-            
+
             c[0] += col.x * alpha;
             c[1] += col.y * alpha;
             c[2] += col.z * alpha;
 
 			if (gaussian_scores != nullptr) {
+				int p_idx = s_id[db][i];
 				// Sort-free rendering uses the order-independent MobileGS weight.
 				const float score = compute_score_squares ? blend_weight * blend_weight : blend_weight;
 				atomicAdd(&gaussian_scores[p_idx], score);
 			}
 			if (gaussian_score_max_error != nullptr && score_error_map != nullptr) {
+				int p_idx = s_id[db][i];
 				atomicMaxFloatNonnegative(&gaussian_score_max_error[p_idx], score_error_map[pix.y * W + pix.x]);
 			}
             
@@ -572,6 +757,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* score_error_map,
 	float* gaussian_score_max_error,
 	float* out_color,
+	const bool use_scatter_order_independent,
 
 	float* kernel_times,
 	int* radii,
@@ -585,10 +771,10 @@ int CudaRasterizer::Rasterizer::forward(
 	const float focal_x = width / (2.0f * tan_fovx);
 
 	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
-	size_t chunk_size = required<GeometryState>(P) + requiredChunkRenderWorkspace(tile_grid.x * tile_grid.y, P);
+	size_t chunk_size = required<GeometryState>(P) + requiredChunkRenderWorkspace(P);
 	char* chunkptr = geometryBuffer(chunk_size);
 	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
-	ChunkRenderWorkspace workspace = ChunkRenderWorkspace::fromChunk(chunkptr, tile_grid.x * tile_grid.y, P);
+	ChunkRenderWorkspace workspace = ChunkRenderWorkspace::fromChunk(chunkptr, P);
 
 	if (radii == nullptr)
 	{
@@ -636,41 +822,107 @@ int CudaRasterizer::Rasterizer::forward(
 		prefiltered
 	), debug)
 
-	int num_tiles = tile_grid.x * tile_grid.y;
-	int* tile_counts = workspace.temp_counts;
-	CHECK_CUDA(cudaMemsetAsync(tile_counts, 0, num_tiles * sizeof(int), stream), debug);
-
+	// Precompute Mobile-GS weights before binning.  This gives us the same
+	// support threshold used in renderTileOIT, so we can shrink low-opacity
+	// splat footprints before the prefix scan and radix grouping.
 	precomputeGaussianData<<<(P + 255) / 256, 256, 0, stream>>>(
-        P, radii, geomState.depths, phi, (glm::vec3*)scales, 
+        P, radii, geomState.depths, phi, (glm::vec3*)scales,
         geomState.conic_opacity, workspace.precomp_w_thres
     );
+	CHECK_CUDA(, debug)
 
-	countOITPointsPerTile<<<(P + 255) / 256, 256, 0, stream>>>(
-        P, width, height, geomState.means2D, radii, 
-        geomState.conic_opacity, workspace.precomp_w_thres,
-        tile_counts
-    );
+	updateOITTilesTouched<<<(P + 255) / 256, 256, 0, stream>>>(
+		P,
+		geomState.means2D,
+		radii,
+		geomState.tiles_touched,
+		workspace.precomp_w_thres,
+		tile_grid);
+	CHECK_CUDA(, debug)
 
-    int* tile_offsets = workspace.tile_offsets_tmp;
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(workspace.tile_scanning_space, workspace.tile_scan_size, tile_counts, tile_offsets, num_tiles, stream), debug);
+	if (use_scatter_order_independent)
+	{
+		const int num_pixels = width * height;
+		CHECK_CUDA(cudaMemsetAsync(out_color, 0, NUM_CHANNELS * num_pixels * sizeof(float), stream), debug);
+		CHECK_CUDA(cudaMemsetAsync(w_fg, 0, num_pixels * sizeof(float), stream), debug);
+		CHECK_CUDA(cudaMemsetAsync(Ts, 0, num_pixels * sizeof(float), stream), debug);
 
-    int total_instances = 0;
-	CHECK_CUDA(cudaMemcpyAsync(&total_instances, tile_offsets + num_tiles - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
+		const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
+		scatterOITGaussians<3><<<(P + 3) / 4, 128, 0, stream>>>(
+			P,
+			width, height,
+			geomState.means2D,
+			radii,
+			feature_ptr,
+			geomState.conic_opacity,
+			workspace.precomp_w_thres,
+			out_color,
+			w_fg,
+			Ts,
+			gaussian_scores,
+			compute_score_squares,
+			score_error_map,
+			gaussian_score_max_error);
+		CHECK_CUDA(, debug)
+
+		finalizeOITPixels<<<(num_pixels + 255) / 256, 256, 0, stream>>>(
+			num_pixels, background, out_color, w_fg, Ts);
+		CHECK_CUDA(, debug)
+		if (kernel_times != nullptr) {
+			kernel_times[0] = 0.0f;
+		}
+		return P;
+	}
+
+	// Reuse the standard 3DGS binning path instead of the previous two-pass
+	// atomic count/fill path.  Sort-free rendering does not need per-tile depth
+	// order, but it still needs a compact per-tile range list.  Sorting only the
+	// tile-id bits groups instances by tile while skipping the expensive 32 depth
+	// radix passes used by alpha blending.
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+		geomState.scanning_space,
+		geomState.scan_size,
+		geomState.tiles_touched,
+		geomState.point_offsets,
+		P,
+		stream), debug)
+
+	int total_instances = 0;
+	CHECK_CUDA(cudaMemcpyAsync(&total_instances, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost, stream), debug);
 	CHECK_CUDA(cudaStreamSynchronize(stream), debug);
 
-    size_t binning_chunk_size = required<BinningState>(total_instances);
-    char* binning_chunkptr = binningBuffer(binning_chunk_size);
-    BinningState binningState = BinningState::fromChunk(binning_chunkptr, total_instances);
+	size_t binning_chunk_size = required<BinningState>(total_instances);
+	char* binning_chunkptr = binningBuffer(binning_chunk_size);
+	BinningState binningState = BinningState::fromChunk(binning_chunkptr, total_instances);
 
-    initOITRangesKernel<<<(num_tiles + 255) / 256, 256, 0, stream>>>(num_tiles, tile_offsets, workspace.d_tile_ranges);
+	duplicateWithTileKeys << <(P + 255) / 256, 256, 0, stream >> > (
+		P,
+		geomState.means2D,
+		geomState.point_offsets,
+		binningState.point_list_keys_unsorted,
+		binningState.point_list_unsorted,
+		radii,
+		workspace.precomp_w_thres,
+		tile_grid)
+	CHECK_CUDA(, debug)
 
-	fillOITTiles<<<(P + 255) / 256, 256, 0, stream>>>(
-        P, width, height, geomState.means2D, radii, 
-        geomState.conic_opacity, workspace.precomp_w_thres,
-		binningState.point_list, workspace.d_tile_ranges, total_instances
-    );
+	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
-	CHECK_CUDA(cudaMemcpyAsync(imgState.ranges, workspace.d_tile_ranges, num_tiles * sizeof(uint2), cudaMemcpyDeviceToDevice, stream), debug);
+	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
+		binningState.list_sorting_space,
+		binningState.sorting_size,
+		binningState.point_list_keys_unsorted, binningState.point_list_keys,
+		binningState.point_list_unsorted, binningState.point_list,
+		total_instances, 32, 32 + bit, stream), debug)
+
+	CHECK_CUDA(cudaMemsetAsync(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2), stream), debug);
+
+	if (total_instances > 0)
+		identifyTileRanges << <(total_instances + 255) / 256, 256, 0, stream >> > (
+			total_instances,
+			binningState.point_list_keys,
+			imgState.ranges);
+	CHECK_CUDA(, debug)
 
     const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
     
@@ -684,6 +936,7 @@ int CudaRasterizer::Rasterizer::forward(
         workspace.precomp_w_thres,
 		out_color, w_fg, Ts, imgState.accum_alpha, imgState.n_contrib, background, gaussian_scores, compute_score_squares, score_error_map, gaussian_score_max_error
     );
+	CHECK_CUDA(, debug)
 	
 	if (kernel_times != nullptr) {
 		kernel_times[0] = 0.0f;

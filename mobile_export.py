@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--block-size", type=int, default=8)
     parser.add_argument("--kmeans-iters", type=int, default=16)
     parser.add_argument("--uniform-bits", type=int, default=8)
-    parser.add_argument("--build-visibility-filter", action="store_true")
+    parser.add_argument("--build-visibility-filter", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--temporal-keyframes", type=int, default=32)
     parser.add_argument("--temporal-mask-window", type=int, default=1)
     parser.add_argument("--temporal-mask-threshold", type=float, default=0.05)

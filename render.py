@@ -642,7 +642,7 @@ def render_orbit_mode(
                     fl_y=fl_y,
                 )
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 render_pkg = render(cam, gaussians, pipe, background)
                 image_u8 = render_tensor_to_uint8(render_pkg["render"])
             frame_sink.append(idx, image_u8)
@@ -770,7 +770,7 @@ def render_bounded_mode(
                 fl_x=fl_x,
                 fl_y=fl_y,
             )
-            with torch.no_grad():
+            with torch.inference_mode():
                 render_pkg = render(cam, gaussians, pipe, background)
                 image_u8 = render_tensor_to_uint8(render_pkg["render"])
             frame_sink.append(idx, image_u8)

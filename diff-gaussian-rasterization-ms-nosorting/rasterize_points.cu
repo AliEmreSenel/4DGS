@@ -162,6 +162,7 @@ RasterizeGaussiansCUDA(
       score_error_map.numel() > 0 ? score_error_map.contiguous().data_ptr<float>() : nullptr,
       score_error_map.numel() > 0 ? gaussian_score_max_error.contiguous().data_ptr<float>() : nullptr,
       out_color.contiguous().data<float>(),
+      cache_forward_workspaces,
 
       kernel_times.contiguous().data<float>(), 
       radii.contiguous().data<int>(),

@@ -1069,6 +1069,7 @@ OPTIMIZATION_OVERRIDE_KEYS = {
     "iterations", "position_lr_init", "position_t_lr_init", "position_lr_final",
     "position_lr_delay_mult", "position_lr_max_steps", "feature_lr", "opacity_lr",
     "scaling_lr", "rotation_lr", "percent_dense", "lambda_dssim", "lambda_rdr",
+    "rdr_detach_full_render",
     "thresh_opa_prune", "densification_interval", "opacity_reset_interval",
     "densify_from_iter", "densify_until_iter", "densify_grad_threshold",
     "densify_grad_t_threshold", "densify_until_num_points", "final_prune_from_iter",
@@ -1815,6 +1816,8 @@ def evaluate_checkpoint(
     model_params = checkpoint_payload["gaussians"]
     loaded_iter = int(checkpoint_payload["iteration"])
     gaussians.restore(model_params, None)
+    if gaussians.mobilegs_opacity_phi_nn is not None:
+        gaussians.mobilegs_opacity_phi_nn.eval()
     gaussians.active_sh_degree = gaussians.max_sh_degree
     if hasattr(gaussians, "active_sh_degree_t"):
         gaussians.active_sh_degree_t = gaussians.max_sh_degree_t
@@ -1838,7 +1841,7 @@ def evaluate_checkpoint(
         torch.cuda.reset_peak_memory_stats()
 
     totals = {"psnr": 0.0, "ssim": 0.0, "lpips": 0.0}
-    with torch.no_grad():
+    with torch.inference_mode():
         for gt_image, viewpoint in camera_items:
             gt_image = gt_image.to("cuda", non_blocking=True)
             viewpoint = viewpoint.cuda(non_blocking=True, copy=False)
@@ -1858,7 +1861,7 @@ def evaluate_checkpoint(
     }
 
     warmup_count = min(max(render_fps_warmup, 0), len(camera_items))
-    with torch.no_grad():
+    with torch.inference_mode():
         for idx in range(warmup_count):
             _, viewpoint = camera_items[idx]
             viewpoint = viewpoint.cuda(non_blocking=True, copy=False)
@@ -2076,7 +2079,7 @@ def run_mobilegs_export_benchmark(
     if quality_samples > 0:
         raw_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode=render_mode)
         sums = {"l1": 0.0, "psnr": 0.0, "ssim": 0.0, "lpips": 0.0, "count": 0}
-        with torch.no_grad():
+        with torch.inference_mode():
             for cam in bench_cameras[:quality_samples]:
                 ref = torch.clamp(render(cam, gaussians, raw_pipe, background)["render"], 0.0, 1.0)
                 out = torch.clamp(render(cam, mobile, mobile_pipe, background)["render"], 0.0, 1.0)

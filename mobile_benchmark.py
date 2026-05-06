@@ -20,7 +20,9 @@ from utils.mobile_compression import (
 )
 
 
-def make_pipe(args):
+def make_pipe(args, use_visibility=None):
+    if use_visibility is None:
+        use_visibility = bool(args.use_visibility_filter)
     return SimpleNamespace(
         convert_SHs_python=False,
         compute_cov3D_python=False,
@@ -28,7 +30,7 @@ def make_pipe(args):
         use_usplat=False,
         sort_free_render=True,
         temporal_mask_threshold=float(args.temporal_mask_threshold),
-        temporal_mask_mode="visibility" if args.use_visibility_filter else "marginal",
+        temporal_mask_mode="visibility" if use_visibility else "marginal",
         temporal_mask_keyframes=0,
         temporal_mask_window=int(args.temporal_mask_window),
         random_dropout_prob=0.0,
@@ -69,7 +71,8 @@ def main():
     ckpt = load_checkpoint(args.ckpt_path, map_location=args.device)
     payload = load_mobile_payload(args.mobile_path, map_location="cpu")
     mobile = restore_mobile_payload(payload, training_args=None, device=args.device)
-    pipe = make_pipe(args)
+    has_visibility_filter = payload.get("temporal_visibility_filter") is not None
+    pipe = make_pipe(args, use_visibility=bool(args.use_visibility_filter or has_visibility_filter))
     background = torch.tensor(
         [1.0, 1.0, 1.0] if ckpt.get("scene", {}).get("white_background", False) else [0.0, 0.0, 0.0],
         device=args.device,
@@ -87,6 +90,7 @@ def main():
         "split": args.split,
         "fps": fps,
         "temporal_mask_mode": pipe.temporal_mask_mode,
+        "temporal_visibility_filter_present": bool(has_visibility_filter),
     }
 
     if args.quality_samples and args.quality_samples > 0:
@@ -95,7 +99,7 @@ def main():
         raw_pipe.sort_free_render = bool(ckpt.get("requires_mobilegs", False))
         raw_pipe.temporal_mask_mode = "marginal"
         q = {"l1": 0.0, "psnr": 0.0, "ssim": 0.0, "lpips": 0.0, "count": 0}
-        with torch.no_grad():
+        with torch.inference_mode():
             for cam in cameras[: args.quality_samples]:
                 ref = torch.clamp(render(cam, raw, raw_pipe, background)["render"], 0.0, 1.0)
                 out = torch.clamp(render(cam, mobile, pipe, background)["render"], 0.0, 1.0)
