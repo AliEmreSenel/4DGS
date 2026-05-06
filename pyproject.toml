@@ -29,6 +29,7 @@ dependencies = [
   "plotly>=6.7.0",
   "nbformat>=5.10.4",
   "opencv-python-headless>=4.13.0.92",
+  "squarify>=0.4.4",
 ]
 
 [tool.setuptools.packages.find]
