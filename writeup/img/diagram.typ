@@ -167,181 +167,180 @@ digraph gs_evolution {
 
 ```
 
+
 #let ablations = [
-  #let thick = 1.8pt
-  #let base = 0.6pt
+  #let grid = 0.42pt + luma(220)
+  #let group = 1.05pt + luma(135)
+  #let emph = 1.9pt + luma(45)
 
-  #let soft-thick = 0.8pt + black
-  #let light-blue = rgb("#eaf3ff")
-  #let light-orange = rgb("#fff1e6")
+  #let neutral = rgb("#9fa6a0")
+  #let green = rgb("#42a464")
+  #let blue = rgb("#438fd5")
+  #let red = rgb("#d76363")
 
-  #let C(body, bg: none) = table.cell(align: center + horizon, fill: bg)[#body]
-  #let L(body, bg: none) = table.cell(align: left + horizon, fill: bg)[#body]
+  #let head-blue = rgb("#eaf5ff")
+  #let head-orange = rgb("#fff0e3")
+  #let head-gray = luma(242)
+  #let row-head = luma(248)
+  #let row-alt = luma(252)
+  #let omni-row = rgb("#eef5ef")
 
-  #let X = table.cell(align: center + horizon, fill: rgb("#b6b8b6"))[
-    #text(fill: black, weight: "bold")[ ]
+  #let Mark(fill) = table.cell(
+    align: center + horizon,
+    inset: (x: 1pt, y: 6.2pt),
+  )[
+    #rect(
+      width: 10pt,
+      height: 10pt,
+      radius: 2.4pt,
+      fill: fill,
+      stroke: none,
+    )
   ]
-  #let XG = table.cell(align: center + horizon, fill: rgb("#56aa68"))[
-    #text(fill: white, weight: "bold")[]
-  ]
-  #let XB = table.cell(align: center + horizon, fill: rgb("#5698df"))[
-    #text(fill: white, weight: "bold")[]
-  ]
-  #let XR = table.cell(align: center + horizon, fill: rgb("#df6f6f"))[
-    #text(fill: white, weight: "bold")[]
-  ]
+
+  #let X = Mark(neutral)
+  #let XG = Mark(green)
+  #let XB = Mark(blue)
+  #let XR = Mark(red)
   #let E = table.cell(align: center + horizon)[]
 
-  #let KG(body) = box(
-    fill: rgb("#56aa68"),
-    inset: (x: 3pt, y: 3pt),
+  #let Pill(fill, body) = rect(
+    fill: fill,
+    stroke: none,
     radius: 4pt,
-  )[#text(fill: white)[#body]]
-
-  #let KB(body) = box(
-    fill: rgb("#5698df"),
-    inset: (x: 3pt, y: 3pt),
-    radius: 4pt,
-  )[#text(fill: white)[#body]]
-
-  #let KR(body) = box(
-    fill: rgb("#df6f6f"),
-    inset: (x: 3pt, y: 3pt),
-    radius: 4pt,
-  )[#text(fill: white)[#body]]
-
-  #let VH(body, bg: none) = table.cell(align: center + horizon, fill: bg)[
-    #rotate(-90deg, reflow: true)[#body]
+    inset: (x: 8pt, y: 6pt),
+  )[
+    #text(fill: white, size: 12pt, weight: "bold")[#body]
   ]
 
-  #table(
-    columns: (120pt,) + (auto,) * 28,
-    stroke: base,
+  #let KG(body) = Pill(green, body)
+  #let KB(body) = Pill(blue, body)
+  #let KR(body) = Pill(red, body)
+
+  #let Group(body, span) = table.cell(
+    colspan: span,
     align: center + horizon,
-    inset: (x: 3pt, y: 3pt),
-    fill: (x, y) => if (x == 0 and y >= 2) or (y == 0 and x > 0) {
-      luma(230)
-    } else {
-      none
-    },
+    fill: head-gray,
+    inset: (x: 3pt, y: 7pt),
+  )[
+    #text(size: 16.2pt, weight: "bold")[#body]
+  ]
 
-    table.cell(
-      rowspan: 2,
-      inset: (x: 5pt, y: 3pt),
-      stroke: none,
-      align: left + horizon,
-    )[
-      #par(justify: false)[
-        #KG[existing] #KR[modified] #KB[rewritten]
-      ]
-    ],
+  #let VH(body, bg: none) = table.cell(
+    align: center + horizon,
+    fill: bg,
+    inset: (x: 1pt, y: 8pt),
+  )[
+    #rotate(-90deg, reflow: true)[
+      #text(size: 13.8pt)[#body]
+    ]
+  ]
 
-    table.cell(colspan: 9, align: center + horizon)[*Gaussians*],
-    table.cell(colspan: 2, align: center + horizon)[*Init*],
-    table.cell(colspan: 3, align: center + horizon)[*Compr*],
-    table.cell(colspan: 3, align: center + horizon)[*Train*],
-    table.cell(colspan: 8, align: center + horizon)[*Prune*],
-    table.cell(colspan: 3, align: center + horizon)[*Render*],
+  #let Method(body, bg: row-head) = table.cell(
+    align: left + horizon,
+    fill: bg,
+    inset: (x: 4pt, y: 8pt),
+  )[
+    #text(size: 14.2pt, weight: "bold")[#body]
+  ]
 
-    VH([4D], bg: light-blue),
-    VH([3D], bg: light-blue),
-    VH([Quaternion], bg: light-orange),
-    VH([Rotation Matrix], bg: light-orange),
-    VH([Isotropic], bg: light-blue),
-    VH([Anisotropic], bg: light-blue),
-    VH([RGB], bg: light-orange),
-    VH([SH(1)], bg: light-orange),
-    VH([SH(3)], bg: light-orange),
+  #block(width: 100%, height: 100%)[
+    #table(
+      columns: (5fr,) + (0.91fr,) * 28,
+      stroke: grid,
+      align: center + horizon,
+      inset: (x: 2pt, y: 6.4pt),
 
-    VH([Random], bg: light-blue),
-    VH([MegaSAM], bg: light-blue),
+      table.cell(
+        rowspan: 2,
+        fill: none,
+        stroke: none,
+        inset: (x: 5pt, y: 5pt),
+        align: left + top,
+      )[
+        #stack(dir: ttb, spacing: 0pt)[
+          #text(size: 15.4pt, weight: "bold")[Legend]
+          #KG[existing] #KR[modified] #KB[rewritten]
+        ]
+      ],
 
-    VH([MLP Distillation], bg: light-blue),
-    VH([K-means], bg: light-orange),
-    VH([Spatial GPCC], bg: light-orange),
+      Group([Gaussians], 9),
+      Group([Init], 2),
+      Group([Compress], 3),
+      Group([Train], 3),
+      Group([Prune], 8),
+      Group([Render], 3),
 
-    VH([Uncertainty], bg: light-blue),
-    VH([Batch in Time], bg: light-orange),
-    VH([Voxelization], bg: light-blue),
+      VH([4D], bg: head-blue),
+      VH([3D], bg: head-blue),
+      VH([Quaternion], bg: head-orange),
+      VH([Rotation Matrix], bg: head-orange),
+      VH([Isotropic], bg: head-blue),
+      VH([Anisotropic], bg: head-blue),
+      VH([RGB], bg: head-orange),
+      VH([SH(1)], bg: head-orange),
+      VH([SH(3)], bg: head-orange),
 
-    VH([Contribution], bg: light-orange),
-    VH([Gradient Loss], bg: light-orange),
-    VH([Spatio-Temporal], bg: light-blue),
-    VH([Opacity], bg: light-blue),
-    VH([One-shot], bg: light-orange),
-    VH([Scheduled], bg: light-orange),
-    VH([Densify], bg: light-blue),
-    VH([Dropout], bg: light-orange),
+      VH([Random], bg: head-blue),
+      VH([MegaSAM], bg: head-blue),
 
-    VH([Visibility Mask], bg: light-blue),
-    VH([Sort-based], bg: light-orange),
-    VH([Sort-free], bg: light-orange),
+      VH([MLP Distillation], bg: head-blue),
+      VH([K-means], bg: head-orange),
+      VH([Spatial GPCC], bg: head-orange),
 
-    L([*4DGS-Nat.*], bg: luma(230)),
-    X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, X, E, X, X, E, E, E, E, X, E, E, X, E,
+      VH([Uncertainty], bg: head-blue),
+      VH([Batch in Time], bg: head-orange),
+      VH([Voxelization], bg: head-blue),
 
-    L([*1000FPS*], bg: luma(230)),
-    X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, X, E, E, E, E, E, X, E, E, E, X, X, E,
+      VH([Contribution], bg: head-orange),
+      VH([Gradient Loss], bg: head-orange),
+      VH([Spatio-Temporal], bg: head-blue),
+      VH([Opacity], bg: head-blue),
+      VH([One-shot], bg: head-orange),
+      VH([Scheduled], bg: head-orange),
+      VH([Densify], bg: head-blue),
+      VH([Dropout], bg: head-orange),
 
-    L([*Instant4D*], bg: luma(230)),
-    X, E, X, E, X, E, X, E, E, E, X, E, E, E, E, E, X, E, E, X, X, X, E, E, E, E, X, E,
+      VH([Visibility Mask], bg: head-blue),
+      VH([Sort-based], bg: head-orange),
+      VH([Sort-free], bg: head-orange),
 
-    L([*MobileGS*], bg: luma(230)),
-    E, X, E, X, E, X, E, X, X, E, E, X, X, X, E, E, X, X, E, X, E, E, E, E, E, E, E, X,
+      Method([4DGS-Nat.]),
+      X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, X, E, X, X, E, X, E, E, X, E, E, X, E,
 
-    L([*Usplat4D*], bg: luma(230)),
-    X, E, X, E, E, X, E, E, X, E, E, E, E, E, X, E, X, E, E, E, E, X, E, E, E, E, X, E,
+      Method([1000FPS], bg: row-alt),
+      X, E, X, E, E, X, E, E, X, X, E, E, E, E, E, X, E, E, E, X, E, X, E, E, E, X, X, E,
 
-    L([*Omni-4DGS*], bg: luma(230)),
-    XG, E, XG, E, XG, XR, XG, XG, XG, XG, E, XR, XR, XR, XR, XG, XR, E, XG, XB, XG, XG, XB, XG, XB, XB, XG, XR,
+      Method([Instant4D]),
+      X, E, X, E, X, E, X, E, E, E, X, E, E, E, E, E, X, X, E, E, X, X, E, E, E, E, X, E,
 
-    // Inner-table outline.
-    table.vline(x: 1, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 29, start: 1, end: 8, stroke: soft-thick),
-    table.hline(y: 1, start: 1, end: 29, stroke: soft-thick),
-    table.hline(y: 8, start: 1, end: 29, stroke: soft-thick),
+      Method([MobileGS], bg: row-alt),
+      E, X, E, X, E, X, E, X, X, E, E, X, X, X, E, E, X, X, E, E, E, E, E, E, E, E, E, X,
 
-    // Extended mutually-exclusive group boundaries.
-    table.vline(x: 3, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 5, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 7, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 10, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 12, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 25, start: 1, end: 8, stroke: soft-thick),
-    table.vline(x: 27, start: 1, end: 8, stroke: soft-thick),
+      Method([Usplat4D]),
+      X, E, X, E, E, X, E, E, X, E, E, E, E, E, X, E, X, E, E, E, E, X, E, E, E, E, X, E,
 
-    // Outline around bottom row.
-    table.hline(y: 7, start: 0, end: 29, stroke: luma(100) + thick),
-    table.hline(y: 8, start: 0, end: 29, stroke: luma(100) + thick),
-    table.vline(x: 0, start: 7, end: 8, stroke: luma(100) + thick),
-    table.vline(x: 29, start: 7, end: 8, stroke: luma(100) + thick),
+      Method([Omni-4DGS], bg: omni-row),
+      XG, E, XG, E, XR, XG, XG, XG, XG, XG, E, XR, XR, XR, XR, XG, XR, E, XG, XB, XG, XG, XB, XG, XB, XB, XG, XR,
 
-    // Thick black separators before/after bottom-row color bands.
-    table.vline(x: 1, start: 1, end: 8, stroke: black + thick),
+      // Main section boundaries.
+      table.vline(x: 1, start: 0, end: 8, stroke: group),
+      table.vline(x: 10, start: 0, end: 8, stroke: group),
+      table.vline(x: 12, start: 0, end: 8, stroke: group),
+      table.vline(x: 15, start: 0, end: 8, stroke: group),
+      table.vline(x: 18, start: 0, end: 8, stroke: group),
+      table.vline(x: 26, start: 0, end: 8, stroke: group),
+      table.vline(x: 29, start: 0, end: 8, stroke: group),
 
-    table.vline(x: 3, start: 1, end: 8, stroke: black + thick),
+      // Header separation.
+      table.hline(y: 1, start: 1, end: 29, stroke: 0.75pt + luma(175)),
+      table.hline(y: 2, start: 0, end: 29, stroke: group),
 
-    table.vline(x: 5, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 7, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 10, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 13, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 15, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 16, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 17, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 18, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 20, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 22, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 24, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 25, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 26, start: 1, end: 8, stroke: black + thick),
-
-    table.vline(x: 27, start: 1, end: 8, stroke: black + thick),
-    table.vline(x: 29, start: 1, end: 8, stroke: black + thick),
-  )
+      // Strong focus around proposed method.
+      table.hline(y: 7, start: 0, end: 29, stroke: emph),
+      table.hline(y: 8, start: 0, end: 29, stroke: emph),
+      table.vline(x: 0, start: 7, end: 8, stroke: emph),
+      table.vline(x: 29, start: 7, end: 8, stroke: emph),
+    )
+  ]
 ]
