@@ -40,7 +40,7 @@
   \
 
   #block()[
-    Compact 4DGS architecture validated through ablations and best-model evaluation.
+    Validated the best 4DGS architecture with ablations to identify the best-model
   ]
 ]
 
@@ -112,7 +112,7 @@
   )
 
   \
-  #block(title: "Additions", "Dropout, Densification Schedule")
+  #block(title: "Additions", "Dropout, Edge-guided Splitting, Densification Schedule")
 
 ]
 
@@ -371,7 +371,7 @@
   )
 
   #block(title: "Uncertainty-Weighting", [
-    GPU-constrained. Ablations are impractical: $quad $30min $->$ 5h / run.
+    GPU-constrained. Ablations are impractical: $quad$30min $->$ 5h / run.
   ])
 
 
