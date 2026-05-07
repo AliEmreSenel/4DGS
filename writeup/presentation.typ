@@ -226,12 +226,12 @@
       // - `appearance × pruning` for VRAM
       // - `sorting × appearance` for checkpoint size / memory
 
-      VRAM groups:
+      Peak VRAM over training:
       1. `rgb / interleaved`
       2. `rgb / no_pruning`, `sh3 / interleaved`
       3. `sh3 / no_pruning`
 
-      Memory / checkpoint size groups:
+      Memory use in storage:
       1. `sort_free / rgb`
       2. `sort_free / sh3`, `sort / rgb`
       3. `sort / sh3`
@@ -244,7 +244,7 @@
     ],
     [
       \
-      
+
       #image("img/trex_storage_ablations.png", width: 110%)
     ],
   )
@@ -252,42 +252,68 @@
 
 
 #slide(title: "Evaluation")[
-  \
+  #grid(
+    columns: (1fr, 0.8fr),
+    gutter: 1em,
+    // left section
+    [
+      \
 
-  *Storage Use*
+      *Storage Use*
 
-  Number of Gaussians
-  1. `sort_free / anisotropic`
-  2. `sort_free / isotropic`
-  3. `sort / anisotropic`
-  4. `sort / isotropic`
+      Number of Gaussians
+      1. `sort_free / anisotropic`
+      2. `sort_free / isotropic`
+      3. `sort / anisotropic`
+      4. `sort / isotropic`
 
-  // Interpretation:
-  // - SH appearance increases storage/memory.
-  // - Pruning is the clearest VRAM reducer.
-  // - Sorting and isotropy increase Gaussian count.
-  // Spikes in training come from instability of Droupout
+      // Interpretation:
+      // - SH appearance increases storage/memory.
+      // - Pruning is the clearest VRAM reducer.
+      // - Sorting and isotropy increase Gaussian count.
+      // Spikes in training come from instability of Droupout
+    ],
+    [
+      \
+      #move(dx: -5em)[
+        #image("img/trex_gaussians_ablations.png", width: 140%)
+      ]
+    ],
+  )
 ]
 
+
 #slide(title: "Evaluation")[
+  #grid(
+    columns: (1fr, 0.8fr),
+    gutter: 1em,
+    // left section
+    [
+      \
 
-  \
+      *Render Speed*
 
-  *Render Speed?*
+      // Main ablation to explain range:
+      // - `sorting × appearance`
 
-  // Main ablation to explain range:
-  // - `sorting × appearance`
+      1. `sort / rgb`
+      2. `sort / sh3`
+      3. `sort_free / rgb`
+      4. `sort_free / sh3`
 
-  1. `sort / rgb`
-  2. `sort / sh3`
-  3. `sort_free / rgb`
-  4. `sort_free / sh3`
-
-  // Interpretation:
-  // - Sorting strongly improves FPS.
-  // - RGB is faster than SH3.
-  // - Best speed comes from combining sorting with RGB appearance.
-  // Sortfree spends 95% of CPU MLP inference as opposed to 65%
+      // Interpretation:
+      // - Sorting strongly improves FPS.
+      // - RGB is faster than SH3.
+      // - Best speed comes from combining sorting with RGB appearance.
+      // Sortfree spends 95% of CPU MLP inference as opposed to 65%
+    ],
+    [
+      \
+      #move(dx: -5em)[
+        #image("img/trex_fps_ablations.png", width: 140%)
+      ]
+    ],
+  )
 ]
 
 #slide(title: "Best Model Combination")[
