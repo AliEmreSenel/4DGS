@@ -223,10 +223,10 @@
 
       *Visual Quality*
 
-      1. `sort / no_dropout`
-      2. `sort / yes_dropout`
-      3. `sort_free / no_dropout`
-      4. `sort_free / yes_dropout`
+      1. `sort - no_dropout`
+      2. `sort - yes_dropout`
+      3. `sort_free - no_dropout`
+      4. `sort_free - yes_dropout`
 
       // Interpretation:
       // - Sorting is the dominant visual-quality factor.
@@ -254,17 +254,17 @@
 
       // Main ablations to explain range:
       // - `appearance × pruning` for VRAM
-      // - `sorting × appearance` for checkpoint size / memory
+      // - `sorting × appearance` for checkpoint size - memory
 
       Peak VRAM over training:
-      1. `rgb / interleaved`
-      2. `rgb / no_pruning`, `sh3 / interleaved`
-      3. `sh3 / no_pruning`
+      1. `rgb - interleaved`
+      2. `rgb - no_pruning`, `sh3 - interleaved`
+      3. `sh3 - no_pruning`
 
       Memory use in storage:
-      1. `sort_free / rgb`
-      2. `sort_free / sh3`, `sort / rgb`
-      3. `sort / sh3`
+      1. `sort_free - rgb`
+      2. `sort_free - sh3`, `sort - rgb`
+      3. `sort - sh3`
 
       // Interpretation:
       // - SH appearance increases storage/memory.
@@ -292,10 +292,10 @@
       *Storage Use*
 
       Number of Gaussians
-      1. `sort_free / anisotropic`
-      2. `sort_free / isotropic`
-      3. `sort / anisotropic`
-      4. `sort / isotropic`
+      1. `sort_free - anisotropic`
+      2. `sort_free - isotropic`
+      3. `sort - anisotropic`
+      4. `sort - isotropic`
 
       // Interpretation:
       // - SH appearance increases storage/memory.
@@ -326,10 +326,10 @@
       // Main ablation to explain range:
       // - `sorting × appearance`
 
-      1. `sort / rgb`
-      2. `sort / sh3`
-      3. `sort_free / rgb`
-      4. `sort_free / sh3`
+      1. `sort - rgb`
+      2. `sort - sh3`
+      3. `sort_free - rgb`
+      4. `sort_free - sh3`
 
       // Interpretation:
       // - Avoiding sort-free strongly improves FPS.
@@ -363,10 +363,10 @@
     table.hline(y: 3, stroke: gray),
     table.hline(y: 4, stroke: gray),
 
-    [Pure quality], [`anisotropic / sh3 / sort / no_pruning / no_dropout`],
-    [Practical choice], [`anisotropic / rgb / sort / interleaved / no_dropout`],
-    [Highest FPS], [`sort / rgb`],
-    [Lowest VRAM], [`rgb / interleaved`],
+    [Pure quality], [`anisotropic - sh3 - sort - no_pruning - no_dropout`],
+    [Practical choice], [`anisotropic - rgb - sort - interleaved - no_dropout`],
+    [Highest FPS], [`sort - rgb`],
+    [Lowest VRAM], [`rgb - interleaved`],
     [Most compact], [`anisotropic`],
   )
 
