@@ -378,6 +378,10 @@
     GPU-constrained. Ablations are impractical: $quad$30min $->$ 5h / run.
   ])
 
+  #block(title: "Vector Codebook Compression", [
+    CPU-constrained. Post-train addition: $quad$ 80% size reduction, \~1% reconstruction err
+  ])
+
   // Final selection:
   // - Pure quality favors `anisotropic - sh3 - sort - no_pruning - no dropout`.
   // - The practical best model is `anisotropic - rgb - sort - interleaved - no dropout`.
