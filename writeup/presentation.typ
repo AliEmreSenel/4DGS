@@ -180,6 +180,35 @@
   )
 ]
 
+#slide(title: "Dataset Example")[
+  #grid(
+    columns: (1fr, 0.8fr),
+    gutter: 1em,
+
+    // left section
+    [
+      #figure(
+        rect(
+          fill: black,
+          inset: 0pt,
+          width: 80%,
+          image("img/r_017_true.png", width: 100%),
+        ),
+      )
+        #align(center)[
+        #text(size: 0.8em)[Still image from validation dataset]
+      ]
+    ],
+
+    [
+      #image("img/r_017_recon.png", width: 100%)
+      #align(center)[
+        #text(size: 0.8em)[Reconstruction from view angle and time]
+      ]
+    ],
+  )
+]
+
 = Final Result
 
 \
@@ -207,7 +236,8 @@
       // - Dropout hurts quality when sorting is enabled.
     ],
     [
-      #image("img/trex_quality_ablations.png", width: 100%)
+      #move(dx: -3em)[
+        #image("img/trex_quality_ablations.png", width: 100%)]
     ],
   )
 ]
@@ -302,10 +332,10 @@
       4. `sort_free / sh3`
 
       // Interpretation:
-      // - Sorting strongly improves FPS.
+      // - Avoiding sort-free strongly improves FPS.
       // - RGB is faster than SH3.
       // - Best speed comes from combining sorting with RGB appearance.
-      // Sortfree spends 95% of CPU MLP inference as opposed to 65%
+      // Sort-free spends 95% of CPU MLP for inference as opposed to 65%, roughly 10x longer for running
     ],
     [
       \
@@ -320,10 +350,10 @@
 
   \
 
-  *Best all-around choice*:
-
+  *Best all-around choice*: 
+  
   #table(
-    columns: (1fr, 1fr),
+    columns: (0.3fr, 1.2fr),
     stroke: none,
 
     table.vline(x: 1, stroke: black),
@@ -333,17 +363,17 @@
     table.hline(y: 3, stroke: gray),
     table.hline(y: 4, stroke: gray),
 
-    [Best Quality], [`sort / no_dropout`],
+    [Pure quality], [`anisotropic / sh3 / sort / no_pruning / no_dropout`],
+    [Practical choice], [`anisotropic / rgb / sort / interleaved / no_dropout`],
     [Highest FPS], [`sort / rgb`],
     [Lowest VRAM], [`rgb / interleaved`],
-    [Lower checkpoint/memory than SH3], [`rgb`],
-    [Lower Gaussian count than isotropic], [`anisotropic`],
+    [Most compact], [`anisotropic`],
   )
 
-  // - Sorting should be kept because it improves both quality and speed.
-  // - Dropout should be disabled because it hurts quality.
-  // - RGB is the best practical appearance choice because it is faster and lighter.
-  // - Interleaved pruning gives the best VRAM tradeoff.
-  // - Anisotropic Gaussians keep the representation more compact.
+  // - Sorting should be kept because it improves quality and FPS, though it can increase memory/model size.
+  // - Dropout should be disabled for quality; it improves speed/memory only by severely degrading quality.
+  // - SH3 gives the best pure quality, but RGB is the best practical appearance choice because it is much faster and lighter.
+  // - Interleaved pruning gives the best VRAM/model-size tradeoff, with a small quality cost.
+  // - Anisotropic Gaussians keep the representation more compact and faster than isotropic in this run.
 
 ]
