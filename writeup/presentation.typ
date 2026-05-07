@@ -195,7 +195,7 @@
           image("img/r_017_true.png", width: 100%),
         ),
       )
-        #align(center)[
+      #align(center)[
         #text(size: 0.8em)[Still image from validation dataset]
       ]
     ],
@@ -223,10 +223,10 @@
 
       *Visual Quality*
 
-      1. `sort - no_dropout`
-      2. `sort - yes_dropout`
-      3. `sort_free - no_dropout`
-      4. `sort_free - yes_dropout`
+      1. `sort - no dropout`
+      2. `sort - dropout`
+      3. `sort-free - no dropout`
+      4. `sort-free - dropout`
 
       // Interpretation:
       // - Sorting is the dominant visual-quality factor.
@@ -258,12 +258,12 @@
 
       Peak VRAM over training:
       1. `rgb - interleaved`
-      2. `rgb - no_pruning`, `sh3 - interleaved`
-      3. `sh3 - no_pruning`
+      2. `rgb - no pruning`, `sh3 - interleaved`
+      3. `sh3 - no pruning`
 
       Memory use in storage:
-      1. `sort_free - rgb`
-      2. `sort_free - sh3`, `sort - rgb`
+      1. `sort-free - rgb`
+      2. `sort-free - sh3`, `sort - rgb`
       3. `sort - sh3`
 
       // Interpretation:
@@ -291,17 +291,20 @@
 
       *Storage Use*
 
-      Number of Gaussians
-      1. `sort - isotropic`
-      2. `sort - anisotropic`
-      3. `sort_free - isotropic`
-      4. `sort_free - anisotropic`
+      Number of Gaussians:
+
+      1. `interleaved - rgb`
+      2. `interleaved - sh3`
+      3. `no pruning - rgb`
+      4. `no pruning - sh3`
+      \
+      Ultimately, depends on pruning.
 
       // Interpretation:
-      // - SH appearance increases storage/memory.
-      // - Pruning is the clearest VRAM reducer.
-      // - Sorting and isotropy increase Gaussian count.
-      // Spikes in training come from instability of Droupout
+      // - The lowest Gaussian counts occur in the `anisotropic + sort + dropout` regime.
+      // - Within that regime, pruning is the clearest reducer of Gaussian count.
+      // - RGB appearance uses fewer Gaussians/storage than SH.
+      // - Training-time spikes appear to come from dropout instability.
     ],
     [
       \
@@ -328,8 +331,8 @@
 
       1. `sort - rgb`
       2. `sort - sh3`
-      3. `sort_free - rgb`
-      4. `sort_free - sh3`
+      3. `sort-free - rgb`
+      4. `sort-free - sh3`
 
       // Interpretation:
       // - Avoiding sort-free strongly improves FPS.
@@ -350,8 +353,8 @@
 
   \
 
-  *Our results*: 
-  
+  *Our results*:
+
   #table(
     columns: (0.3fr, 1.2fr),
     stroke: none,
@@ -362,23 +365,28 @@
     table.hline(y: 2, stroke: gray),
     table.hline(y: 3, stroke: gray),
     table.hline(y: 4, stroke: gray),
+    table.hline(y: 5, stroke: gray),
 
-    [Pure quality], [`anisotropic - sh3 - sort - no_pruning - no_dropout`],
-    [Practical choice], [`anisotropic - rgb - sort - interleaved - no_dropout`],
+    [Pure quality], [`anisotropic - sh3 - sort - no pruning - no dropout`],
+    [Practical choice], [`anisotropic - rgb - sort - interleaved - no dropout`],
     [Highest FPS], [`sort - rgb`],
     [Lowest VRAM], [`rgb - interleaved`],
-    [Most compact], [`anisotropic`],
+    [Lowest \#Gauss.], [`anisotropic - sort - interleaved - rgb`],
   )
 
   #block(title: "Uncertainty-Weighting", [
     GPU-constrained. Ablations are impractical: $quad$30min $->$ 5h / run.
   ])
 
-
-  // - Sorting should be kept because it improves quality and FPS, though it can increase memory/model size.
-  // - Dropout should be disabled for quality; it improves speed/memory only by severely degrading quality.
-  // - SH3 gives the best pure quality, but RGB is the best practical appearance choice because it is much faster and lighter.
-  // - Interleaved pruning gives the best VRAM/model-size tradeoff, with a small quality cost.
-  // - Anisotropic Gaussians keep the representation more compact and faster than isotropic in this run.
+  // Final selection:
+  // - Pure quality favors `anisotropic - sh3 - sort - no_pruning - no dropout`.
+  // - The practical best model is `anisotropic - rgb - sort - interleaved - no dropout`.
+  // - Sorting should be kept: it improves both quality and FPS in these ablations.
+  // - Dropout should be disabled: any speed/memory gain comes with too much quality loss.
+  // - SH3 gives better quality, but RGB is the better practical choice because it is faster and lighter.
+  // - Interleaved pruning gives the best VRAM/size tradeoff with acceptable quality cost.
+  // - Anisotropic Gaussians are preferred because they keep the representation compact.
+  // Therefore, the final best tradeoff is:
+  // `anisotropic - rgb - sort - interleaved - no dropout`.
 
 ]
