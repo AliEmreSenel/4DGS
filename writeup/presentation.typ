@@ -1,6 +1,7 @@
 #import "@preview/touying:0.5.5": *
 #import "@preview/clean-math-presentation:0.1.1": *
 #import "@preview/diagraph:0.3.7": *
+#import "@preview/fontawesome:0.6.0": *
 #import "img/diagram.typ": *
 
 #show: clean-math-presentation-theme.with(
@@ -122,6 +123,13 @@
 
 = Performance Evaluation
 
+#let metric(name, icon) = box(width: 100%)[
+  #strong(name)
+  #h(1fr)
+  #fa-icon(icon)
+]
+#let th(body) = text(size: 1.08em, weight: "bold", body)
+
 #slide(title: "Metrics for Comparison")[
   \ \
 
@@ -129,8 +137,9 @@
     columns: (2fr, 1fr),
     gutter: 2em,
     // left section
+
     table(
-      columns: (0.5fr, 2fr),
+      columns: (0.8fr, 2fr),
       stroke: none,
 
       table.vline(x: 1, stroke: black),
@@ -138,35 +147,34 @@
       table.hline(y: 1, stroke: black),
       table.hline(y: 2, stroke: gray),
       table.hline(y: 3, stroke: gray),
-      table.hline(y: 4, stroke: gray),
+      table.hline(y: 4, stroke: black),
       table.hline(y: 5, stroke: gray),
       table.hline(y: 6, stroke: gray),
       table.hline(y: 7, stroke: gray),
       table.hline(y: 8, stroke: gray),
 
-      [*Metric*], [*Short description*],
+      [#th[Metric]], [#th[Short description]],
 
-      [PSNR], [Signal fidelity; higher is better],
-      [D-SSIM], [Structural dissimilarity; lower is better],
-      [LPIPS], [Perceptual difference; lower is better],
-      [TIME], [Total runtime or processing time],
-      [FPS], [Rendering speed in frames per second],
-      [Storage], [Disk space required],
-      [\#Gaussians], [Number of Gaussian primitives used],
-      [Memory], [Peak memory usage over train],
+      [*FPS*], [Render speed, in frames per second #h(1fr) #fa-icon("angle-up")],
+      [*PSNR*], [Signal fidelity #h(1fr) #fa-icon("angle-up")],
+      [*SSIM*], [Structural dissimilarity #h(1fr) #fa-icon("angle-up")],
+      [*LPIPS*], [Perceptual difference #h(1fr) #fa-icon("angle-down")],
+      [*TIME*], [Total runtime or processing time #h(1fr) #fa-icon("angle-down")],
+      [*\#Gauss.*], [Number of Gaussian primitives used #h(1fr) #fa-icon("angle-down")],
+      [*Memory*], [Storage use over train #h(1fr) #fa-icon("angle-down")],
+      [*VRAM*], [Peak vram use over train #h(1fr) #fa-icon("angle-down")],
     ),
 
     // right section
     [
       #block(title: "Testing Datasets", [
-        DNerf
+        *DNerf*
         - Bouncing Balls
-        - Lego
-        - HellWarrior
-        - JumpingJacks
-        - Hook
-        - TRex
+        - Trex
 
+        *Train*
+        - 10k SOTA comparison.
+        - 7k for USPLAT
       ])
     ],
   )
@@ -174,6 +182,114 @@
 
 = Final Result
 
-#slide(title: "Evaluation, Future Work")[
-  .
+\
+
+#slide(title: "Evaluation")[
+  \
+
+  *Visual Quality*
+
+  1. `sort / no_dropout`
+  2. `sort / yes_dropout`
+  3. `sort_free / no_dropout`
+  4. `sort_free / yes_dropout`
+
+  // Interpretation:
+  // - Sorting is the dominant visual-quality factor.
+  // - Dropout hurts quality when sorting is enabled.
+]
+
+#slide(title: "Evaluation")[
+
+  \
+  
+  *Storage Use*
+
+  // Main ablations to explain range:
+  // - `appearance × pruning` for VRAM
+  // - `sorting × appearance` for checkpoint size / memory
+
+  VRAM groups:
+  1. `rgb / interleaved`
+  2. `rgb / no_pruning`, `sh3 / interleaved`
+  3. `sh3 / no_pruning`
+
+  Memory / checkpoint size groups:
+  1. `sort_free / rgb`
+  2. `sort_free / sh3`, `sort / rgb`
+  3. `sort / sh3`
+
+  // Interpretation:
+  // - SH appearance increases storage/memory.
+  // - Pruning is the clearest VRAM reducer.
+  // - Sorting and isotropy increase Gaussian count.
+]
+
+#slide(title: "Evaluation")[
+  \
+
+  *Storage Use*
+
+  1. `sort_free / anisotropic`
+  2. `sort_free / isotropic`
+  3. `sort / anisotropic`
+  4. `sort / isotropic`
+
+  // Interpretation:
+  // - SH appearance increases storage/memory.
+  // - Pruning is the clearest VRAM reducer.
+  // - Sorting and isotropy increase Gaussian count.
+]
+
+#slide(title: "Evaluation")[
+
+  \
+
+  *Render Speed?*
+
+  // Main ablation to explain range:
+  // - `sorting × appearance`
+
+  1. `sort / rgb`
+  2. `sort / sh3`
+  3. `sort_free / rgb`
+  4. `sort_free / sh3`
+
+  // Interpretation:
+  // - Sorting strongly improves FPS.
+  // - RGB is faster than SH3.
+  // - Best speed comes from combining sorting with RGB appearance.
+  // Sortfree spends 95% of CPU MLP inference as opposed to 65%
+]
+
+#slide(title: "Best Model Combination")[
+
+  \
+
+  *Best all-around choice*:
+
+  #table(
+  columns: (1fr, 1fr),
+  stroke: none,
+
+  table.vline(x: 1, stroke: black),
+
+  table.hline(y: 1, stroke: gray),
+  table.hline(y: 2, stroke: gray),
+  table.hline(y: 3, stroke: gray),
+  table.hline(y: 4, stroke: gray),
+
+  [Best Quality], [`sort / no_dropout`],
+  [Highest FPS], [`sort / rgb`],
+  [Lowest VRAM], [`rgb / interleaved`],
+  [Lower checkpoint/memory than SH3], [`rgb`],
+  [Lower Gaussian count than isotropic], [`anisotropic`],
+  )
+
+  // - Sorting should be kept because it improves both quality and speed.
+  // - Dropout should be disabled because it hurts quality.
+  // - RGB is the best practical appearance choice because it is faster and lighter.
+  // - Interleaved pruning gives the best VRAM tradeoff.
+  // - Anisotropic Gaussians keep the representation more compact.
+
 ]
