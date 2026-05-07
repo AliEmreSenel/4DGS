@@ -185,51 +185,78 @@
 \
 
 #slide(title: "Evaluation")[
-  \
+  #grid(
+    columns: (1fr, 0.8fr),
+    gutter: 1em,
+    // left section
+    [
+      \
 
-  *Visual Quality*
+      *Visual Quality*
 
-  1. `sort / no_dropout`
-  2. `sort / yes_dropout`
-  3. `sort_free / no_dropout`
-  4. `sort_free / yes_dropout`
+      1. `sort / no_dropout`
+      2. `sort / yes_dropout`
+      3. `sort_free / no_dropout`
+      4. `sort_free / yes_dropout`
 
-  // Interpretation:
-  // - Sorting is the dominant visual-quality factor.
-  // - Dropout hurts quality when sorting is enabled.
+      // Interpretation:
+      // - Sorting is the dominant visual-quality factor.
+      // From 3D to 4D requires a new hidden layer but makes data sparse
+      // Profiling with Pytorch, 95% of CPU time gets spent on MLP
+      // as opposed to 65% before
+      // - Dropout hurts quality when sorting is enabled.
+    ],
+    [
+      #image("img/trex_quality_ablations.png", width: 100%)
+    ],
+  )
 ]
 
 #slide(title: "Evaluation")[
+  #grid(
+    columns: (1fr, 0.8fr),
+    gutter: 1em,
+    // left section
+    [
+      \
 
-  \
-  
-  *Storage Use*
+      *Storage Use*
 
-  // Main ablations to explain range:
-  // - `appearance × pruning` for VRAM
-  // - `sorting × appearance` for checkpoint size / memory
+      // Main ablations to explain range:
+      // - `appearance × pruning` for VRAM
+      // - `sorting × appearance` for checkpoint size / memory
 
-  VRAM groups:
-  1. `rgb / interleaved`
-  2. `rgb / no_pruning`, `sh3 / interleaved`
-  3. `sh3 / no_pruning`
+      VRAM groups:
+      1. `rgb / interleaved`
+      2. `rgb / no_pruning`, `sh3 / interleaved`
+      3. `sh3 / no_pruning`
 
-  Memory / checkpoint size groups:
-  1. `sort_free / rgb`
-  2. `sort_free / sh3`, `sort / rgb`
-  3. `sort / sh3`
+      Memory / checkpoint size groups:
+      1. `sort_free / rgb`
+      2. `sort_free / sh3`, `sort / rgb`
+      3. `sort / sh3`
 
-  // Interpretation:
-  // - SH appearance increases storage/memory.
-  // - Pruning is the clearest VRAM reducer.
-  // - Sorting and isotropy increase Gaussian count.
+      // Interpretation:
+      // - SH appearance increases storage/memory.
+      // - Pruning is the clearest VRAM reducer.
+      // - Sorting and isotropy increase Gaussian count.
+
+    ],
+    [
+      \
+      
+      #image("img/trex_storage_ablations.png", width: 110%)
+    ],
+  )
 ]
+
 
 #slide(title: "Evaluation")[
   \
 
   *Storage Use*
 
+  Number of Gaussians
   1. `sort_free / anisotropic`
   2. `sort_free / isotropic`
   3. `sort / anisotropic`
@@ -239,6 +266,7 @@
   // - SH appearance increases storage/memory.
   // - Pruning is the clearest VRAM reducer.
   // - Sorting and isotropy increase Gaussian count.
+  // Spikes in training come from instability of Droupout
 ]
 
 #slide(title: "Evaluation")[
@@ -269,21 +297,21 @@
   *Best all-around choice*:
 
   #table(
-  columns: (1fr, 1fr),
-  stroke: none,
+    columns: (1fr, 1fr),
+    stroke: none,
 
-  table.vline(x: 1, stroke: black),
+    table.vline(x: 1, stroke: black),
 
-  table.hline(y: 1, stroke: gray),
-  table.hline(y: 2, stroke: gray),
-  table.hline(y: 3, stroke: gray),
-  table.hline(y: 4, stroke: gray),
+    table.hline(y: 1, stroke: gray),
+    table.hline(y: 2, stroke: gray),
+    table.hline(y: 3, stroke: gray),
+    table.hline(y: 4, stroke: gray),
 
-  [Best Quality], [`sort / no_dropout`],
-  [Highest FPS], [`sort / rgb`],
-  [Lowest VRAM], [`rgb / interleaved`],
-  [Lower checkpoint/memory than SH3], [`rgb`],
-  [Lower Gaussian count than isotropic], [`anisotropic`],
+    [Best Quality], [`sort / no_dropout`],
+    [Highest FPS], [`sort / rgb`],
+    [Lowest VRAM], [`rgb / interleaved`],
+    [Lower checkpoint/memory than SH3], [`rgb`],
+    [Lower Gaussian count than isotropic], [`anisotropic`],
   )
 
   // - Sorting should be kept because it improves both quality and speed.
