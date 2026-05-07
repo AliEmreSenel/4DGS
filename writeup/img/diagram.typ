@@ -244,7 +244,7 @@ digraph gs_evolution {
     #text(size: 14.2pt, weight: "bold")[#body]
   ]
 
-  #block(width: 100%, height: 100%)[
+  #block(width: 100%, height: 90%)[
     #table(
       columns: (5fr,) + (0.91fr,) * 28,
       stroke: grid,

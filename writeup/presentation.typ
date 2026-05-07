@@ -292,10 +292,10 @@
       *Storage Use*
 
       Number of Gaussians
-      1. `sort_free - anisotropic`
-      2. `sort_free - isotropic`
-      3. `sort - anisotropic`
-      4. `sort - isotropic`
+      1. `sort - isotropic`
+      2. `sort - anisotropic`
+      3. `sort_free - isotropic`
+      4. `sort_free - anisotropic`
 
       // Interpretation:
       // - SH appearance increases storage/memory.
