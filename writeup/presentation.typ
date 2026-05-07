@@ -350,7 +350,7 @@
 
   \
 
-  *Best all-around choice*: 
+  *Our results*: 
   
   #table(
     columns: (0.3fr, 1.2fr),
@@ -369,6 +369,11 @@
     [Lowest VRAM], [`rgb - interleaved`],
     [Most compact], [`anisotropic`],
   )
+
+  #block(title: "Uncertainty-Weighting", [
+    GPU-constrained. Ablations are impractical: $quad $30min $->$ 5h / run.
+  ])
+
 
   // - Sorting should be kept because it improves quality and FPS, though it can increase memory/model size.
   // - Dropout should be disabled for quality; it improves speed/memory only by severely degrading quality.
