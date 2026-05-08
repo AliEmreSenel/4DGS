@@ -16,7 +16,7 @@
     affiliations: (
       (id: 1, name: "Bocconi University, Milan, Italy"),
     ),
-    date: datetime(year: 2026, month: 5, day: 3),
+    date: datetime(year: 2026, month: 5, day: 7),
   ),
   config-common(slide-level: 2),
   progress-bar: false,
