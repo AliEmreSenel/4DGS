@@ -64,7 +64,7 @@ DEFAULT_APPEARANCE = {
         "sh_degree": 1,
         "force_sh_3d": True,
         "eval_shfs_4d": False,
-        "mobilegs_force_first_order_sh": True,
+        "mobilegs_force_first_order_sh": False,
     },
     # Native 4DGS appearance: spatial SH plus temporal spherindrical harmonics.
     "sh3": {"sh_degree": 3, "force_sh_3d": False, "eval_shfs_4d": True},
@@ -255,7 +255,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--usplat-options", default="no_usplat")
     parser.add_argument("--dropout-options", default="no_dropout,dropout")
     parser.add_argument("--ess-options", default="no_ess,ess")
-    parser.add_argument("--dropout-prob", type=float, default=0.2, help="Gaussian dropout probability for the enabled dropout ablation option.")
+    parser.add_argument("--dropout-prob", type=float, default=0.1, help="Gaussian dropout probability for the enabled dropout ablation option.")
     parser.add_argument("--dropout-lambda-rdr", type=float, default=1.0, help="RDR consistency-loss weight for the enabled dropout ablation option.")
     parser.add_argument("--include-invalid-combinations", action="store_true", help="Do not filter known incompatible ablation combinations.")
 
@@ -680,7 +680,7 @@ def build_matrix_preset_variants(
         "force_sh_3d": True,
         "eval_shfs_4d": False,
         "sh_degree": 1,
-        "mobilegs_force_first_order_sh": True,
+        "mobilegs_force_first_order_sh": False,
         "mobilegs_opacity_phi_lr": 1e-3,
         "lambda_depth": 0.0,
         "lambda_opa_mask": 0.0,
@@ -923,7 +923,7 @@ def mobilegs_training_overrides(args: argparse.Namespace, sort_free: bool, globa
     # explicitly overrides mobilegs_force_first_order_sh.
     if sort_free and bool(getattr(args, "mobilegs_report", True)) and bool(getattr(args, "mobilegs_force_first_order_sh", True)):
         if "mobilegs_force_first_order_sh" not in global_overrides:
-            out["mobilegs_force_first_order_sh"] = True
+            out["mobilegs_force_first_order_sh"] = False
 
     teacher = str(getattr(args, "mobilegs_teacher_checkpoint", "") or "").strip()
     sh_lambda = float(getattr(args, "mobilegs_sh_distill_lambda", 0.0) or 0.0)
