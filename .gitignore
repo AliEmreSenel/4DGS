@@ -29,3 +29,5 @@ eggs/
 .DS_Store
 /tebe
 /hpc_configs
+*.path
+*.html
