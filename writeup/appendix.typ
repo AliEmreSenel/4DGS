@@ -582,4 +582,36 @@
     [#h5], [#summary-usplat], [#encoding-usplat], [#training-usplat], [#changes-usplat], [#rendering-usplat],
   )
 
+  #let dark = rgb("#2c3e50")
+#let green = rgb("#d4edda")
+#let green-text = rgb("#1a5e30")
+#let section-bg = rgb("#f2f2f2")
+#let border = rgb("#cccccc")
+
+#let H(body) = table.cell(fill: dark)[#text(fill: white, weight: "bold", size: 10pt)[#body]]
+#let G(body) = table.cell(fill: green)[#text(fill: green-text, weight: "bold", size: 10pt)[#body]]
+#let N(body) = table.cell()[#text(size: 10pt)[#body]]
+#let S(body) = table.cell(fill: section-bg, colspan: 6)[#text(weight: "bold", size: 9pt)[ #body]]
+
+#figure(
+  table(
+    columns: (2fr, 1.5fr, 1.5fr, 1.3fr, 1.3fr, 1.5fr),
+    stroke: border,
+    inset: 6pt,
+    align: center + horizon,
+
+    H[Metric], H[Ours (quality)], H[Ours (efficient)], H[4DGS], H[1000FPS], H[1000FPS-PP],
+
+    S[Reconstruction quality],
+    N[PSNR ↑],          G[30.63], N[30.01], N[29.85], N[30.47], N[30.61],
+    N[SSIM ↑],          G[0.983], N[0.981], N[0.9795], N[0.9811], N[0.9821],
+    N[LPIPS ↓],         N[0.023], N[0.023], N[0.019],  N[0.018],  N[0.017],
+
+    S[Efficiency],
+    N[FPS ↑],           G[341],  G[624],  N[202],   N[1361], N[1361],
+    N[Storage (MB) ↓],  G[301],  G[38],   N[792],   N[118],  N[16],
+    N[Gaussians (k) ↓], G[162],  G[157],  N[1 265], N[189],  N[189],
+  ),
+  caption: [Comparison table],
+)
 ]
