@@ -878,6 +878,17 @@
 #let N(body) = table.cell()[#text(size: 10pt)[#body]]
 #let S(body) = table.cell(fill: section-bg, colspan: 6)[#text(weight: "bold", size: 9pt)[ #body]]
 
+#let dark = rgb("#2c3e50")
+#let green = rgb("#d4edda")
+#let green-text = rgb("#1a5e30")
+#let section-bg = rgb("#f2f2f2")
+#let border = rgb("#cccccc")
+
+#let H(body) = table.cell(fill: dark)[#text(fill: white, weight: "bold", size: 10pt)[#body]]
+#let G(body) = table.cell(fill: green)[#text(fill: green-text, weight: "bold", size: 10pt)[#body]]
+#let N(body) = table.cell()[#text(size: 10pt)[#body]]
+#let S(body) = table.cell(fill: section-bg, colspan: 6)[#text(weight: "bold", size: 9pt)[ #body]]
+
 #figure(
   table(
     columns: (2fr, 1.5fr, 1.5fr, 1.3fr, 1.3fr, 1.5fr),
@@ -896,6 +907,9 @@
     N[FPS ↑],           G[341],  G[624],  N[202],   N[1361], N[1361],
     N[Storage (MB) ↓],  G[301],  G[38],   N[792],   N[118],  N[16],
     N[Gaussians (k) ↓], G[162],  G[157],  N[1 265], N[189],  N[189],
+
+    S[Training],
+    N[Train time ↓], G[4.9 min], G[2.0 min], N[~8 min], N[~30 min†], N[~30 min†],
   ),
   caption: [Comparison table],
 )
