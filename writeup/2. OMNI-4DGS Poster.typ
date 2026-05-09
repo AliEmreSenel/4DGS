@@ -15,12 +15,9 @@
 #pop.update-poster-layout(spacing: box-spacing)
 
 // -----------------------------------------------------------------------------
-// Geometry: after the title box, the content is split into:
-// top area = 2/3, bottom area = 1/3.
-// Tune these two values if your title/logo height changes.
+// Total content height (title box excluded) — kept for v(1fr) anchor
 // -----------------------------------------------------------------------------
-#let top-h = 66.8cm
-#let bottom-h = 34.4cm
+#let content-h = 101.2cm
 
 // -----------------------------------------------------------------------------
 // Colors
@@ -157,11 +154,12 @@
 
 
 // -----------------------------------------------------------------------------
-// TOP 2/3: three text columns
+// Full-height single 3-column layout
 // -----------------------------------------------------------------------------
-#box(width: 100%, height: top-h)[
+#box(width: 100%, height: content-h)[
   #grid(
     columns: (1fr, 1fr, 1fr),
+    rows: (content-h,),
     gutter: box-spacing,
 
     // -------------------------------------------------------------------------
@@ -172,7 +170,7 @@
         4D Gaussian Splatting (4DGS) is the dominant approach to dynamic scene reconstruction from video. #h(1fr) _Fast and flexible_ #h(1fr)
       ]
 
-      #pop.column-box(heading: [Motivation #h(1fr) #fa-icon("clipboard-question")])[
+      #pop.column-box(heading: [Research Motivation #h(1fr) #fa-icon("clipboard-question")])[
         Existing methods usually optimize one axis:
         *fidelity*, *FPS*, *memory*, or *train time*.
 
@@ -199,17 +197,91 @@
 
 
         #table(
-          columns: (0.8fr, 0.3fr, 2fr),
+          columns: (0.75fr, 0.3fr, 2fr),
           inset: 10pt,
           align: (x, y) => if x == 1 { center } else { left },
           stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
 
-          [*4D mean*], table.cell(fill: gray.lighten(85%))[$mu_i$], [mean is the gaussian center],
-          [*Covariance*], table.cell(fill: gray.lighten(85%))[$Sigma_i$], [(sphere || ellipsoid) $=:$ *Isotropy*],
-          [*Opacity*], table.cell(fill: gray.lighten(85%))[$o_i$], [adjusts visibility, see-through],
-          [*Color*], table.cell(fill: gray.lighten(85%))[$"SH"_i$], [$"SH"(0) = "RGB" arrow.r.long.squiggly "SH"(3)$],
+          [*4D mean*], [$mu_i$], [mean is the gaussian center],
+          [*Covariance*], [$Sigma_i$], [(sphere || ellipsoid) $=:$ *Isotropy*],
+          [*Opacity*], [$o_i$], [adjusts visibility, see-through],
+          [*Color*], [$"SH"_i$], [$"SH"(0) = "RGB" arrow.r.long.squiggly "SH"(3)$],
         )
       ]
+
+
+      #pop.column-box(heading: [Ablations and Evaluation #h(1fr) #fa-icon("swatchbook")])[
+        #table(
+          columns: (0.5fr, 1.3fr),
+          inset: 4.5pt,
+          stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
+          [*Shape*], [Ellipsoid $dot.c$ Sphere],
+          [*Color*], [RGB $dot.c$ SH(3)],
+          [*Renderer*], [Sorting $dot.c$ Sort-free],
+          [*Pruning*], [Opacity $dot.c$ Spatio-temporal | Densify?],
+          [*Regularize*], [Dropout, Prune-Densify, Uncertainty],
+        )
+        Dynamic D-NeRF Data: *T-Rex*, *Bouncing Balls*
+      ]
+
+      // Result boxes — col 1
+      #box(width: 100%, fill: bottom-blue, radius: 14pt, inset: 10pt)[
+        #pop.column-box(
+          heading: "Bouncing Balls",
+          heading-box-args: result-heading-args,
+          body-box-args: result-body-args,
+        )[
+          #img-slot(
+            [Qualitative reconstruction grid],
+            [native / OMNI / ablations],
+            height: 10.1cm,
+          )
+        ]
+
+        #pop.column-box(
+          heading: "T-Rex",
+          heading-box-args: result-heading-args,
+          body-box-args: result-body-args,
+        )[
+          #img-slot(
+            [Frame and crop grid],
+            [sort-based / sort-free / RGB / SH(3)],
+            height: 10.1cm,
+          )
+        ]
+      ]
+    ],
+
+    // -------------------------------------------------------------------------
+    // Column 2
+    // -------------------------------------------------------------------------
+    [
+      #pop.column-box(heading: [Rendering Equation #h(1fr) #fa-icon("photo-film")])[
+        Condition 4D distributions to time $t$ $=>$ 3D Gauss.\
+        Project to camera plane and integrate colors.
+
+        #strong[Sort #h(1em)]
+        depth-sort and composit front-to-back:
+        $
+          C_p^("sort")(t, v) =
+          sum_i
+          underbrace(T_i (p,t), #[leftover \ light])
+          underbrace(alpha_i (p,t), "opacity")
+          underbrace(c_i (v,t), "color")
+          + underbrace(T_(N+1)c_("bg"), #[background])
+        $
+
+        #strong[Sort-Free #h(1em)] MLP-learned blending weights:
+        $
+          C_p^("sf")(t, v) =
+          sum_i
+          underbrace(beta_i (p,t), #[MLP weight])
+          c_i (v,t)
+          + underbrace(beta_("bg")(p,t)c_("bg"), "background")
+        $
+        *+ input time t* $->$ Works in 4D, but expensive MLP
+      ]
+
 
       #pop.column-box(heading: [Training Objective #h(1fr) #fa-icon("route")])[
         By Ablation: fidelity, background, 4D motion.
@@ -237,61 +309,83 @@
         move softly (locally rigid, global speed):
         $
           cal(L)_"dyn" =
-          underbrace(cal(L)_"rigid", #[neighbouring Gaussians move coherently])
+          underbrace(cal(L)_"rigid", #[near Gaussians \ move similarly])
           +
-          underbrace(cal(L)_"motion", #[suppresses high-velocity artifacts])
+          underbrace(cal(L)_"motion", #[suppress high-velocity \ artifacts])
         $
 
-        *+ dynamic regularization* $->$ better temporal consistency, but can add training cost
+        *+ dynamic regularization* $->$ better temporal consistency, but more expensive
       ]
 
+      // Result boxes — col 2
+      #box(width: 100%, fill: bottom-blue, radius: 14pt, inset: 10pt)[
+        #pop.column-box(
+          heading: "Evaluation Result",
+          heading-box-args: result-heading-args,
+          body-box-args: result-body-args,
+        )[
+          #img-slot(
+            [Metric comparison grid],
+            [PSNR · SSIM · LPIPS · FPS · VRAM],
+            height: 10.1cm,
+          )
+        ]
+
+        #pop.column-box(
+          heading: "MOG: Bitter Lesson",
+          heading-box-args: result-heading-args,
+          body-box-args: result-body-args,
+        )[
+          #img-slot(
+            [Motion and camera analysis],
+            [fixed camera · moving camera · artifacts],
+            height: 10.1cm,
+          )
+        ]
+      ]
     ],
 
     // -------------------------------------------------------------------------
-    // Column 2
+    // Column 3
     // -------------------------------------------------------------------------
     [
-
-      #pop.column-box(heading: [Rendering Equation #h(1fr) #fa-icon("photo-film")])[
-        Condition 4D distributions to time $t$ $=>$ 3D Gauss.\
-        Project to camera plane and integrate colors.
-
-        #strong[Sort #h(1em)]
-        depth-sort and composit front-to-back:
-        $
-          C_p^("sort")(t, v) =
-          sum_i
-          underbrace(T_i (p,t), #[leftover \ light])
-          underbrace(alpha_i (p,t), "opacity")
-          underbrace(c_i (v,t), "color")
-          + underbrace(T_(N+1)c_("bg"), #[background])
-        $
-
-        #strong[Sort-Free #h(1em)] MLP-learned blending weights:
-        $
-          C_p^("sf")(t, v) =
-          sum_i
-          underbrace(beta_i (p,t), #[MLP weight])
-          c_i (v,t)
-          + underbrace(beta_("bg")(p,t)c_("bg"), "background")
-        $
-        *+ input time t* $->$ Works in 4D, but expensive MLP
+      #pop.column-box(heading: [Feature Matrix #h(1fr) #fa-icon("list")])[
+        #set text(size: 0.78em)
+        #contrib-table-large
       ]
 
-      #pop.column-box(heading: [Ablations and Evaluation #h(1fr) #fa-icon("swatchbook")])[
+      #pop.column-box(
+        heading: [Main takeaway #h(1fr) #fa-icon("file-lines")],
+        heading-box-args: final-heading-args,
+      )[
+        #underline()[No configuration dominates all metrics]
+        Reconstruction, FPS, memory, train time $=>$ Fight
+
+        #box(
+          width: 100%,
+          fill: rgb("#cee2f6"),
+          stroke: 1pt + rgb("#425161"),
+          radius: 14pt,
+          inset: 14pt,
+        )[
+          #text(fill: black, weight: "bold", size: 1.0em)[Best Practical:]
+          #linebreak()
+          #text(fill: black, size: 0.8em)[
+            ellipsoid · RGB · sort-based · interleaved pruning · no dropout
+          ]
+        ]
         #table(
-          columns: (0.5fr, 1.3fr),
-          inset: 4.5pt,
+          columns: (1fr, auto),
+          inset: (x: 1.5pt, y: 2.5pt),
+          column-gutter: 2pt,
+          align: left,
           stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
-          [*Shape*], [Ellipsoid $dot.c$ Sphere],
-          [*Color*], [RGB $dot.c$ SH(3)],
-          [*Renderer*], [Sorting $dot.c$ Sort-free],
-          [*Pruning*], [Opacity $dot.c$ Spatio-temporal | Densify?],
-          [*Regularize*], [Dropout, Prune-Densify, Uncertainty],
-        )
-        Dynamic D-NeRF Data: *T-Rex*, *Bouncing Balls*
-      ]
 
+          [*Quality*], [ellipsoid $dot.c$ SH(3) $dot.c$ sort-based rendering],
+          [*Smallest*], [RGB $dot.c$ interleaved pruning],
+          [*Fastest*], [see renderer: sort-free may not be fastest],
+        )
+      ]
 
       #pop.column-box(
         heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
@@ -318,163 +412,110 @@
               accent: violet,
             )
           ],
-
-          [
-            #callout(
-              [Sort-free + RGB],
-              [Pure color does not carry information to differentiate enough depth for Gaussians.],
-              fill: rgb("#efffef"),
-              accent: green,
-            )
-          ],
         )
       ]
 
-    ],
 
-    // -------------------------------------------------------------------------
-    // Column 3
-    // -------------------------------------------------------------------------
-    [
-      #pop.column-box(heading: [Feature Matrix #h(1fr) #fa-icon("list")])[
-        #set text(size: 0.78em)
-        #contrib-table-large
-      ]
-
-      #pop.column-box(
-        heading: [Main takeaway #h(1fr) #fa-icon("file-lines")],
-        heading-box-args: final-heading-args,
-      )[
-        #underline()[No configuration dominates all metrics]
-        Reconstruction, FPS, memory, train time $=>$ Fight
-
-        #box(
-          width: 100%,
-          fill: rgb("#cee2f6"),
-          radius: 14pt,
-          inset: 14pt,
-        )[
-          #text(fill: black, weight: "bold", size: 1.0em)[Practical Best]
-          #linebreak()
-          #text(fill: black, size: 0.8em)[
-            ellipsoid · RGB · sort-based · interleaved pruning · no dropout
-          ]
-        ]
-        Quality? ellipsoid, SH(3), and sort-based rendering
-
-        Smallest? RGB and interleaved pruning keeps checkpoints small
-
-        Fastest? validate the renderer; sort-free is not always faster in 4D
-      ]
-    ],
-  )
-]
-
-
-
-// -----------------------------------------------------------------------------
-// BOTTOM 1/3: light blue result area
-// -----------------------------------------------------------------------------
-#box(
-  width: 100%,
-  height: bottom-h,
-  fill: bottom-blue,
-  radius: 20pt,
-  inset: 0.65cm,
-)[
-  #grid(
-    columns: (2fr, 1fr),
-    gutter: box-spacing,
-
-    // -------------------------------------------------------------------------
-    // First two columns: 2 x 2 image/result blocks
-    // -------------------------------------------------------------------------
-    [
-      #grid(
-        columns: (1fr, 1fr),
-        rows: (15.7cm, 15.7cm),
-        gutter: 0.78cm,
-
-        [
-          #pop.column-box(
-            heading: "Bouncing Balls",
-            heading-box-args: result-heading-args,
-            body-box-args: result-body-args,
-          )[
-            #img-slot(
-              [Qualitative reconstruction grid],
-              [native / OMNI / ablations],
-              height: 10.1cm,
-            )
-          ]
-        ],
-
-        [
-          #pop.column-box(
-            heading: "Evaluation Result",
-            heading-box-args: result-heading-args,
-            body-box-args: result-body-args,
-          )[
-            #img-slot(
-              [Metric comparison grid],
-              [PSNR · SSIM · LPIPS · FPS · VRAM],
-              height: 10.1cm,
-            )
-          ]
-        ],
-
-        [
-          #pop.column-box(
-            heading: "T-Rex",
-            heading-box-args: result-heading-args,
-            body-box-args: result-body-args,
-          )[
-            #img-slot(
-              [Frame and crop grid],
-              [sort-based / sort-free / RGB / SH(3)],
-              height: 10.1cm,
-            )
-          ]
-        ],
-
-        [
-          #pop.column-box(
-            heading: "MOG: Bitter Lesson",
-            heading-box-args: result-heading-args,
-            body-box-args: result-body-args,
-          )[
-            #img-slot(
-              [Motion and camera analysis],
-              [fixed camera · moving camera · artifacts],
-              height: 10.1cm,
-            )
-          ]
-        ],
-      )
-    ],
-
-    // -------------------------------------------------------------------------
-    // Last column: deployment guide + bibliography
-    // -------------------------------------------------------------------------
-    [
+      // Push bibliography to the bottom of the column
+      #v(1fr)
 
       #pop.column-box(
         heading: [Bibliography #h(1fr) #fa-icon("book-bookmark")],
         heading-box-args: final-heading-args,
-        body-box-args: final-body-args,
       )[
-
         #ref-line([Yang et al.], [Native 4D Gaussian Splatting backbone.])
         #ref-line([Luo et al.], [Instant4D isotropic variants and spatio-temporal pruning.])
         #ref-line([Du et al.], [MobileGS sort-free rendering and compression ideas.])
         #ref-line([Hou et al.], [Sort-Free Gaussian Splatting.])
         #ref-line([Yuan et al.], [4DGS at 1000 FPS visibility masks and pruning schedules.])
         #ref-line([Guo et al.], [Uncertainty-aware training for dynamic Gaussian splatting.])
-
-        // If you prefer full BibTeX output and have bibliography.bib in the folder,
-        // replace the manual list above with:
-        // #bibliography("bibliography.bib")
       ]
     ],
   )
+
+
+  // -----------------------------------------------------------------------------
+  // Bottom bar
+  // -------------------------------------------------------------------------
+  #let bottom-box(body, text-relative-width: 70%, logo: none, ..args) = context {
+    let content = [
+      #set align(top + left)
+
+      #if logo == none {
+        box(width: 100%, body)
+      } else {
+        stack(
+          dir: ltr,
+          box(width: text-relative-width, body),
+          align(right + horizon, logo),
+        )
+      }
+    ]
+
+    place(
+      bottom + left,
+      dx: 0pt,
+      dy: 2.5em,
+    )[
+      #box(width: page.width)[
+        #content
+      ]
+    ]
+  }
+
+  #let footer-bg = rgb("#171044")
+  #let footer-muted = rgb("#aeb8d2")
+  #let footer-accent = rgb("#ffffff")
+
+  #bottom-box(
+    heading-box-args: (
+      width: 100%,
+      inset: 0pt,
+      outset: 0pt,
+      fill: none,
+      stroke: none,
+      radius: 0pt,
+    ),
+  )[
+    #rect(
+      width: 100%,
+      fill: footer-bg,
+      inset: (left: 0.9em, right: 0.9em, top: 0.35em, bottom: 0.4em),
+    )[
+      #set text(fill: footer-accent, size: 0.72em)
+
+      #grid(
+        columns: (1.05fr, 1.45fr, 1.05fr),
+        gutter: 1em,
+        align: horizon,
+
+        [
+          #align(left)[
+            #text(weight: "semibold")[2026-05-12]
+            #h(0.55em)
+            #text(fill: footer-muted)[Computer Vision]
+          ]
+        ],
+
+        [
+          #align(center)[
+            #fa-icon("github")
+            #h(0.45em)
+            #text(size: 1em, weight: "medium")[
+              github.com/AliEmreSenel/4D-Gaussian-Splattering-Research
+            ]
+          ]
+        ],
+
+        [
+          #align(right)[
+            #text(weight: "bold")[Università Bocconi]
+            #h(0.35em)
+            #text(fill: footer-muted)[Milano]
+            #h(1em)
+          ]
+        ],
+      )
+    ]
+  ]
 ]

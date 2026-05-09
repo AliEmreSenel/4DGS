@@ -285,7 +285,7 @@
 
 #let contrib-table-large = [
   #let grid = 0.42pt + luma(220)
-  #let group = 1.05pt + luma(135)
+  #let group = 1.05pt + luma(8.24%)
   #let emph = 1.9pt + luma(45)
 
   #let neutral = rgb("#9fa6a0")
