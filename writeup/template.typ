@@ -61,8 +61,8 @@
 )
 
 #let color = (
-  ref: rgb(100%, 0%, 0%),      // Red.
-  link: rgb(100%, 0%, 100%),   // Magenta.
+  ref: rgb(100%, 0%, 0%), // Red.
+  link: rgb(100%, 0%, 100%), // Magenta.
 )
 
 #let lineno = counter("lineno")
@@ -202,9 +202,7 @@
   author.name
   if "affl" in author {
     [\ ]
-    author.affl
-      .map(it => format-affiliation(affls.at(it)))
-      .join([\ ])
+    author.affl.map(it => format-affiliation(affls.at(it))).join([\ ])
   }
   if "email" in author {
     show raw: set text(
@@ -278,7 +276,8 @@
 
   set document(
     title: title,
-  author: authors.map(it => str(it.name)).join(", ", last: " and "),    keywords: keywords,
+    author: authors.map(it => str(it.name)).join(", ", last: " and "),
+    keywords: keywords,
     date: date,
   )
 

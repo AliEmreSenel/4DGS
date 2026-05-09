@@ -1,3 +1,288 @@
+#let contrib-table = [
+  #let grid = 0.42pt + luma(220)
+  #let group = 1.05pt + luma(135)
+  #let emph = 1.9pt + luma(45)
+
+  #let neutral = rgb("#9fa6a0")
+  #let green = rgb("#42a464")
+  #let blue = rgb("#438fd5")
+  #let red = rgb("#d76363")
+
+  #let head-blue = rgb("#eaf5ff")
+  #let head-orange = rgb("#fff0e3")
+  #let head-gray = luma(242)
+  #let omni-row = rgb("#eef5ef")
+
+  #let Mark(fill) = table.cell(
+    align: center + horizon,
+    inset: (x: 0.6pt, y: 3.2pt),
+  )[
+    #rect(
+      width: 7.2pt,
+      height: 7.2pt,
+      radius: 1.8pt,
+      fill: fill,
+      stroke: none,
+    )
+  ]
+
+  #let X = Mark(neutral)
+  #let XG = Mark(green)
+  #let XB = Mark(blue)
+  #let XR = Mark(red)
+  #let E = table.cell(align: center + horizon)[]
+
+  #let Pill(fill, body) = rect(
+    fill: fill,
+    stroke: none,
+    radius: 3pt,
+    inset: (x: 5.5pt, y: 3.8pt),
+  )[
+    #text(fill: white, size: 9pt, weight: "bold")[#body]
+  ]
+
+  #let KG(body) = Pill(green, body)
+  #let KB(body) = Pill(blue, body)
+  #let KR(body) = Pill(red, body)
+
+  #let C(body, bg: none) = table.cell(
+    align: center + horizon,
+    fill: bg,
+    inset: (x: 2pt, y: 3.6pt),
+  )[
+    #text(size: 10pt)[#body]
+  ]
+
+  #let L(body, bg: none) = table.cell(
+    align: left + horizon,
+    fill: bg,
+    inset: (x: 2.5pt, y: 3.6pt),
+  )[
+    #text(size: 10pt)[#body]
+  ]
+
+  #let VH(body, bg: head-gray) = table.cell(
+    align: center + horizon,
+    fill: bg,
+    inset: (x: 0.5pt, y: 4.8pt),
+  )[
+    #rotate(-90deg, reflow: true)[
+      #text(size: 10.5pt)[#body]
+    ]
+  ]
+
+  #let SEC(rows, body) = table.cell(
+    rowspan: rows,
+    align: center + horizon,
+    fill: head-gray,
+    inset: (x: 1pt, y: 4pt),
+  )[
+    #rotate(-90deg, reflow: true)[
+      #text(size: 12pt, weight: "bold")[#body]
+    ]
+  ]
+
+  #let MGL(rows, body, bg: none) = table.cell(
+    rowspan: rows,
+    align: center + horizon,
+    fill: bg,
+    inset: (x: 2pt, y: 3.6pt),
+  )[
+    #text(size: 10pt, weight: "bold")[#body]
+  ]
+
+  #let MGO(body, bg: none) = table.cell(
+    align: left + horizon,
+    fill: bg,
+    inset: (x: 2.5pt, y: 3.6pt),
+  )[
+    #text(size: 10pt)[#body]
+  ]
+
+  #block(width: 100%)[
+    #set text(size: 10pt)
+
+    #table(
+      columns: (0.62fr, 2.5fr, 3.45fr) + (0.72fr,) * 6,
+      stroke: grid,
+      align: center + horizon,
+      inset: (x: 1.2pt, y: 3.2pt),
+      fill: (x, y) => if x == 8 and y > 0 {
+        omni-row
+      } else if y == 0 and x >= 3 {
+        head-gray
+      } else if x == 0 and y > 0 {
+        head-gray
+      } else {
+        none
+      },
+
+      table.cell(
+        colspan: 3,
+        inset: (x: 3.5pt, y: 3.2pt),
+        stroke: none,
+        align: left + top,
+      )[
+        #stack(dir: ttb, spacing: 0pt)[
+          Implementations in each architecture, and our codebase:
+          #KG[existing] #KR[heavily modified] #KB[re-implemented]
+        ]
+      ],
+
+      VH([*4DGS-Nat.*]),
+      VH([*1000FPS*]),
+      VH([*Instant4D*]),
+      VH([*MobileGS*]),
+      VH([*Usplat4D*]),
+      VH([*Omni-4DGS*], bg: omni-row),
+
+      SEC(9, [*Gaussians*]),
+
+      MGL(2, [Gaussians], bg: head-blue),
+      MGO([4D], bg: head-blue),
+      X, X, X, E, X, XG,
+
+      MGO([3D], bg: head-blue),
+      E, E, E, X, E, E,
+
+      MGL(2, [Rotation], bg: head-orange),
+      MGO([Quaternion], bg: head-orange),
+      X, X, X, E, X, XG,
+
+      MGO([Rotation Matrix], bg: head-orange),
+      E, E, E, X, E, E,
+
+      MGL(2, [Shape], bg: head-blue),
+      MGO([Isotropic], bg: head-blue),
+      E, E, X, E, E, XG,
+
+      MGO([Anisotropic], bg: head-blue),
+      X, X, E, X, X, XR,
+
+      MGL(3, [Color \ Basis], bg: head-orange),
+      MGO([RGB], bg: head-orange),
+      E, E, X, E, E, XG,
+
+      MGO([SH(1)], bg: head-orange),
+      E, E, E, X, E, XG,
+
+      MGO([SH(3)], bg: head-orange),
+      X, X, E, X, X, XG,
+
+      SEC(2, [*Init*]),
+
+      MGL(2, [Point \ Cloud], bg: head-blue),
+      MGO([Random], bg: head-blue),
+      X, X, E, E, E, XG,
+
+      MGO([MegaSAM], bg: head-blue),
+      E, E, X, E, E, E,
+
+      SEC(3, [*Compress*]),
+
+      C([SH], bg: head-orange),
+      L([MLP Distillation], bg: head-orange),
+      E, E, E, X, E, XR,
+
+      table.cell(rowspan: 2, align: center + horizon, fill: head-orange)[Codebook],
+      L([K-means ], bg: head-orange),
+      E, E, E, X, E, XR,
+
+      L([Spatial GPCC], bg: head-orange),
+      E, E, E, X, E, XR,
+
+      SEC(3, [*Train*]),
+
+      C([Weighting], bg: head-blue),
+      L([Uncertainty], bg: head-blue),
+      E, E, E, E, X, XR,
+
+      C([Sampling], bg: head-orange),
+      L([Batch in Time], bg: head-orange),
+      X, X, E, E, E, XG,
+
+      C([Grid \ Reliance], bg: head-blue),
+      L([Voxelization], bg: head-blue),
+      E, E, X, X, X, XR,
+
+      SEC(9, [*Prune*]),
+
+      table.cell(rowspan: 2, align: center + horizon, fill: head-orange)[Criterion],
+      L([Contribution], bg: head-orange),
+      X, E, E, X, E, XG,
+
+      L([Gradient Loss], bg: head-orange),
+      X, E, E, E, E, XG,
+
+      table.cell(rowspan: 2, align: center + horizon, fill: head-blue)[Quantile Filter],
+      L([Spatio-Temporal], bg: head-blue),
+      E, E, X, X, E, XB,
+
+      L([Opacity], bg: head-blue),
+      E, E, X, E, E, XG,
+
+      table.cell(rowspan: 2, align: center + horizon, fill: head-orange)[Strategy],
+      L([One-shot], bg: head-orange),
+      E, X, X, E, X, XG,
+
+      L([Scheduled], bg: head-orange),
+      E, E, E, E, E, XB,
+
+      table.cell(rowspan: 2, align: center + horizon, fill: head-blue)[Increase],
+      L([Densify], bg: head-blue),
+      X, E, E, E, E, XG,
+
+      L([Edge-guided], bg: head-blue),
+      E, E, E, E, E, XB,
+
+      C([Dropout], bg: head-orange),
+      L([Dropout], bg: head-orange),
+      E, E, E, E, E, XB,
+
+      SEC(3, [*Render*]),
+
+      C([Loading], bg: head-blue),
+      L([Visibility Mask], bg: head-blue),
+      E, X, E, E, E, XB,
+
+      MGL(2, [Raster], bg: head-orange),
+      MGO([Sort-based], bg: head-orange),
+      X, X, X, E, X, XG,
+
+      MGO([Sort-free], bg: head-orange),
+      E, E, E, X, E, XR,
+
+      // Header separation.
+      table.hline(y: 1, start: 0, end: 9, stroke: group),
+
+      // Main section boundaries.
+      table.hline(y: 10, start: 0, end: 9, stroke: group),
+      table.hline(y: 12, start: 0, end: 9, stroke: group),
+      table.hline(y: 15, start: 0, end: 9, stroke: group),
+      table.hline(y: 18, start: 0, end: 9, stroke: group),
+      table.hline(y: 27, start: 0, end: 9, stroke: group),
+      table.hline(y: 30, start: 0, end: 9, stroke: group),
+
+      table.vline(x: 1, start: 1, end: 30, stroke: group),
+      table.vline(x: 3, start: 0, end: 30, stroke: group),
+      table.vline(x: 9, start: 0, end: 30, stroke: group),
+
+      // Subgroup boundaries.
+      table.hline(y: 3, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+      table.hline(y: 5, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+      table.hline(y: 7, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+      table.hline(y: 26, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+      table.hline(y: 28, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+
+      // Strong focus around proposed method.
+      table.vline(x: 8, start: 0, end: 30, stroke: emph),
+      table.vline(x: 9, start: 0, end: 30, stroke: emph),
+      table.hline(y: 0, start: 8, end: 9, stroke: emph),
+      table.hline(y: 30, start: 8, end: 9, stroke: emph),
+    )
+  ]
+]
+
 #let appendix = [
 
   #colbreak()
