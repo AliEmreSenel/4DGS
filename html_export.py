@@ -121,7 +121,7 @@ def vid(v, outdir, metrics):
 
 
 def trex_section(vs, outdir, metrics):
-    vs = [v for v in vs if v["scene"] == "trex" and v["usplat"] == "no_usplat" and v["steps"] == 10000]
+    vs = [v for v in vs if v["scene"] == "trex" and v["usplat"] == "no_usplat" and v["steps"] == 20000]
     rows = sorted({(v["gaussian"], v["color"], v["ess"]) for v in vs})
     cols = sorted({(v["sorting"], v["pruning"], v["dropout"]) for v in vs})
     # prefer video over image when both exist for the same config
