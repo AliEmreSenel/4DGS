@@ -173,6 +173,23 @@ def render(
     if pc.gaussian_dim != 4:
         raise ValueError("Only 4D Gaussian models are supported by this renderer.")
 
+    render_device = pc.get_xyz.device
+    render_dtype = pc.get_xyz.dtype
+
+    def _camera_tensor(name):
+        tensor = getattr(viewpoint_camera, name)
+        if not isinstance(tensor, torch.Tensor):
+            return tensor
+        return tensor.to(device=render_device, dtype=render_dtype, non_blocking=True)
+
+    # Camera objects can be kept on CPU by dataset/diagnostic code.  The CUDA
+    # rasterizers and SH/color precomputation below require camera matrices and
+    # centers to live on the same device as the Gaussians.  Use local converted
+    # views instead of mutating the dataset camera or moving its image tensor.
+    viewmatrix = _camera_tensor("world_view_transform")
+    projmatrix = _camera_tensor("full_proj_transform")
+    camera_center = _camera_tensor("camera_center")
+
     # Training needs a dense leaf tensor so PyTorch can expose screen-space
     # mean gradients.  In render/eval no-grad paths the C++ extensions ignore
     # this input, so avoid allocating a P x 3 tensor and grad metadata per frame.
@@ -220,10 +237,10 @@ def render(
             tanfovy=tanfovy,
             bg=bg_color,
             scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.world_view_transform,
-            projmatrix=viewpoint_camera.full_proj_transform,
+            viewmatrix=viewmatrix,
+            projmatrix=projmatrix,
             sh_degree=pc.active_sh_degree,
-            campos=viewpoint_camera.camera_center,
+            campos=camera_center,
             prefiltered=False,
             debug=pipe.debug,
         )
@@ -234,13 +251,13 @@ def render(
             image_width=int(viewpoint_camera.image_width),
             tanfovx=tanfovx,
             tanfovy=tanfovy,
-            bg=bg_color if not pipe.env_map_res else torch.zeros(3, device="cuda"),
+            bg=bg_color if not pipe.env_map_res else torch.zeros(3, device=render_device, dtype=render_dtype),
             scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.world_view_transform,
-            projmatrix=viewpoint_camera.full_proj_transform,
+            viewmatrix=viewmatrix,
+            projmatrix=projmatrix,
             sh_degree=pc.active_sh_degree,
             sh_degree_t=pc.active_sh_degree_t,
-            campos=viewpoint_camera.camera_center,
+            campos=camera_center,
             timestamp=viewpoint_camera.timestamp,
             time_duration=float(pc.time_duration[1]) - float(pc.time_duration[0]),
             rot_4d=pc.rot_4d,
@@ -318,7 +335,7 @@ def render(
                 sh_means = means3D + delta_mean
             else:
                 sh_means = means3D
-            dir_pp = (sh_means - viewpoint_camera.camera_center.expand_as(sh_means)).detach()
+            dir_pp = (sh_means - camera_center.expand_as(sh_means)).detach()
             dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
             if pc.force_sh_3d:
                 sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
@@ -338,7 +355,7 @@ def render(
         # precompute 4D SHFS colors here because that rasterizer intentionally
         # has no timestamp/SCH interface.
         shs_view = pc.get_features.transpose(1, 2).view(-1, 3, pc.get_max_sh_channels)
-        dir_pp = (means3D - viewpoint_camera.camera_center.expand_as(means3D)).detach()
+        dir_pp = (means3D - camera_center.expand_as(means3D)).detach()
         dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
         dir_t = (pc.get_t - viewpoint_camera.timestamp).detach()
         sh2rgb = eval_shfs_4d(
@@ -453,7 +470,7 @@ def render(
         gaussian_scores = means3D.new_empty((0,)) if (return_gaussian_scores or return_gaussian_scores_sq) else None
         gaussian_score_max_error = means3D.new_empty((0,)) if gaussian_score_error_map is not None else None
     elif use_mobilegs_sort_free:
-        cam_center = viewpoint_camera.camera_center.expand_as(means3D)
+        cam_center = camera_center.expand_as(means3D)
         dir_pp = (means3D - cam_center).detach()
         dir_pp_normalized = dir_pp / (dir_pp.norm(dim=1, keepdim=True) + 1e-8)
         shs_mlp = pc.get_features

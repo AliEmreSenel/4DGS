@@ -91,8 +91,17 @@ def compute_uncertainty_single_frame(
     chunk_size: int = 4096,
 ) -> Tuple[Tensor, Tensor]:
     device = means_t.device
+    dtype = means_t.dtype
     W, H = img_wh
     G = means_t.shape[0]
+    opacities_raw = opacities_raw.to(device=device, dtype=dtype, non_blocking=True)
+    w2c = w2c.to(device=device, dtype=dtype, non_blocking=True)
+    K = K.to(device=device, dtype=dtype, non_blocking=True)
+    radii = radii.to(device=device, non_blocking=True)
+    if blend_weight_sum_sq is not None:
+        blend_weight_sum_sq = blend_weight_sum_sq.to(device=device, dtype=dtype, non_blocking=True)
+    if contrib_max_error is not None:
+        contrib_max_error = contrib_max_error.to(device=device, dtype=dtype, non_blocking=True)
     alpha = opacities_raw.sigmoid().flatten()
 
     R = w2c[:3, :3]
