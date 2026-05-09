@@ -268,6 +268,63 @@ class Intrinsics:
         return self.cx > 0 and self.cy > 0 and self.fl_x > 0 and self.fl_y > 0
 
 
+def copy_intrinsics(intr: Intrinsics) -> Intrinsics:
+    return Intrinsics(
+        width=int(intr.width),
+        height=int(intr.height),
+        fovx=float(intr.fovx),
+        fovy=float(intr.fovy),
+        cx=float(intr.cx),
+        cy=float(intr.cy),
+        fl_x=float(intr.fl_x),
+        fl_y=float(intr.fl_y),
+    )
+
+
+def resized_intrinsics(base_intr: Intrinsics, width: int, height: int) -> Intrinsics:
+    """Return camera intrinsics for a viewport without distorting aspect ratio.
+
+    This function must be called with the original/base intrinsics, not with the
+    currently resized intrinsics.  Resizing focal-length cameras by independent
+    x/y scale factors keeps both old FOVs, which makes the projection disagree
+    with a new window aspect ratio.  Instead, keep the base vertical FOV and
+    derive the horizontal FOV from the requested viewport.  For center-shift
+    cameras, preserve the optical-axis angular offset and use a square-pixel
+    focal length so circles stay circular after arbitrary window resizes.
+    """
+    width = max(16, int(width))
+    height = max(16, int(height))
+    fovy = float(base_intr.fovy)
+
+    if base_intr.has_center_shift:
+        base_fl_x = max(1e-6, float(base_intr.fl_x))
+        base_fl_y = max(1e-6, float(base_intr.fl_y))
+        pixel_aspect = base_fl_x / base_fl_y
+        if not math.isfinite(pixel_aspect) or pixel_aspect <= 0.0:
+            pixel_aspect = 1.0
+
+        fl_y = height / max(1e-6, 2.0 * math.tan(fovy * 0.5))
+        fl_x = fl_y * pixel_aspect
+
+        # Preserve the principal point as an angular offset from image center.
+        offset_x = (float(base_intr.cx) - float(base_intr.width) * 0.5) / base_fl_x
+        offset_y = (float(base_intr.cy) - float(base_intr.height) * 0.5) / base_fl_y
+        cx = width * 0.5 + offset_x * fl_x
+        cy = height * 0.5 + offset_y * fl_y
+
+        fovx = 2.0 * math.atan(width / max(1e-6, 2.0 * fl_x))
+        fovy = 2.0 * math.atan(height / max(1e-6, 2.0 * fl_y))
+        return Intrinsics(width=width, height=height, fovx=fovx, fovy=fovy, cx=cx, cy=cy, fl_x=fl_x, fl_y=fl_y)
+
+    fovx = 2.0 * math.atan(math.tan(fovy * 0.5) * (width / max(1.0, height)))
+    return Intrinsics(width=width, height=height, fovx=fovx, fovy=fovy)
+
+
+def is_cuda_oom(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda error: out of memory" in text
+
+
 def camera_meta_from_dict(meta: dict) -> SimpleNamespace:
     resolution = meta.get("resolution") or [int(meta["width"]), int(meta["height"])]
     return SimpleNamespace(
@@ -375,6 +432,33 @@ class LiveCamera:
         self.world_view_transform = torch.eye(4, device=device, dtype=dtype)
         self.full_proj_transform = torch.eye(4, device=device, dtype=dtype)
         self.camera_center = torch.zeros(3, device=device, dtype=dtype)
+
+    def set_intrinsics(self, intr: Intrinsics) -> None:
+        from utils.graphics_utils import getProjectionMatrix, getProjectionMatrixCenterShift
+
+        self.image_width = int(intr.width)
+        self.image_height = int(intr.height)
+        self.resolution = (self.image_width, self.image_height)
+        self.FoVx = float(intr.fovx)
+        self.FoVy = float(intr.fovy)
+        self.cx = float(intr.cx)
+        self.cy = float(intr.cy)
+        self.fl_x = float(intr.fl_x)
+        self.fl_y = float(intr.fl_y)
+        if intr.has_center_shift:
+            proj = getProjectionMatrixCenterShift(
+                self.znear,
+                self.zfar,
+                self.cx,
+                self.cy,
+                self.fl_x,
+                self.fl_y,
+                self.image_width,
+                self.image_height,
+            )
+        else:
+            proj = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy)
+        self.projection_matrix = proj.transpose(0, 1).to(device=self.data_device, dtype=self._dtype)
 
     def update(self, eye: np.ndarray, forward: np.ndarray, timestamp: float) -> None:
         from utils.graphics_utils import getWorld2View2
@@ -569,7 +653,8 @@ def print_controls() -> None:
         "  F1/F2        snap previous/next training camera\n"
         "  F3/F4        snap previous/next test camera\n"
         "  I            toggle info overlay: FPS, VRAM, gaussian count, pose, time\n"
-        "  F            toggle fullscreen\n"
+        "  F            toggle fullscreen and render at fullscreen size if VRAM allows\n"
+        "  Resize       render at the current window size if VRAM allows\n"
         "  Home         reset pose to the checkpoint camera\n"
         "  Tab          toggle mouse capture\n"
         "  H            print controls\n"
@@ -595,13 +680,33 @@ def display_flags(pygame, fullscreen: bool) -> int:
     flags = pygame.HWSURFACE | pygame.DOUBLEBUF
     if fullscreen:
         flags |= pygame.FULLSCREEN
-        # SDL scales the fixed render resolution to the desktop-sized display.
-        flags |= getattr(pygame, "SCALED", 0)
+    else:
+        flags |= getattr(pygame, "RESIZABLE", 0)
     return flags
 
 
 def make_display(pygame, size: tuple[int, int], fullscreen: bool, vsync: bool):
-    return pygame.display.set_mode(size, display_flags(pygame, fullscreen), vsync=1 if vsync else 0)
+    # In fullscreen, (0, 0) requests the desktop resolution from SDL.  We then
+    # read screen.get_size() and resize the Gaussian render target to match.
+    mode_size = (0, 0) if fullscreen else (max(16, int(size[0])), max(16, int(size[1])))
+    return pygame.display.set_mode(mode_size, display_flags(pygame, fullscreen), vsync=1 if vsync else 0)
+
+
+def blit_surface_preserve_aspect(pygame, screen, surface, display_size: tuple[int, int]) -> None:
+    """Blit a fallback render without stretching it to the wrong aspect ratio."""
+    sw, sh = surface.get_size()
+    dw, dh = max(1, int(display_size[0])), max(1, int(display_size[1]))
+    if (sw, sh) == (dw, dh):
+        screen.blit(surface, (0, 0))
+        return
+
+    scale = min(dw / max(1, sw), dh / max(1, sh))
+    target_w = max(1, int(round(sw * scale)))
+    target_h = max(1, int(round(sh * scale)))
+    x = (dw - target_w) // 2
+    y = (dh - target_h) // 2
+    screen.fill((0, 0, 0))
+    screen.blit(pygame.transform.smoothscale(surface, (target_w, target_h)), (x, y))
 
 
 def recenter_mouse_if_needed(pygame, app) -> None:
@@ -631,9 +736,78 @@ def refresh_mouse_capture(pygame, app) -> None:
         recenter_mouse_if_needed(pygame, app)
 
 
-def toggle_fullscreen(pygame, app) -> None:
+def set_render_target_size(
+    pygame,
+    state: ViewerState,
+    live_cam: LiveCamera,
+    app,
+    size: tuple[int, int],
+    reason: str = "resize",
+) -> None:
+    width = max(16, int(size[0]))
+    height = max(16, int(size[1]))
+    new_size = (width, height)
+    if tuple(app.get("render_size", (0, 0))) == new_size:
+        return
+
+    base_intrinsics = app.get("base_intrinsics", state.intrinsics)
+    state.intrinsics = resized_intrinsics(base_intrinsics, width, height)
+    live_cam.set_intrinsics(state.intrinsics)
+    app["render_size"] = new_size
+    app["surface"] = pygame.Surface(new_size)
+    app["resize_status"] = f"rendering {width}x{height} after {reason}"
+    print(f"Render target resized to {width}x{height} ({reason}).")
+
+
+def resize_window_and_render_target(
+    pygame,
+    state: ViewerState,
+    live_cam: LiveCamera,
+    app,
+    size: tuple[int, int],
+    reason: str = "resize",
+) -> None:
+    width = max(16, int(size[0]))
+    height = max(16, int(size[1]))
+    if not bool(app.get("fullscreen", False)):
+        app["screen"] = make_display(pygame, (width, height), False, app["vsync"])
+        app["windowed_size"] = app["screen"].get_size()
+    app["display_size"] = app["screen"].get_size()
+    set_render_target_size(pygame, state, live_cam, app, app["display_size"], reason)
+    refresh_mouse_capture(pygame, app)
+
+
+def fallback_to_last_good_render_size(pygame, state: ViewerState, live_cam: LiveCamera, app, exc: BaseException) -> None:
+    last_good_intr = app.get("last_good_intrinsics")
+    if last_good_intr is None:
+        raise exc
+    state.intrinsics = copy_intrinsics(last_good_intr)
+    live_cam.set_intrinsics(state.intrinsics)
+    app["render_size"] = (state.intrinsics.width, state.intrinsics.height)
+    app["surface"] = pygame.Surface(app["render_size"])
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    message = (
+        "Could not render at the window/fullscreen size because CUDA ran out of VRAM. "
+        f"Falling back to {state.intrinsics.width}x{state.intrinsics.height} and scaling it to the display."
+    )
+    app["resize_status"] = message
+    print(message)
+
+
+def toggle_fullscreen(pygame, state: ViewerState, live_cam: LiveCamera, app) -> None:
     app["fullscreen"] = not bool(app.get("fullscreen", False))
-    app["screen"] = make_display(pygame, app["display_size"], app["fullscreen"], app["vsync"])
+    if app["fullscreen"]:
+        if not app.get("windowed_size"):
+            app["windowed_size"] = app.get("display_size", app.get("render_size", (1280, 720)))
+        app["screen"] = make_display(pygame, (0, 0), True, app["vsync"])
+    else:
+        app["screen"] = make_display(pygame, app.get("windowed_size", app.get("render_size", (1280, 720))), False, app["vsync"])
+
+    app["display_size"] = app["screen"].get_size()
+    set_render_target_size(pygame, state, live_cam, app, app["display_size"], "fullscreen" if app["fullscreen"] else "windowed")
     refresh_mouse_capture(pygame, app)
 
 
@@ -659,7 +833,7 @@ def snap_camera(app, cameras: list[SimpleNamespace], split_name: str, direction:
     print(f"Snapped to {split_name} camera {next_index + 1}/{len(cameras)}: {app['snap_name']} t={app['time_value']:.6f}")
 
 
-def handle_discrete_key(event_key: int, app, state: ViewerState, mods: int = 0) -> None:
+def handle_discrete_key(event_key: int, app, state: ViewerState, live_cam: LiveCamera, mods: int = 0) -> None:
     import pygame
 
     shift_down = bool(mods & (pygame.KMOD_SHIFT | pygame.KMOD_LSHIFT | pygame.KMOD_RSHIFT))
@@ -674,7 +848,7 @@ def handle_discrete_key(event_key: int, app, state: ViewerState, mods: int = 0) 
     elif event_key == pygame.K_i:
         app["show_info"] = not app["show_info"]
     elif event_key == pygame.K_f:
-        toggle_fullscreen(pygame, app)
+        toggle_fullscreen(pygame, state, live_cam, app)
     elif event_key in (pygame.K_EQUALS, getattr(pygame, "K_PLUS", pygame.K_EQUALS), pygame.K_KP_PLUS):
         app["move_speed"] *= 1.25
     elif event_key in (pygame.K_MINUS, getattr(pygame, "K_UNDERSCORE", pygame.K_MINUS), pygame.K_KP_MINUS):
@@ -760,15 +934,20 @@ def collect_info_lines(state: ViewerState, app, clock, render_ms_ema: float | No
     gaussian_count = int(xyz.shape[0]) if hasattr(xyz, "shape") else -1
     eye = app["eye"]
     render_ms_text = "n/a" if render_ms_ema is None else f"{render_ms_ema:.1f} ms"
-    return [
+    display_size = tuple(app.get("display_size", (state.intrinsics.width, state.intrinsics.height)))
+    render_size = tuple(app.get("render_size", (state.intrinsics.width, state.intrinsics.height)))
+    lines = [
         f"FPS {clock.get_fps():.1f} | render {render_ms_text} | target {app['target_fps']}",
         cuda_memory_text(),
-        f"Gaussians {gaussian_count:,} | resolution {state.intrinsics.width}x{state.intrinsics.height}",
+        f"Gaussians {gaussian_count:,} | render {render_size[0]}x{render_size[1]} | display {display_size[0]}x{display_size[1]}",
         f"time {app['time_value']:.6f} / [{app['time_start']:.6f}, {app['time_end']:.6f}] {'paused' if app['paused'] else 'playing'}",
         f"pose {app.get('snap_split', 'free')} #{int(app.get('snap_index', 0)) + 1}: {app.get('snap_name', '')}",
         f"eye [{eye[0]:.3f}, {eye[1]:.3f}, {eye[2]:.3f}] {orientation_debug_text(app['orientation'])}",
         f"speed {app['move_speed']:.3f} boost x{app['boost']:.1f} roll {math.degrees(app['roll_speed']):.1f} deg/s",
     ]
+    if app.get("resize_status"):
+        lines.append(str(app["resize_status"]))
+    return lines
 
 
 def draw_info_overlay(screen, font, lines: list[str]) -> None:
@@ -804,11 +983,17 @@ def run_viewer(args: argparse.Namespace) -> None:
     move_speed = float(args.move_speed) if args.move_speed is not None else max(0.05, state.cameras_extent * 0.75)
     time_span = max(1e-6, abs(state.time_end - state.time_start))
 
+    base_intrinsics = copy_intrinsics(state.intrinsics)
     live_cam = LiveCamera(state.intrinsics, device=torch.device("cuda"), dtype=torch.float32)
     pygame.init()
     display_size = (state.intrinsics.width, state.intrinsics.height)
     screen = make_display(pygame, display_size, fullscreen=False, vsync=bool(args.vsync))
-    surface = pygame.Surface(display_size)
+    display_size = screen.get_size()
+    if display_size != (state.intrinsics.width, state.intrinsics.height):
+        state.intrinsics = resized_intrinsics(base_intrinsics, display_size[0], display_size[1])
+        live_cam.set_intrinsics(state.intrinsics)
+    render_size = display_size
+    surface = pygame.Surface(render_size)
     pygame.display.set_caption("4DGS Interactive Viewer - loading")
     font = pygame.font.Font(None, 18)
 
@@ -831,7 +1016,12 @@ def run_viewer(args: argparse.Namespace) -> None:
         "time_scrub_step": time_span * float(args.scrub_seconds_per_second),
         "target_fps": int(args.fps),
         "display_size": display_size,
+        "windowed_size": display_size,
+        "render_size": render_size,
         "screen": screen,
+        "surface": surface,
+        "last_good_intrinsics": copy_intrinsics(state.intrinsics),
+        "base_intrinsics": base_intrinsics,
         "fullscreen": False,
         "vsync": bool(args.vsync),
         "relative_mouse": False,
@@ -869,8 +1059,17 @@ def run_viewer(args: argparse.Namespace) -> None:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     app["running"] = False
+                elif event.type == pygame.VIDEORESIZE:
+                    resize_window_and_render_target(
+                        pygame,
+                        state,
+                        live_cam,
+                        app,
+                        (getattr(event, "w", app["display_size"][0]), getattr(event, "h", app["display_size"][1])),
+                        "window resize",
+                    )
                 elif event.type == pygame.KEYDOWN:
-                    handle_discrete_key(event.key, app, state, getattr(event, "mod", 0))
+                    handle_discrete_key(event.key, app, state, live_cam, getattr(event, "mod", 0))
                 elif event.type == pygame.MOUSEMOTION and app["mouse_grab"]:
                     rel = getattr(event, "rel", (0, 0))
                     app["mouse_dx"] += float(rel[0])
@@ -923,16 +1122,26 @@ def run_viewer(args: argparse.Namespace) -> None:
             live_cam.update_orientation(app["eye"], app["orientation"], app["time_value"])
 
             t_render0 = time.perf_counter()
-            with torch.inference_mode():
-                render_pkg = state.render_fn(live_cam, state.gaussians, state.pipe, state.background)
-                frame = render_tensor_to_uint8(render_pkg["render"])
+            try:
+                with torch.inference_mode():
+                    render_pkg = state.render_fn(live_cam, state.gaussians, state.pipe, state.background)
+                    frame = render_tensor_to_uint8(render_pkg["render"])
+            except RuntimeError as exc:
+                if is_cuda_oom(exc):
+                    fallback_to_last_good_render_size(pygame, state, live_cam, app, exc)
+                    continue
+                raise
             render_ms = (time.perf_counter() - t_render0) * 1000.0
             render_ms_ema = render_ms if render_ms_ema is None else (0.9 * render_ms_ema + 0.1 * render_ms)
+            app["last_good_intrinsics"] = copy_intrinsics(state.intrinsics)
 
             # pygame expects W x H x C for surfarray.blit_array.
+            surface = app["surface"]
             pygame.surfarray.blit_array(surface, np.transpose(frame, (1, 0, 2)))
             screen = app["screen"]
-            screen.blit(surface, (0, 0))
+            display_size = screen.get_size()
+            app["display_size"] = display_size
+            blit_surface_preserve_aspect(pygame, screen, surface, display_size)
             if app["show_info"]:
                 draw_info_overlay(screen, font, collect_info_lines(state, app, clock, render_ms_ema))
             pygame.display.flip()
