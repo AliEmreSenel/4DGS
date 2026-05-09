@@ -83,7 +83,9 @@ DEFAULT_USPLAT = {
 }
 
 
-def build_dropout_registry(dropout_prob: float, lambda_rdr: float) -> Dict[str, Dict[str, Any]]:
+def build_dropout_registry(
+    dropout_prob: float, lambda_rdr: float
+) -> Dict[str, Dict[str, Any]]:
     enabled = {
         "random_dropout_prob": float(dropout_prob),
         "lambda_rdr": float(lambda_rdr),
@@ -133,7 +135,15 @@ def build_ess_registry(total_iterations: int) -> Dict[str, Dict[str, Any]]:
     }
 
 
-SUPPORTED_AXES = ("isotropy", "appearance", "sorting", "pruning", "usplat", "dropout", "ess")
+SUPPORTED_AXES = (
+    "isotropy",
+    "appearance",
+    "sorting",
+    "pruning",
+    "usplat",
+    "dropout",
+    "ess",
+)
 
 
 @dataclass(frozen=True)
@@ -200,20 +210,69 @@ def parse_args() -> argparse.Namespace:
         description="Launch train.py ablation sweeps locally or through a Slurm driver job."
     )
     parser.add_argument("configs", nargs="*", help="Base config files.")
-    parser.add_argument("--preflight", action="store_true", help="Check Python modules and Slurm settings without reading configs, submitting jobs, or training.")
-    parser.add_argument("--python", default=sys.executable, help="Python executable used when the runner mode resolves to python.")
-    parser.add_argument("--runner", choices=["auto", "uv", "python"], default="auto", help="Command runner for train/eval/worker launch. auto prefers `uv run` when uv is available.")
-    parser.add_argument("--laptop-8gb", action="store_true", help="Use local, low-memory defaults for quick single-GPU ablation smoke tests without Slurm.")
-    parser.add_argument("--uv-binary", default="uv", help="uv executable to use when --runner=uv or auto resolves to uv.")
-    parser.add_argument("--train-script", default="train.py", help="Training entrypoint to invoke.")
-    parser.add_argument("--repo-root", default=None, help="Repository root. Inferred from --train-script when omitted.")
-    parser.add_argument("--output-root", default=None, help="Optional root directory for generated model outputs.")
-    parser.add_argument("--generated-config-root", default=None, help="Optional root directory for generated YAML configs.")
-    parser.add_argument("--scene-name", default=None, help="Optional explicit scene name prefix.")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them.")
-    parser.add_argument("--write-configs-only", action="store_true", help="Only write generated configs.")
-    parser.add_argument("--print-only-paths", action="store_true", help="Only print generated model paths.")
-    parser.add_argument("--limit", type=int, default=None, help="Limit runs per input config.")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Check Python modules and Slurm settings without reading configs, submitting jobs, or training.",
+    )
+    parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="Python executable used when the runner mode resolves to python.",
+    )
+    parser.add_argument(
+        "--runner",
+        choices=["auto", "uv", "python"],
+        default="auto",
+        help="Command runner for train/eval/worker launch. auto prefers `uv run` when uv is available.",
+    )
+    parser.add_argument(
+        "--laptop-8gb",
+        action="store_true",
+        help="Use local, low-memory defaults for quick single-GPU ablation smoke tests without Slurm.",
+    )
+    parser.add_argument(
+        "--uv-binary",
+        default="uv",
+        help="uv executable to use when --runner=uv or auto resolves to uv.",
+    )
+    parser.add_argument(
+        "--train-script", default="train.py", help="Training entrypoint to invoke."
+    )
+    parser.add_argument(
+        "--repo-root",
+        default=None,
+        help="Repository root. Inferred from --train-script when omitted.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=None,
+        help="Optional root directory for generated model outputs.",
+    )
+    parser.add_argument(
+        "--generated-config-root",
+        default=None,
+        help="Optional root directory for generated YAML configs.",
+    )
+    parser.add_argument(
+        "--scene-name", default=None, help="Optional explicit scene name prefix."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print commands without executing them."
+    )
+    parser.add_argument(
+        "--write-configs-only",
+        action="store_true",
+        help="Only write generated configs.",
+    )
+    parser.add_argument(
+        "--print-only-paths",
+        action="store_true",
+        help="Only print generated model paths.",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Limit runs per input config."
+    )
     parser.add_argument(
         "--extra-arg",
         dest="extra_args",
@@ -251,7 +310,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--isotropy-options", default="anisotropic,isotropic")
     parser.add_argument("--appearance-options", default="rgb,sh3")
     parser.add_argument("--sorting-options", default="sort")
-    parser.add_argument("--pruning-options", default="no_pruning,interleaved_prune_densify")
+    parser.add_argument(
+        "--pruning-options", default="no_pruning,interleaved_prune_densify"
+    )
     parser.add_argument("--usplat-options", default="no_usplat")
     parser.add_argument("--dropout-options", default="no_dropout,dropout")
     parser.add_argument("--ess-options", default="no_ess,ess")
@@ -281,42 +342,127 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vram-poll-interval", type=float, default=1.0)
     parser.add_argument("--summary-filename", default="ablation_metrics.csv")
     parser.add_argument("--summary-jsonl-filename", default="ablation_metrics.jsonl")
-    parser.add_argument("--checkpoint-metrics-filename", default="checkpoint_eval_metrics.csv", help="CSV with one row per evaluated checkpoint across training.")
-    parser.add_argument("--checkpoint-metrics-jsonl-filename", default="checkpoint_eval_metrics.jsonl", help="JSONL with one row per evaluated checkpoint across training.")
-    parser.add_argument("--checkpoint-eval-split", choices=["test", "train"], default="test", help="Split used for per-checkpoint training-curve metrics. Defaults to test.")
-    parser.add_argument("--skip-checkpoint-metrics", action="store_true", help="Disable per-checkpoint training-curve metric CSV/JSONL generation.")
-    parser.add_argument("--retry-failed-existing", action=argparse.BooleanOptionalAction, default=True, help="Retry runs whose run_metrics.json says failed. Use --no-retry-failed-existing to keep old skip-failed behavior.")
+    parser.add_argument(
+        "--checkpoint-metrics-filename",
+        default="checkpoint_eval_metrics.csv",
+        help="CSV with one row per evaluated checkpoint across training.",
+    )
+    parser.add_argument(
+        "--checkpoint-metrics-jsonl-filename",
+        default="checkpoint_eval_metrics.jsonl",
+        help="JSONL with one row per evaluated checkpoint across training.",
+    )
+    parser.add_argument(
+        "--checkpoint-eval-split",
+        choices=["test", "train"],
+        default="test",
+        help="Split used for per-checkpoint training-curve metrics. Defaults to test.",
+    )
+    parser.add_argument(
+        "--skip-checkpoint-metrics",
+        action="store_true",
+        help="Disable per-checkpoint training-curve metric CSV/JSONL generation.",
+    )
+    parser.add_argument(
+        "--retry-failed-existing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Retry runs whose run_metrics.json says failed. Use --no-retry-failed-existing to keep old skip-failed behavior.",
+    )
 
     # Mobile-GS compression/reporting controls. These run inside batch_train.py
     # after each ablation checkpoint is available, so compressed payloads and
     # post-quantization metrics are stored with the ablation row.  By default
     # this runs for every ablation variant, not only sort-free variants.
-    parser.add_argument("--mobilegs-report", action=argparse.BooleanOptionalAction, default=True, help="After every run, export, compress, and benchmark a Mobile-GS payload so speed/quality deltas are reported for the trained checkpoint.")
-    parser.add_argument("--mobilegs-report-scope", choices=["all", "sort_free"], default="all", help="Which ablation rows receive Mobile-GS export/benchmark reporting. The default is all because Mobile-GS compression is a post-training evaluation for every ablation.")
-    parser.add_argument("--require-mobilegs-report", action=argparse.BooleanOptionalAction, default=False, help="Mark the run status as failed when Mobile-GS compression/benchmarking fails. Default keeps the training result and records mobile_status=failed.")
-    parser.add_argument("--mobilegs-benchmark-render-mode", choices=["match", "sort_free", "sorted"], default="match", help="Renderer used to benchmark the compressed payload: match the source run, force sort-free, or force sorted alpha blending.")
-    parser.add_argument("--mobilegs-force-first-order-sh", action=argparse.BooleanOptionalAction, default=True, help="Force ablations to train/export first-order spatial SH for Mobile-GS reporting.")
-    parser.add_argument("--mobilegs-teacher-checkpoint", default="", help="Optional sorted-render teacher checkpoint for Mobile-GS SH/depth distillation.")
-    parser.add_argument("--mobilegs-sh-distill-lambda", type=float, default=0.0, help="L1 teacher/student RGB distillation weight for Mobile-GS reporting runs.")
-    parser.add_argument("--mobilegs-depth-distill-lambda", type=float, default=0.0, help="Scale-invariant teacher depth distillation weight for Mobile-GS reporting runs.")
-    parser.add_argument("--mobilegs-mobile-filename", default="mobilegs_quantized.mobile.pt", help="Per-run Mobile-GS compressed payload filename.")
-    parser.add_argument("--mobilegs-metrics-filename", default="mobilegs_metrics.json", help="Per-run Mobile-GS export/benchmark metrics filename.")
+    parser.add_argument(
+        "--mobilegs-report",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After every run, export, compress, and benchmark a Mobile-GS payload so speed/quality deltas are reported for the trained checkpoint.",
+    )
+    parser.add_argument(
+        "--mobilegs-report-scope",
+        choices=["all", "sort_free"],
+        default="all",
+        help="Which ablation rows receive Mobile-GS export/benchmark reporting. The default is all because Mobile-GS compression is a post-training evaluation for every ablation.",
+    )
+    parser.add_argument(
+        "--require-mobilegs-report",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Mark the run status as failed when Mobile-GS compression/benchmarking fails. Default keeps the training result and records mobile_status=failed.",
+    )
+    parser.add_argument(
+        "--mobilegs-benchmark-render-mode",
+        choices=["match", "sort_free", "sorted"],
+        default="match",
+        help="Renderer used to benchmark the compressed payload: match the source run, force sort-free, or force sorted alpha blending.",
+    )
+    parser.add_argument(
+        "--mobilegs-force-first-order-sh",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Force ablations to train/export first-order spatial SH for Mobile-GS reporting.",
+    )
+    parser.add_argument(
+        "--mobilegs-teacher-checkpoint",
+        default="",
+        help="Optional sorted-render teacher checkpoint for Mobile-GS SH/depth distillation.",
+    )
+    parser.add_argument(
+        "--mobilegs-sh-distill-lambda",
+        type=float,
+        default=0.0,
+        help="L1 teacher/student RGB distillation weight for Mobile-GS reporting runs.",
+    )
+    parser.add_argument(
+        "--mobilegs-depth-distill-lambda",
+        type=float,
+        default=0.0,
+        help="Scale-invariant teacher depth distillation weight for Mobile-GS reporting runs.",
+    )
+    parser.add_argument(
+        "--mobilegs-mobile-filename",
+        default="mobilegs_quantized.mobile.pt",
+        help="Per-run Mobile-GS compressed payload filename.",
+    )
+    parser.add_argument(
+        "--mobilegs-metrics-filename",
+        default="mobilegs_metrics.json",
+        help="Per-run Mobile-GS export/benchmark metrics filename.",
+    )
     parser.add_argument("--mobilegs-codebook-size", type=int, default=256)
     parser.add_argument("--mobilegs-block-size", type=int, default=8)
     parser.add_argument("--mobilegs-kmeans-iters", type=int, default=16)
     parser.add_argument("--mobilegs-uniform-bits", type=int, default=8)
-    parser.add_argument("--mobilegs-build-visibility-filter", action=argparse.BooleanOptionalAction, default=True, help="Export true 4DGS-1K-style keyframe visibility masks for Mobile-GS payloads.")
+    parser.add_argument(
+        "--mobilegs-build-visibility-filter",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Export true 4DGS-1K-style keyframe visibility masks for Mobile-GS payloads.",
+    )
     parser.add_argument("--mobilegs-temporal-keyframes", type=int, default=32)
     parser.add_argument("--mobilegs-temporal-mask-window", type=int, default=1)
     parser.add_argument("--mobilegs-temporal-mask-threshold", type=float, default=0.05)
     parser.add_argument("--mobilegs-views-per-keyframe", type=int, default=0)
-    parser.add_argument("--mobilegs-benchmark-split", choices=["test", "train"], default="test")
+    parser.add_argument(
+        "--mobilegs-benchmark-split", choices=["test", "train"], default="test"
+    )
     parser.add_argument("--mobilegs-benchmark-warmup", type=int, default=20)
     parser.add_argument("--mobilegs-benchmark-repeats", type=int, default=200)
-    parser.add_argument("--mobilegs-quality-samples", type=int, default=16, help="Number of metadata cameras used for quantized-vs-raw render quality.")
+    parser.add_argument(
+        "--mobilegs-quality-samples",
+        type=int,
+        default=16,
+        help="Number of metadata cameras used for quantized-vs-raw render quality.",
+    )
 
     # Slurm controls
-    parser.add_argument("--submit-slurm", action="store_true", help="Submit one explicit Slurm allocation that launches srun workers. Use --dry-run with this flag to print the sbatch command without submitting.")
+    parser.add_argument(
+        "--submit-slurm",
+        action="store_true",
+        help="Submit one explicit Slurm allocation that launches srun workers. Use --dry-run with this flag to print the sbatch command without submitting.",
+    )
     parser.add_argument("--slurm-driver", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--slurm-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--assignment-file", default=None, help=argparse.SUPPRESS)
@@ -325,34 +471,136 @@ def parse_args() -> argparse.Namespace:
     # per node, and the user quota has a 180G soft limit. Override these flags
     # explicitly on other clusters rather than relying on a wrapper script.
     parser.add_argument("--slurm-partition", default="gpuh200")
-    parser.add_argument("--slurm-account", default=os.environ.get("SLURM_ACCOUNT") or os.environ.get("USER") or "")
+    parser.add_argument(
+        "--slurm-account",
+        default=os.environ.get("SLURM_ACCOUNT") or os.environ.get("USER") or "",
+    )
     parser.add_argument("--slurm-qos", default="normal")
     parser.add_argument("--slurm-time", default="1-00:00:00")
-    parser.add_argument("--slurm-mem", default="160G", help="Memory requested per allocated node.")
-    parser.add_argument("--slurm-gpus", type=int, default=4, help="Total GPUs requested for the allocation. The probed normal QOS limit is 4 GPUs per user.")
-    parser.add_argument("--slurm-tasks", type=int, default=4, help="Number of worker tasks. Keep equal to --slurm-gpus for one training run per GPU.")
-    parser.add_argument("--slurm-total-cpus", type=int, default=8, help="Total CPU threads across workers. Default gives 2 CPUs per GPU worker.")
-    parser.add_argument("--slurm-nodes", type=int, default=0, help="Allocated nodes. 0 computes ceil(total_gpus / gpus_per_node).")
-    parser.add_argument("--slurm-gpus-per-node", type=int, default=2, help="GPUs requested per node. H100/H200 nodes in the probe expose 2 GPUs per node.")
-    parser.add_argument("--slurm-tasks-per-node", type=int, default=0, help="Tasks per node. 0 computes ceil(tasks / nodes).")
-    parser.add_argument("--slurm-gres", default="", help="Exact sbatch GRES string to use instead of gpu counts, e.g. gpu:H200:2.")
-    parser.add_argument("--slurm-worker-gres", default="", help="Exact srun worker GRES string. Empty defaults to gpu:1 for one run per GPU.")
+    parser.add_argument(
+        "--slurm-mem", default="160G", help="Memory requested per allocated node."
+    )
+    parser.add_argument(
+        "--slurm-gpus",
+        type=int,
+        default=4,
+        help="Total GPUs requested for the allocation. The probed normal QOS limit is 4 GPUs per user.",
+    )
+    parser.add_argument(
+        "--slurm-tasks",
+        type=int,
+        default=4,
+        help="Number of worker tasks. Keep equal to --slurm-gpus for one training run per GPU.",
+    )
+    parser.add_argument(
+        "--slurm-total-cpus",
+        type=int,
+        default=8,
+        help="Total CPU threads across workers. Default gives 2 CPUs per GPU worker.",
+    )
+    parser.add_argument(
+        "--slurm-nodes",
+        type=int,
+        default=0,
+        help="Allocated nodes. 0 computes ceil(total_gpus / gpus_per_node).",
+    )
+    parser.add_argument(
+        "--slurm-gpus-per-node",
+        type=int,
+        default=2,
+        help="GPUs requested per node. H100/H200 nodes in the probe expose 2 GPUs per node.",
+    )
+    parser.add_argument(
+        "--slurm-tasks-per-node",
+        type=int,
+        default=0,
+        help="Tasks per node. 0 computes ceil(tasks / nodes).",
+    )
+    parser.add_argument(
+        "--slurm-gres",
+        default="",
+        help="Exact sbatch GRES string to use instead of gpu counts, e.g. gpu:H200:2.",
+    )
+    parser.add_argument(
+        "--slurm-worker-gres",
+        default="",
+        help="Exact srun worker GRES string. Empty defaults to gpu:1 for one run per GPU.",
+    )
     parser.add_argument("--slurm-job-name", default="4dgs-ablations")
     parser.add_argument("--slurm-log-dir", default=None)
-    parser.add_argument("--slurm-export", default="ALL", help="Value passed to sbatch --export. Default keeps the full submitting environment.")
-    parser.add_argument("--slurm-chdir", default=None, help="Working directory for the batch job. Defaults to the repo root.")
-    parser.add_argument("--slurm-extra-sbatch-arg", dest="slurm_extra_sbatch_args", action="append", default=[])
-    parser.add_argument("--slurm-srun-extra-arg", dest="slurm_srun_extra_args", action="append", default=[])
-    parser.add_argument("--no-auto-submit-from-driver", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--quota-reservation", action=argparse.BooleanOptionalAction, default=True, help="Reserve home/quota space before local or Slurm runs. Disable for laptop/non-Slurm runs with --no-quota-reservation.")
+    parser.add_argument(
+        "--slurm-export",
+        default="ALL",
+        help="Value passed to sbatch --export. Default keeps the full submitting environment.",
+    )
+    parser.add_argument(
+        "--slurm-chdir",
+        default=None,
+        help="Working directory for the batch job. Defaults to the repo root.",
+    )
+    parser.add_argument(
+        "--slurm-extra-sbatch-arg",
+        dest="slurm_extra_sbatch_args",
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--slurm-srun-extra-arg",
+        dest="slurm_srun_extra_args",
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--no-auto-submit-from-driver", action="store_true", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--quota-reservation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reserve home/quota space before local or Slurm runs. Disable for laptop/non-Slurm runs with --no-quota-reservation.",
+    )
     parser.add_argument("--quota-command", default="lquota")
-    parser.add_argument("--quota-fallback-root", default=str(Path.home()), help="Directory measured with du --apparent-size when lquota is unavailable. Defaults to the user home.")
-    parser.add_argument("--quota-limit-gb", type=float, default=180.0, help="Logical effective quota limit in GB. The probed home quota soft limit is 180G.")
-    parser.add_argument("--quota-reserve-gb", type=float, default=25.0, help="Always keep at least this much quota free.")
-    parser.add_argument("--train-run-peak-storage-gb", type=float, default=5.0, help="Reserved temporary quota per active training run.")
-    parser.add_argument("--quota-poll-interval", type=float, default=30.0, help="Seconds between quota checks while waiting.")
-    parser.add_argument("--cleanup-existing-artifacts", action=argparse.BooleanOptionalAction, default=True, help="Prune bulky artifacts from existing run directories before scheduling.")
-    parser.add_argument("--cleanup-after-run", action=argparse.BooleanOptionalAction, default=True, help="Delete bulky artifacts after each run, keeping only the best available checkpoint and metadata.")
+    parser.add_argument(
+        "--quota-fallback-root",
+        default=str(Path.home()),
+        help="Directory measured with du --apparent-size when lquota is unavailable. Defaults to the user home.",
+    )
+    parser.add_argument(
+        "--quota-limit-gb",
+        type=float,
+        default=180.0,
+        help="Logical effective quota limit in GB. The probed home quota soft limit is 180G.",
+    )
+    parser.add_argument(
+        "--quota-reserve-gb",
+        type=float,
+        default=25.0,
+        help="Always keep at least this much quota free.",
+    )
+    parser.add_argument(
+        "--train-run-peak-storage-gb",
+        type=float,
+        default=5.0,
+        help="Reserved temporary quota per active training run.",
+    )
+    parser.add_argument(
+        "--quota-poll-interval",
+        type=float,
+        default=30.0,
+        help="Seconds between quota checks while waiting.",
+    )
+    parser.add_argument(
+        "--cleanup-existing-artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prune bulky artifacts from existing run directories before scheduling.",
+    )
+    parser.add_argument(
+        "--cleanup-after-run",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Delete bulky artifacts after each run, keeping only the best available checkpoint and metadata.",
+    )
     args = parser.parse_args()
     if not args.preflight and not args.configs:
         parser.error("configs are required unless --preflight is used")
@@ -378,10 +626,11 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-
 def _cli_option_supplied(*names: str) -> bool:
     argv = sys.argv[1:]
-    return any(raw == name or raw.startswith(name + "=") for raw in argv for name in names)
+    return any(
+        raw == name or raw.startswith(name + "=") for raw in argv for name in names
+    )
 
 
 def _override_key_set(items: Sequence[str]) -> set[str]:
@@ -398,7 +647,9 @@ def _append_default_override(args: argparse.Namespace, key: str, value: Any) -> 
     args.global_overrides.append(f"{key}={repr(value)}")
 
 
-def apply_laptop_8gb_defaults(args: argparse.Namespace, matrix_flag_supplied: bool) -> None:
+def apply_laptop_8gb_defaults(
+    args: argparse.Namespace, matrix_flag_supplied: bool
+) -> None:
     """Bias the batch driver toward local execution without turning ablations into smoke tests."""
     if not _cli_option_supplied("--runner"):
         args.runner = "python"
@@ -436,6 +687,7 @@ def apply_laptop_8gb_defaults(args: argparse.Namespace, matrix_flag_supplied: bo
     for key, value in laptop_defaults.items():
         _append_default_override(args, key, value)
 
+
 def load_yaml(path: str | Path) -> Dict[str, Any]:
     if yaml is None:
         raise RuntimeError(
@@ -449,7 +701,9 @@ def load_yaml(path: str | Path) -> Dict[str, Any]:
     return data
 
 
-def flatten_cfg(cfg: Mapping[str, Any], out: MutableMapping[str, Any] | None = None) -> Dict[str, Any]:
+def flatten_cfg(
+    cfg: Mapping[str, Any], out: MutableMapping[str, Any] | None = None
+) -> Dict[str, Any]:
     if out is None:
         out = {}
     for key, value in cfg.items():
@@ -490,12 +744,18 @@ def coerce_time_duration_value(value: Any) -> List[float]:
         try:
             value = ast.literal_eval(text)
         except Exception:
-            cleaned = text.strip('[]()')
-            value = [piece.strip() for piece in cleaned.replace(';', ',').split(',') if piece.strip()]
+            cleaned = text.strip("[]()")
+            value = [
+                piece.strip()
+                for piece in cleaned.replace(";", ",").split(",")
+                if piece.strip()
+            ]
     if isinstance(value, (int, float)):
         raise ValueError(f"time_duration must contain two values, got scalar {value!r}")
     if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError(f"time_duration must contain two numeric values, got {value!r}")
+        raise ValueError(
+            f"time_duration must contain two numeric values, got {value!r}"
+        )
     out = [float(value[0]), float(value[1])]
     if not all(math.isfinite(v) for v in out):
         raise ValueError(f"time_duration must be finite, got {value!r}")
@@ -518,23 +778,33 @@ def normalize_choice_list(raw: str) -> List[str]:
     return [piece.strip() for piece in raw.split(",") if piece.strip()]
 
 
-def build_pruning_registry(total_iterations: int, options: ScheduleOptions) -> Dict[str, Dict[str, Any]]:
+def build_pruning_registry(
+    total_iterations: int, options: ScheduleOptions
+) -> Dict[str, Dict[str, Any]]:
     if total_iterations <= 0:
         raise ValueError(f"iterations must be positive, got {total_iterations}")
 
-    one_shot_prune_step = min(max(int(options.one_shot_prune_step), 1), total_iterations)
-    one_shot_densify_from_iter = min(max(int(options.one_shot_densify_from_iter), 0), total_iterations)
+    one_shot_prune_step = min(
+        max(int(options.one_shot_prune_step), 1), total_iterations
+    )
+    one_shot_densify_from_iter = min(
+        max(int(options.one_shot_densify_from_iter), 0), total_iterations
+    )
     one_shot_densify_until_iter = min(
         max(int(options.one_shot_densify_until_iter), one_shot_densify_from_iter),
         total_iterations,
     )
 
-    interleaved_prune_from_iter = min(max(int(options.interleaved_prune_from_iter), 1), total_iterations)
+    interleaved_prune_from_iter = min(
+        max(int(options.interleaved_prune_from_iter), 1), total_iterations
+    )
     interleaved_prune_until_iter = min(
         max(int(options.interleaved_prune_until_iter), interleaved_prune_from_iter),
         total_iterations,
     )
-    interleaved_densify_from_iter = min(max(int(options.interleaved_densify_from_iter), 0), total_iterations)
+    interleaved_densify_from_iter = min(
+        max(int(options.interleaved_densify_from_iter), 0), total_iterations
+    )
     interleaved_densify_until_iter = min(
         max(int(options.interleaved_densify_until_iter), interleaved_densify_from_iter),
         total_iterations,
@@ -589,8 +859,9 @@ def build_axis_registry(
     }
 
 
-
-def _clamped_schedule_iter(total_iterations: int, fraction: float, fallback: int, minimum: int = 1) -> int:
+def _clamped_schedule_iter(
+    total_iterations: int, fraction: float, fallback: int, minimum: int = 1
+) -> int:
     if total_iterations <= 1:
         return max(minimum, int(fallback))
     proposed = int(round(float(total_iterations) * float(fraction)))
@@ -627,7 +898,9 @@ def _with_clean_method_defaults(overrides: Mapping[str, Any]) -> Dict[str, Any]:
     return base
 
 
-def _paper_pruning_overrides(total_iterations: int, schedule_options: ScheduleOptions) -> Dict[str, Any]:
+def _paper_pruning_overrides(
+    total_iterations: int, schedule_options: ScheduleOptions
+) -> Dict[str, Any]:
     registry = build_pruning_registry(total_iterations, schedule_options)
     out = dict(registry["interleaved_prune_densify"])
     # 4DGS-1K is explicitly a compression method. Do not impose a cumulative
@@ -637,7 +910,9 @@ def _paper_pruning_overrides(total_iterations: int, schedule_options: ScheduleOp
     return out
 
 
-def _instant4d_lite_overrides(flat_cfg: Mapping[str, Any], total_iterations: int) -> Dict[str, Any]:
+def _instant4d_lite_overrides(
+    flat_cfg: Mapping[str, Any], total_iterations: int
+) -> Dict[str, Any]:
     base_num_pts = int(flat_cfg.get("num_pts", 100000) or 100000)
     return {
         "isotropic_gaussians": True,
@@ -647,7 +922,9 @@ def _instant4d_lite_overrides(flat_cfg: Mapping[str, Any], total_iterations: int
         "mobilegs_force_first_order_sh": False,
         "num_pts": max(25000, min(base_num_pts, int(round(base_num_pts * 0.50)))),
         "num_pts_ratio": min(float(flat_cfg.get("num_pts_ratio", 1.0) or 1.0), 0.5),
-        "densify_until_iter": _clamped_schedule_iter(total_iterations, 0.55, 7500, minimum=500),
+        "densify_until_iter": _clamped_schedule_iter(
+            total_iterations, 0.55, 7500, minimum=500
+        ),
         "densify_until_num_points": max(50000, int(round(base_num_pts * 0.75))),
     }
 
@@ -835,14 +1112,26 @@ def build_matrix_preset_variants(
     return variants
 
 
-def build_axis_variants(axis_name: str, requested_options: Sequence[str], registry: Mapping[str, Dict[str, Dict[str, Any]]]) -> List[AblationVariant]:
+def build_axis_variants(
+    axis_name: str,
+    requested_options: Sequence[str],
+    registry: Mapping[str, Dict[str, Dict[str, Any]]],
+) -> List[AblationVariant]:
     axis_registry = registry[axis_name]
     variants: List[AblationVariant] = []
     for option in requested_options:
         if option not in axis_registry:
             valid = ", ".join(sorted(axis_registry))
-            raise ValueError(f"Unknown option '{option}' for axis '{axis_name}'. Valid: {valid}")
-        variants.append(AblationVariant(name=option, tags={axis_name: option}, overrides=dict(axis_registry[option])))
+            raise ValueError(
+                f"Unknown option '{option}' for axis '{axis_name}'. Valid: {valid}"
+            )
+        variants.append(
+            AblationVariant(
+                name=option,
+                tags={axis_name: option},
+                overrides=dict(axis_registry[option]),
+            )
+        )
     return variants
 
 
@@ -873,25 +1162,44 @@ def build_cartesian_variants(
             tags.update(item.tags)
             overrides.update(item.overrides)
             names.append(item.name)
-        variants.append(AblationVariant(name="__".join(names), tags=tags, overrides=overrides))
+        variants.append(
+            AblationVariant(name="__".join(names), tags=tags, overrides=overrides)
+        )
     return variants
 
 
-def invalid_variant_reason(flat_cfg: Mapping[str, Any], variant: AblationVariant) -> str | None:
+def invalid_variant_reason(
+    flat_cfg: Mapping[str, Any], variant: AblationVariant
+) -> str | None:
     merged = dict(flat_cfg)
     merged.update(variant.overrides)
-    if bool(merged.get("sort_free_render", False)) and int(merged.get("env_map_res", 0) or 0) > 0:
+    if (
+        bool(merged.get("sort_free_render", False))
+        and int(merged.get("env_map_res", 0) or 0) > 0
+    ):
         return "sort_free_render does not support env_map_res"
-    if bool(merged.get("sort_free_render", False)) and float(merged.get("lambda_depth", 0.0) or 0.0) > 0.0:
+    if (
+        bool(merged.get("sort_free_render", False))
+        and float(merged.get("lambda_depth", 0.0) or 0.0) > 0.0
+    ):
         return "sort_free_render does not return depth for lambda_depth"
-    if bool(merged.get("sort_free_render", False)) and float(merged.get("lambda_opa_mask", 0.0) or 0.0) > 0.0:
+    if (
+        bool(merged.get("sort_free_render", False))
+        and float(merged.get("lambda_opa_mask", 0.0) or 0.0) > 0.0
+    ):
         return "sort_free_render alpha proxy is not compatible with lambda_opa_mask"
-    if bool(merged.get("sort_free_render", False)) and bool(merged.get("use_usplat", False)):
+    if bool(merged.get("sort_free_render", False)) and bool(
+        merged.get("use_usplat", False)
+    ):
         return "USplat uncertainty requires sorted alpha-blending scores, not Mobile-GS OIT scores"
     return None
 
 
-def filter_valid_variants(flat_cfg: Mapping[str, Any], variants: Sequence[AblationVariant], include_invalid: bool) -> List[AblationVariant]:
+def filter_valid_variants(
+    flat_cfg: Mapping[str, Any],
+    variants: Sequence[AblationVariant],
+    include_invalid: bool,
+) -> List[AblationVariant]:
     if include_invalid:
         return list(variants)
     valid: List[AblationVariant] = []
@@ -907,7 +1215,9 @@ def filter_valid_variants(flat_cfg: Mapping[str, Any], variants: Sequence[Ablati
     return valid
 
 
-def mobilegs_training_overrides(args: argparse.Namespace, sort_free: bool, global_overrides: Mapping[str, Any]) -> Dict[str, Any]:
+def mobilegs_training_overrides(
+    args: argparse.Namespace, sort_free: bool, global_overrides: Mapping[str, Any]
+) -> Dict[str, Any]:
     """Return Mobile-GS training overrides owned by the ablation runner.
 
     Mobile-GS export/compression/benchmarking can be reported for every
@@ -921,7 +1231,11 @@ def mobilegs_training_overrides(args: argparse.Namespace, sort_free: bool, globa
     # side-effect.  Keep native 4DGS/USplat/Dropout rows faithful to their
     # temporal SCH appearance unless the row itself is sort-free or the user
     # explicitly overrides mobilegs_force_first_order_sh.
-    if sort_free and bool(getattr(args, "mobilegs_report", True)) and bool(getattr(args, "mobilegs_force_first_order_sh", True)):
+    if (
+        sort_free
+        and bool(getattr(args, "mobilegs_report", True))
+        and bool(getattr(args, "mobilegs_force_first_order_sh", False))
+    ):
         if "mobilegs_force_first_order_sh" not in global_overrides:
             out["mobilegs_force_first_order_sh"] = False
 
@@ -935,14 +1249,19 @@ def mobilegs_training_overrides(args: argparse.Namespace, sort_free: bool, globa
                 "--mobilegs-teacher-checkpoint is empty."
             )
         if "mobilegs_teacher_checkpoint" not in global_overrides:
-            out["mobilegs_teacher_checkpoint"] = str(Path(teacher).expanduser().resolve())
+            out["mobilegs_teacher_checkpoint"] = str(
+                Path(teacher).expanduser().resolve()
+            )
         if "lambda_mobilegs_sh_distill" not in global_overrides:
             out["lambda_mobilegs_sh_distill"] = sh_lambda
         if "lambda_mobilegs_depth_distill" not in global_overrides:
             out["lambda_mobilegs_depth_distill"] = depth_lambda
 
     if sort_free:
-        if "mobilegs_opacity_phi_lr" not in global_overrides and float(out.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
+        if (
+            "mobilegs_opacity_phi_lr" not in global_overrides
+            and float(out.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0
+        ):
             out["mobilegs_opacity_phi_lr"] = 1e-3
     else:
         # Keep the Mobile-GS opacity/phi MLP out of ordinary sorted-render rows.
@@ -959,17 +1278,27 @@ def apply_dependent_overrides(
     args: argparse.Namespace | None = None,
 ) -> None:
     flat_cfg = flat_cfg or {}
-    sort_free = bool(run_overrides.get("sort_free_render", flat_cfg.get("sort_free_render", False)))
+    sort_free = bool(
+        run_overrides.get("sort_free_render", flat_cfg.get("sort_free_render", False))
+    )
     if args is not None:
-        run_overrides.update(mobilegs_training_overrides(args, sort_free, global_overrides))
+        run_overrides.update(
+            mobilegs_training_overrides(args, sort_free, global_overrides)
+        )
     else:
         user_set_mobile_lr = "mobilegs_opacity_phi_lr" in global_overrides
         if not sort_free:
             run_overrides["mobilegs_opacity_phi_lr"] = 0.0
-        elif not user_set_mobile_lr and float(run_overrides.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0:
+        elif (
+            not user_set_mobile_lr
+            and float(run_overrides.get("mobilegs_opacity_phi_lr", 0.0) or 0.0) <= 0.0
+        ):
             run_overrides["mobilegs_opacity_phi_lr"] = 1e-3
 
-def infer_scene_name(config_path: Path, flat_cfg: Mapping[str, Any], explicit_scene_name: str | None) -> str:
+
+def infer_scene_name(
+    config_path: Path, flat_cfg: Mapping[str, Any], explicit_scene_name: str | None
+) -> str:
     if explicit_scene_name:
         return explicit_scene_name
     source_path = flat_cfg.get("source_path")
@@ -981,15 +1310,21 @@ def infer_scene_name(config_path: Path, flat_cfg: Mapping[str, Any], explicit_sc
     return config_path.stem
 
 
-def get_output_root(flat_cfg: Mapping[str, Any], explicit_output_root: str | None) -> Path:
+def get_output_root(
+    flat_cfg: Mapping[str, Any], explicit_output_root: str | None
+) -> Path:
     if explicit_output_root:
         return Path(explicit_output_root)
     base_model_path = Path(str(flat_cfg.get("model_path", "output")))
-    parent = base_model_path.parent if base_model_path.parent != Path("") else Path("output")
+    parent = (
+        base_model_path.parent if base_model_path.parent != Path("") else Path("output")
+    )
     return parent / "ablations"
 
 
-def build_model_path(output_root: Path, scene_name: str, variant: AblationVariant) -> Path:
+def build_model_path(
+    output_root: Path, scene_name: str, variant: AblationVariant
+) -> Path:
     variant_suffix = variant.name.replace("__", "--")
     return output_root / scene_name / variant_suffix
 
@@ -1071,37 +1406,91 @@ PIPELINE_OVERRIDE_KEYS = {
 }
 
 OPTIMIZATION_OVERRIDE_KEYS = {
-    "iterations", "position_lr_init", "position_t_lr_init", "position_lr_final",
-    "position_lr_delay_mult", "position_lr_max_steps", "feature_lr", "opacity_lr",
-    "scaling_lr", "rotation_lr", "percent_dense", "lambda_dssim", "lambda_rdr",
+    "iterations",
+    "position_lr_init",
+    "position_t_lr_init",
+    "position_lr_final",
+    "position_lr_delay_mult",
+    "position_lr_max_steps",
+    "feature_lr",
+    "opacity_lr",
+    "scaling_lr",
+    "rotation_lr",
+    "percent_dense",
+    "lambda_dssim",
+    "lambda_rdr",
     "rdr_detach_full_render",
-    "thresh_opa_prune", "densification_interval", "opacity_reset_interval",
-    "densify_from_iter", "densify_until_iter", "densify_grad_threshold",
-    "densify_grad_t_threshold", "densify_until_num_points", "final_prune_from_iter",
-    "final_prune_ratio", "sh_increase_interval", "lambda_opa_mask", "lambda_rigid",
-    "lambda_motion", "lambda_depth", "mobilegs_opacity_phi_lr",
-    "mobilegs_teacher_checkpoint", "mobilegs_force_first_order_sh",
-    "lambda_mobilegs_sh_distill", "lambda_mobilegs_depth_distill",
-    "enable_edge_guided_splitting", "ess_from_iter", "ess_until_iter",
-    "ess_interval", "ess_edge_percentile", "ess_scale_percentile",
-    "ess_max_splits", "ess_split_children",
-    "enable_spatio_temporal_pruning", "spatio_temporal_pruning_ratio",
-    "spatio_temporal_pruning_min_points", "spatio_temporal_pruning_random",
-    "spatio_temporal_pruning_from_iter", "spatio_temporal_pruning_until_iter",
-    "spatio_temporal_pruning_interval", "spatio_temporal_pruning_max_total_ratio",
-    "lambda_key", "lambda_non_key", "usplat_start_iter", "usplat_eta_c",
-    "usplat_phi", "usplat_key_ratio", "usplat_spt_threshold", "usplat_knn_k",
-    "usplat_u_tau_percentile", "usplat_max_key_nodes", "usplat_assignment_chunk_size",
-    "usplat_key_assignment_chunk_size", "usplat_motion_window",
-    "usplat_nonkey_loss_chunk_size", "usplat_quat_chunk_size",
-    "usplat_cov_eigengap_eps", "record_training_diagnostics",
+    "thresh_opa_prune",
+    "densification_interval",
+    "opacity_reset_interval",
+    "densify_from_iter",
+    "densify_until_iter",
+    "densify_grad_threshold",
+    "densify_grad_t_threshold",
+    "densify_until_num_points",
+    "final_prune_from_iter",
+    "final_prune_ratio",
+    "sh_increase_interval",
+    "lambda_opa_mask",
+    "lambda_rigid",
+    "lambda_motion",
+    "lambda_depth",
+    "mobilegs_opacity_phi_lr",
+    "mobilegs_teacher_checkpoint",
+    "mobilegs_force_first_order_sh",
+    "lambda_mobilegs_sh_distill",
+    "lambda_mobilegs_depth_distill",
+    "enable_edge_guided_splitting",
+    "ess_from_iter",
+    "ess_until_iter",
+    "ess_interval",
+    "ess_edge_percentile",
+    "ess_scale_percentile",
+    "ess_max_splits",
+    "ess_split_children",
+    "enable_spatio_temporal_pruning",
+    "spatio_temporal_pruning_ratio",
+    "spatio_temporal_pruning_min_points",
+    "spatio_temporal_pruning_random",
+    "spatio_temporal_pruning_from_iter",
+    "spatio_temporal_pruning_until_iter",
+    "spatio_temporal_pruning_interval",
+    "spatio_temporal_pruning_max_total_ratio",
+    "lambda_key",
+    "lambda_non_key",
+    "usplat_start_iter",
+    "usplat_eta_c",
+    "usplat_phi",
+    "usplat_key_ratio",
+    "usplat_spt_threshold",
+    "usplat_knn_k",
+    "usplat_u_tau_percentile",
+    "usplat_max_key_nodes",
+    "usplat_assignment_chunk_size",
+    "usplat_key_assignment_chunk_size",
+    "usplat_motion_window",
+    "usplat_nonkey_loss_chunk_size",
+    "usplat_quat_chunk_size",
+    "usplat_cov_eigengap_eps",
+    "record_training_diagnostics",
     "diagnostics_short_lifespan_threshold",
 }
 
 MODEL_OVERRIDE_KEYS = {
-    "sh_degree", "source_path", "model_path", "images", "resolution",
-    "white_background", "data_device", "eval", "extension", "num_extra_pts",
-    "loaded_pth", "frame_ratio", "dataloader", "prefilter_var",
+    "sh_degree",
+    "source_path",
+    "model_path",
+    "images",
+    "resolution",
+    "white_background",
+    "data_device",
+    "eval",
+    "extension",
+    "num_extra_pts",
+    "loaded_pth",
+    "frame_ratio",
+    "dataloader",
+    "prefilter_var",
 }
 
 
@@ -1113,7 +1502,9 @@ def _deep_copy_mapping(value: Any) -> Any:
     return value
 
 
-def _find_nested_key_paths(config: Mapping[str, Any], key: str, prefix: tuple[str, ...] = ()) -> List[tuple[str, ...]]:
+def _find_nested_key_paths(
+    config: Mapping[str, Any], key: str, prefix: tuple[str, ...] = ()
+) -> List[tuple[str, ...]]:
     paths: List[tuple[str, ...]] = []
     for cur_key, cur_value in config.items():
         cur_path = prefix + (str(cur_key),)
@@ -1124,7 +1515,9 @@ def _find_nested_key_paths(config: Mapping[str, Any], key: str, prefix: tuple[st
     return paths
 
 
-def _set_path(config: MutableMapping[str, Any], path: Sequence[str], value: Any) -> None:
+def _set_path(
+    config: MutableMapping[str, Any], path: Sequence[str], value: Any
+) -> None:
     cur: MutableMapping[str, Any] = config
     for piece in path[:-1]:
         next_value = cur.setdefault(piece, {})
@@ -1152,7 +1545,9 @@ def _preferred_override_path(config: Mapping[str, Any], key: str) -> tuple[str, 
     return (key,)
 
 
-def apply_flat_overrides(config: Mapping[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
+def apply_flat_overrides(
+    config: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> Dict[str, Any]:
     derived = _deep_copy_mapping(config)
     for key, value in overrides.items():
         _set_path(derived, _preferred_override_path(derived, key), value)
@@ -1165,7 +1560,12 @@ def write_yaml(path: Path, payload: Mapping[str, Any]) -> None:
         yaml.safe_dump(payload, handle, sort_keys=False)
 
 
-def assemble_command(args: argparse.Namespace, train_script: str, generated_config_path: Path, extra_args: Sequence[str]) -> List[str]:
+def assemble_command(
+    args: argparse.Namespace,
+    train_script: str,
+    generated_config_path: Path,
+    extra_args: Sequence[str],
+) -> List[str]:
     cmd = [*command_prefix(args), train_script, "--config", str(generated_config_path)]
     for fragment in extra_args:
         cmd.extend(shlex.split(fragment))
@@ -1205,29 +1605,38 @@ def command_prefix(args: argparse.Namespace) -> List[str]:
     raise ValueError(f"Unsupported runner mode: {runner}")
 
 
-def wrap_script_command(args: argparse.Namespace, script_path: Path, script_args: Sequence[str]) -> List[str]:
+def wrap_script_command(
+    args: argparse.Namespace, script_path: Path, script_args: Sequence[str]
+) -> List[str]:
     return [*command_prefix(args), str(script_path), *script_args]
 
 
 def quota_cli_args(args: argparse.Namespace) -> List[str]:
-    resolved_quota = resolve_quota_command(args) or str(getattr(args, "quota_command", "lquota"))
-    args_out = ["--no-quota-reservation"] if not bool(getattr(args, "quota_reservation", True)) else ["--quota-reservation"]
-    args_out.extend([
-        "--quota-command",
-        resolved_quota,
-        "--quota-fallback-root",
-        str(getattr(args, "quota_fallback_root", str(Path.home()))),
-        "--quota-limit-gb",
-        str(args.quota_limit_gb),
-        "--quota-reserve-gb",
-        str(args.quota_reserve_gb),
-        "--train-run-peak-storage-gb",
-        str(args.train_run_peak_storage_gb),
-        "--quota-poll-interval",
-        str(args.quota_poll_interval),
-    ])
+    resolved_quota = resolve_quota_command(args) or str(
+        getattr(args, "quota_command", "lquota")
+    )
+    args_out = (
+        ["--no-quota-reservation"]
+        if not bool(getattr(args, "quota_reservation", True))
+        else ["--quota-reservation"]
+    )
+    args_out.extend(
+        [
+            "--quota-command",
+            resolved_quota,
+            "--quota-fallback-root",
+            str(getattr(args, "quota_fallback_root", str(Path.home()))),
+            "--quota-limit-gb",
+            str(args.quota_limit_gb),
+            "--quota-reserve-gb",
+            str(args.quota_reserve_gb),
+            "--train-run-peak-storage-gb",
+            str(args.train_run_peak_storage_gb),
+            "--quota-poll-interval",
+            str(args.quota_poll_interval),
+        ]
+    )
     return args_out
-
 
 
 def mobilegs_cli_args(args: argparse.Namespace) -> List[str]:
@@ -1277,7 +1686,7 @@ def mobilegs_cli_args(args: argparse.Namespace) -> List[str]:
         out.append("--require-mobilegs-report")
     else:
         out.append("--no-require-mobilegs-report")
-    if bool(getattr(args, "mobilegs_force_first_order_sh", True)):
+    if bool(getattr(args, "mobilegs_force_first_order_sh", False)):
         out.append("--mobilegs-force-first-order-sh")
     else:
         out.append("--no-mobilegs-force-first-order-sh")
@@ -1304,6 +1713,7 @@ def checkpoint_metrics_cli_args(args: argparse.Namespace) -> List[str]:
         out.append("--skip-checkpoint-metrics")
     return out
 
+
 def build_option_map(args: argparse.Namespace) -> Dict[str, List[str]]:
     return {
         "isotropy": normalize_choice_list(args.isotropy_options),
@@ -1316,7 +1726,9 @@ def build_option_map(args: argparse.Namespace) -> Dict[str, List[str]]:
     }
 
 
-def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions) -> List[RunSpec]:
+def build_run_specs(
+    args: argparse.Namespace, schedule_options: ScheduleOptions
+) -> List[RunSpec]:
     requested_axes = normalize_choice_list(args.axes)
     unknown_axes = [axis for axis in requested_axes if axis not in SUPPORTED_AXES]
     if unknown_axes:
@@ -1335,7 +1747,9 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
         # global overrides such as --laptop-8gb or --set iterations=... are
         # applied. Otherwise ESS/USplat/pruning schedules can be generated past
         # the final training iteration.
-        effective_base_cfg = normalize_generated_config_types(apply_flat_overrides(cfg, global_overrides))
+        effective_base_cfg = normalize_generated_config_types(
+            apply_flat_overrides(cfg, global_overrides)
+        )
         effective_flat_cfg = flatten_cfg(effective_base_cfg)
         if str(args.matrix_preset).lower() == "cartesian":
             variants = build_cartesian_variants(
@@ -1354,13 +1768,17 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
                 dropout_prob=args.dropout_prob,
                 dropout_lambda_rdr=args.dropout_lambda_rdr,
             )
-        variants = filter_valid_variants(effective_flat_cfg, variants, args.include_invalid_combinations)
+        variants = filter_valid_variants(
+            effective_flat_cfg, variants, args.include_invalid_combinations
+        )
         if args.limit is not None:
             variants = variants[: args.limit]
 
         scene_name = infer_scene_name(config_path, effective_flat_cfg, args.scene_name)
         output_root = get_output_root(effective_flat_cfg, args.output_root)
-        config_root = generated_config_root(output_root, args.generated_config_root) / scene_name
+        config_root = (
+            generated_config_root(output_root, args.generated_config_root) / scene_name
+        )
         base_seed = int(effective_flat_cfg.get("seed", 6666))
         iterations = int(effective_flat_cfg.get("iterations", 0))
 
@@ -1373,14 +1791,18 @@ def build_run_specs(args: argparse.Namespace, schedule_options: ScheduleOptions)
             if args.seed_offset:
                 run_overrides["seed"] = base_seed + args.seed_offset + index
 
-            derived_cfg = normalize_generated_config_types(apply_flat_overrides(cfg, run_overrides))
+            derived_cfg = normalize_generated_config_types(
+                apply_flat_overrides(cfg, run_overrides)
+            )
             validate_run_paths(derived_cfg, repo_root)
             derived_flat = flatten_cfg(derived_cfg)
             run_iterations = int(derived_flat.get("iterations", iterations))
             generated_config_path = config_root / f"{variant.name}.yaml"
             write_yaml(generated_config_path, derived_cfg)
 
-            command = assemble_command(args, args.train_script, generated_config_path, args.extra_args)
+            command = assemble_command(
+                args, args.train_script, generated_config_path, args.extra_args
+            )
             run_specs.append(
                 RunSpec(
                     config_path=str(config_path.resolve()),
@@ -1471,7 +1893,11 @@ class GPUPeakMonitor:
     def _query_pid_memory_mb(self) -> float | None:
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory", "--format=csv,noheader,nounits"],
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -1502,7 +1928,9 @@ class GPUPeakMonitor:
         return total if found else 0.0
 
 
-def run_subprocess_with_monitor(command: Sequence[str], cwd: Path, poll_interval: float) -> Dict[str, Any]:
+def run_subprocess_with_monitor(
+    command: Sequence[str], cwd: Path, poll_interval: float
+) -> Dict[str, Any]:
     start_wall = time.time()
     start = time.perf_counter()
     proc = subprocess.Popen(list(command), cwd=str(cwd))
@@ -1603,7 +2031,11 @@ def load_json_if_exists(path: Path) -> Dict[str, Any] | None:
         return None
 
 
-def detect_existing_state(run_spec: RunSpec, retry_failed_existing: bool, checkpoint_metrics_jsonl_filename: str | None = None) -> ExistingState:
+def detect_existing_state(
+    run_spec: RunSpec,
+    retry_failed_existing: bool,
+    checkpoint_metrics_jsonl_filename: str | None = None,
+) -> ExistingState:
     model_path = Path(run_spec.model_path)
     metrics_path = model_path / "run_metrics.json"
     metrics_payload = load_json_if_exists(metrics_path)
@@ -1618,17 +2050,44 @@ def detect_existing_state(run_spec: RunSpec, retry_failed_existing: bool, checkp
                 and not (model_path / checkpoint_metrics_jsonl_filename).exists()
             )
             if checkpoint_metrics_missing:
-                return ExistingState("metrics_only", str(metrics_path), str(checkpoint_path), metrics_payload)
-            return ExistingState("complete", str(metrics_path), str(checkpoint_path) if checkpoint_path else None, metrics_payload)
+                return ExistingState(
+                    "metrics_only",
+                    str(metrics_path),
+                    str(checkpoint_path),
+                    metrics_payload,
+                )
+            return ExistingState(
+                "complete",
+                str(metrics_path),
+                str(checkpoint_path) if checkpoint_path else None,
+                metrics_payload,
+            )
         if status == "metrics_failed" and checkpoint_path is not None:
-            return ExistingState("metrics_only", str(metrics_path), str(checkpoint_path), metrics_payload)
+            return ExistingState(
+                "metrics_only", str(metrics_path), str(checkpoint_path), metrics_payload
+            )
         if status == "failed" and not retry_failed_existing:
-            return ExistingState("complete", str(metrics_path), str(checkpoint_path) if checkpoint_path else None, metrics_payload)
+            return ExistingState(
+                "complete",
+                str(metrics_path),
+                str(checkpoint_path) if checkpoint_path else None,
+                metrics_payload,
+            )
 
     if checkpoint_path is not None:
-        return ExistingState("metrics_only", str(metrics_path) if metrics_path.exists() else None, str(checkpoint_path), metrics_payload)
+        return ExistingState(
+            "metrics_only",
+            str(metrics_path) if metrics_path.exists() else None,
+            str(checkpoint_path),
+            metrics_payload,
+        )
 
-    return ExistingState("pending", str(metrics_path) if metrics_path.exists() else None, None, metrics_payload)
+    return ExistingState(
+        "pending",
+        str(metrics_path) if metrics_path.exists() else None,
+        None,
+        metrics_payload,
+    )
 
 
 def estimated_run_cost(run_spec: RunSpec, action: str) -> float:
@@ -1652,11 +2111,17 @@ def estimated_run_cost(run_spec: RunSpec, action: str) -> float:
     return cost
 
 
-def build_pending_runs(run_specs: Sequence[RunSpec], retry_failed_existing: bool, checkpoint_metrics_jsonl_filename: str | None = None) -> tuple[List[PendingRun], List[Dict[str, Any]]]:
+def build_pending_runs(
+    run_specs: Sequence[RunSpec],
+    retry_failed_existing: bool,
+    checkpoint_metrics_jsonl_filename: str | None = None,
+) -> tuple[List[PendingRun], List[Dict[str, Any]]]:
     pending: List[PendingRun] = []
     existing_rows: List[Dict[str, Any]] = []
     for run_spec in run_specs:
-        existing_state = detect_existing_state(run_spec, retry_failed_existing, checkpoint_metrics_jsonl_filename)
+        existing_state = detect_existing_state(
+            run_spec, retry_failed_existing, checkpoint_metrics_jsonl_filename
+        )
         if existing_state.status == "complete":
             if existing_state.metrics_payload is not None:
                 existing_rows.append(dict(existing_state.metrics_payload))
@@ -1665,12 +2130,18 @@ def build_pending_runs(run_specs: Sequence[RunSpec], retry_failed_existing: bool
             action = "metrics_only"
         else:
             action = "train_metrics"
-        pending.append(PendingRun(run_spec, action, estimated_run_cost(run_spec, action)))
+        pending.append(
+            PendingRun(run_spec, action, estimated_run_cost(run_spec, action))
+        )
     return pending, existing_rows
 
 
-def partition_pending_runs(pending_runs: Sequence[PendingRun], num_workers: int) -> List[WorkerAssignment]:
-    assignments = [WorkerAssignment(worker_index=i, runs=[]) for i in range(num_workers)]
+def partition_pending_runs(
+    pending_runs: Sequence[PendingRun], num_workers: int
+) -> List[WorkerAssignment]:
+    assignments = [
+        WorkerAssignment(worker_index=i, runs=[]) for i in range(num_workers)
+    ]
     if not pending_runs:
         return assignments
 
@@ -1776,7 +2247,6 @@ def write_csv_summary(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
             writer.writerow(row)
 
 
-
 def read_jsonl_rows(path: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     if not path.exists():
@@ -1795,17 +2265,23 @@ def read_jsonl_rows(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def write_checkpoint_metric_files(model_path: Path, args: argparse.Namespace, rows: Sequence[Mapping[str, Any]]) -> None:
+def write_checkpoint_metric_files(
+    model_path: Path, args: argparse.Namespace, rows: Sequence[Mapping[str, Any]]
+) -> None:
     csv_path = model_path / str(args.checkpoint_metrics_filename)
     jsonl_path = model_path / str(args.checkpoint_metrics_jsonl_filename)
     write_csv_summary(csv_path, rows)
     append_jsonl(jsonl_path, rows)
 
 
-def collect_checkpoint_metric_rows(args: argparse.Namespace, run_specs: Sequence[RunSpec]) -> List[Dict[str, Any]]:
+def collect_checkpoint_metric_rows(
+    args: argparse.Namespace, run_specs: Sequence[RunSpec]
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for run_spec in run_specs:
-        jsonl_path = Path(run_spec.model_path) / str(args.checkpoint_metrics_jsonl_filename)
+        jsonl_path = Path(run_spec.model_path) / str(
+            args.checkpoint_metrics_jsonl_filename
+        )
         rows.extend(read_jsonl_rows(jsonl_path))
 
     dedup: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -1822,11 +2298,19 @@ def collect_checkpoint_metric_rows(args: argparse.Namespace, run_specs: Sequence
             iteration = int(iteration_value)
         except Exception:
             iteration = 10**18
-        return (str(item.get("scene_name", "")), str(item.get("variant_name", "")), iteration, str(item.get("checkpoint_filename", "")))
+        return (
+            str(item.get("scene_name", "")),
+            str(item.get("variant_name", "")),
+            iteration,
+            str(item.get("checkpoint_filename", "")),
+        )
 
     return sorted(dedup.values(), key=sort_key)
 
-def collect_summary_rows(run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def collect_summary_rows(
+    run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = [dict(row) for row in existing_rows]
     for run_spec in run_specs:
         metrics_path = Path(run_spec.model_path) / "run_metrics.json"
@@ -1919,7 +2403,11 @@ def evaluate_checkpoint(
     gaussian_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
     if int(gaussian_kwargs.get("gaussian_dim", 4)) != 4:
         raise ValueError("Only 4D Gaussian checkpoints are supported.")
-    time_duration = coerce_time_duration(gaussian_kwargs.get("time_duration", getattr(merged, "time_duration", [-0.5, 0.5])))
+    time_duration = coerce_time_duration(
+        gaussian_kwargs.get(
+            "time_duration", getattr(merged, "time_duration", [-0.5, 0.5])
+        )
+    )
     gaussian_kwargs["time_duration"] = time_duration
     merged.time_duration = time_duration
     num_pts = int(getattr(merged, "num_pts", 100000))
@@ -1973,7 +2461,9 @@ def evaluate_checkpoint(
             image = torch.clamp(render_pkg["render"], 0.0, 1.0)
             totals["psnr"] += scalar_float(psnr(image, gt_image).mean())
             totals["ssim"] += scalar_float(ssim(image, gt_image).mean())
-            totals["lpips"] += scalar_float(lpips_metric(image[None].cpu(), gt_image[None].cpu()))
+            totals["lpips"] += scalar_float(
+                lpips_metric(image[None].cpu(), gt_image[None].cpu())
+            )
 
     count = float(len(camera_items))
     metric_results = {
@@ -2007,7 +2497,9 @@ def evaluate_checkpoint(
         if torch.cuda.is_available()
         else None
     )
-    metric_results["final_gaussian_count"] = extract_final_gaussian_count(checkpoint_payload)
+    metric_results["final_gaussian_count"] = extract_final_gaussian_count(
+        checkpoint_payload
+    )
     metric_results["checkpoint_size_bytes"] = checkpoint_path.stat().st_size
     metric_results["checkpoint_path"] = str(checkpoint_path.resolve())
     return metric_results
@@ -2106,11 +2598,13 @@ def evaluate_checkpoint_history(
             )
             row.update(eval_result)
             if row.get("training_wall_clock_sec_at_checkpoint") is None:
-                row["training_wall_clock_sec_at_checkpoint"] = training_wall_clock_at_checkpoint(
-                    checkpoint_path,
-                    run_spec=run_spec,
-                    checkpoint_iteration=row.get("eval_checkpoint_iteration"),
-                    training_timing=training_timing,
+                row["training_wall_clock_sec_at_checkpoint"] = (
+                    training_wall_clock_at_checkpoint(
+                        checkpoint_path,
+                        run_spec=run_spec,
+                        checkpoint_iteration=row.get("eval_checkpoint_iteration"),
+                        training_timing=training_timing,
+                    )
                 )
         except Exception as exc:
             row["status"] = "metrics_failed"
@@ -2123,9 +2617,6 @@ def evaluate_checkpoint_history(
 
     write_checkpoint_metric_files(model_path, args, rows)
     return rows
-
-
-
 
 
 def _source_sort_free_for_run(run_spec: RunSpec) -> bool:
@@ -2149,7 +2640,13 @@ def should_run_mobilegs_report(run_spec: RunSpec, args: argparse.Namespace) -> b
     raise ValueError(f"Unsupported --mobilegs-report-scope={scope}")
 
 
-def _pipe_from_checkpoint(checkpoint_payload: Mapping[str, Any], args: argparse.Namespace, *, visibility: bool, render_mode: str) -> SimpleNamespace:
+def _pipe_from_checkpoint(
+    checkpoint_payload: Mapping[str, Any],
+    args: argparse.Namespace,
+    *,
+    visibility: bool,
+    render_mode: str,
+) -> SimpleNamespace:
     run_config = checkpoint_payload.get("run_config", {})
     run_args = run_config.get("args", {}) if isinstance(run_config, Mapping) else {}
     source_sort_free = bool(run_args.get("sort_free_render", False))
@@ -2172,7 +2669,9 @@ def _pipe_from_checkpoint(checkpoint_payload: Mapping[str, Any], args: argparse.
         use_usplat=False,
         sort_free_render=bool(sort_free),
         temporal_mask_threshold=float(args.mobilegs_temporal_mask_threshold),
-        temporal_mask_keyframes=int(args.mobilegs_temporal_keyframes) if visibility else 0,
+        temporal_mask_keyframes=(
+            int(args.mobilegs_temporal_keyframes) if visibility else 0
+        ),
         temporal_mask_window=int(args.mobilegs_temporal_mask_window),
         temporal_mask_mode="visibility" if visibility else "marginal",
         random_dropout_prob=0.0,
@@ -2181,11 +2680,14 @@ def _pipe_from_checkpoint(checkpoint_payload: Mapping[str, Any], args: argparse.
         env_map_res=0 if sort_free else int(run_args.get("env_map_res", 0) or 0),
         env_optimize_until=0,
         env_optimize_from=0,
-        eval_shfs_4d=bool(run_args.get("eval_shfs_4d", False)) and not bool(run_args.get("mobilegs_force_first_order_sh", False)),
+        eval_shfs_4d=bool(run_args.get("eval_shfs_4d", False))
+        and not bool(run_args.get("mobilegs_force_first_order_sh", False)),
     )
 
 
-def _mobilegs_export_first_order_for_checkpoint(gaussians: Any, requested_first_order: bool) -> bool:
+def _mobilegs_export_first_order_for_checkpoint(
+    gaussians: Any, requested_first_order: bool
+) -> bool:
     """Choose an SH export layout compatible with the trained Mobile-GS MLP."""
     requested_first_order = bool(requested_first_order)
     mlp = getattr(gaussians, "mobilegs_opacity_phi_nn", None)
@@ -2246,10 +2748,14 @@ def run_mobilegs_export_benchmark(
     run_args = checkpoint_payload.get("run_config", {}).get("args", {})
     source_sort_free = bool(run_args.get("sort_free_render", False))
     render_mode = str(getattr(args, "mobilegs_benchmark_render_mode", "match"))
-    benchmark_pipe_probe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode=render_mode)
+    benchmark_pipe_probe = _pipe_from_checkpoint(
+        checkpoint_payload, args, visibility=False, render_mode=render_mode
+    )
 
     gaussian_kwargs = dict(checkpoint_payload["run_config"].get("gaussian_kwargs", {}))
-    gaussian_kwargs["time_duration"] = coerce_time_duration(gaussian_kwargs.get("time_duration", [-0.5, 0.5]))
+    gaussian_kwargs["time_duration"] = coerce_time_duration(
+        gaussian_kwargs.get("time_duration", [-0.5, 0.5])
+    )
     gaussians = GaussianModel(**gaussian_kwargs)
     gaussians.restore(checkpoint_payload["gaussians"], training_args=None)
     gaussians.active_sh_degree = gaussians.max_sh_degree
@@ -2258,7 +2764,10 @@ def run_mobilegs_export_benchmark(
     if gaussians.mobilegs_opacity_phi_nn is not None:
         gaussians.mobilegs_opacity_phi_nn.eval()
 
-    if benchmark_pipe_probe.sort_free_render and gaussians.mobilegs_opacity_phi_nn is None:
+    if (
+        benchmark_pipe_probe.sort_free_render
+        and gaussians.mobilegs_opacity_phi_nn is None
+    ):
         raise RuntimeError(
             "Requested Mobile-GS sort-free benchmarking for a checkpoint without a trained "
             "Mobile-GS opacity/phi MLP. Use --mobilegs-benchmark-render-mode match/sorted, "
@@ -2267,22 +2776,34 @@ def run_mobilegs_export_benchmark(
 
     scene_meta = checkpoint_payload.get("scene", {})
     background = torch.tensor(
-        [1.0, 1.0, 1.0] if scene_meta.get("white_background", False) else [0.0, 0.0, 0.0],
+        (
+            [1.0, 1.0, 1.0]
+            if scene_meta.get("white_background", False)
+            else [0.0, 0.0, 0.0]
+        ),
         dtype=torch.float32,
         device="cuda",
     )
-    train_cameras = cameras_from_checkpoint_scene(scene_meta, split="train", device="cuda")
-    bench_cameras = cameras_from_checkpoint_scene(scene_meta, split=args.mobilegs_benchmark_split, device="cuda")
+    train_cameras = cameras_from_checkpoint_scene(
+        scene_meta, split="train", device="cuda"
+    )
+    bench_cameras = cameras_from_checkpoint_scene(
+        scene_meta, split=args.mobilegs_benchmark_split, device="cuda"
+    )
     bench_split_used = args.mobilegs_benchmark_split
     if not bench_cameras:
         bench_cameras = train_cameras
         bench_split_used = "train"
     if not bench_cameras:
-        raise RuntimeError("Checkpoint does not contain camera metadata for Mobile-GS benchmarking.")
+        raise RuntimeError(
+            "Checkpoint does not contain camera metadata for Mobile-GS benchmarking."
+        )
 
     temporal_filter = None
     if bool(args.mobilegs_build_visibility_filter):
-        visibility_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode="match")
+        visibility_pipe = _pipe_from_checkpoint(
+            checkpoint_payload, args, visibility=False, render_mode="match"
+        )
         temporal_filter = build_temporal_visibility_filter(
             gaussians,
             train_cameras if train_cameras else bench_cameras,
@@ -2315,7 +2836,12 @@ def run_mobilegs_export_benchmark(
 
     restored_payload = load_mobile_payload(str(mobile_path), map_location="cpu")
     mobile = restore_mobile_payload(restored_payload, training_args=None, device="cuda")
-    mobile_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=temporal_filter is not None, render_mode=render_mode)
+    mobile_pipe = _pipe_from_checkpoint(
+        checkpoint_payload,
+        args,
+        visibility=temporal_filter is not None,
+        render_mode=render_mode,
+    )
     fps = benchmark_renderer(
         mobile,
         bench_cameras,
@@ -2326,34 +2852,46 @@ def run_mobilegs_export_benchmark(
         repeats=int(args.mobilegs_benchmark_repeats),
     )
 
-    raw_gaussian_size = tensor_storage_bytes({
-        "xyz": gaussians.get_xyz,
-        "features_dc": gaussians._features_dc,
-        "features_rest": gaussians._features_rest,
-        "scaling": gaussians._scaling,
-        "opacity": gaussians._opacity,
-        "t": gaussians._t,
-        "scaling_t": gaussians._scaling_t,
-        "rotation": gaussians._rotation,
-        "rotation_r": gaussians._rotation_r,
-    })
+    raw_gaussian_size = tensor_storage_bytes(
+        {
+            "xyz": gaussians.get_xyz,
+            "features_dc": gaussians._features_dc,
+            "features_rest": gaussians._features_rest,
+            "scaling": gaussians._scaling,
+            "opacity": gaussians._opacity,
+            "t": gaussians._t,
+            "scaling_t": gaussians._scaling_t,
+            "rotation": gaussians._rotation,
+            "rotation_r": gaussians._rotation_r,
+        }
+    )
 
     quality = {"count": 0, "l1": None, "psnr": None, "ssim": None, "lpips": None}
     quality_samples = max(0, int(args.mobilegs_quality_samples))
     if quality_samples > 0:
-        raw_pipe = _pipe_from_checkpoint(checkpoint_payload, args, visibility=False, render_mode=render_mode)
+        raw_pipe = _pipe_from_checkpoint(
+            checkpoint_payload, args, visibility=False, render_mode=render_mode
+        )
         sums = {"l1": 0.0, "psnr": 0.0, "ssim": 0.0, "lpips": 0.0, "count": 0}
         with torch.inference_mode():
             for cam in bench_cameras[:quality_samples]:
-                ref = torch.clamp(render(cam, gaussians, raw_pipe, background)["render"], 0.0, 1.0)
-                out = torch.clamp(render(cam, mobile, mobile_pipe, background)["render"], 0.0, 1.0)
+                ref = torch.clamp(
+                    render(cam, gaussians, raw_pipe, background)["render"], 0.0, 1.0
+                )
+                out = torch.clamp(
+                    render(cam, mobile, mobile_pipe, background)["render"], 0.0, 1.0
+                )
                 sums["l1"] += float(l1_loss(out, ref).item())
                 sums["psnr"] += float(psnr(out, ref).mean().item())
                 sums["ssim"] += float(ssim(out, ref).mean().item())
-                sums["lpips"] += float(lpips_metric(out[None].cpu(), ref[None].cpu()).item())
+                sums["lpips"] += float(
+                    lpips_metric(out[None].cpu(), ref[None].cpu()).item()
+                )
                 sums["count"] += 1
         if sums["count"]:
-            quality = {k: (v / sums["count"] if k != "count" else v) for k, v in sums.items()}
+            quality = {
+                k: (v / sums["count"] if k != "count" else v) for k, v in sums.items()
+            }
 
     summary = {
         "status": "ok",
@@ -2365,7 +2903,8 @@ def run_mobilegs_export_benchmark(
         "raw_gaussian_tensor_bytes": int(raw_gaussian_size),
         "payload_serialized_bytes": int(serialized_size(restored_payload)),
         "file_bytes": int(mobile_path.stat().st_size),
-        "compression_vs_raw_gaussian_tensors": float(raw_gaussian_size) / max(float(mobile_path.stat().st_size), 1.0),
+        "compression_vs_raw_gaussian_tensors": float(raw_gaussian_size)
+        / max(float(mobile_path.stat().st_size), 1.0),
         "first_order_sh": bool(export_first_order_sh),
         "first_order_sh_requested": bool(args.mobilegs_force_first_order_sh),
         "source_sort_free_render": bool(source_sort_free),
@@ -2392,6 +2931,7 @@ def _flatten_mobile_metrics(summary: Mapping[str, Any]) -> Dict[str, Any]:
     flat["mobile_status"] = str(summary.get("status", "ok"))
     return flat
 
+
 def flatten_metric_payload(prefix: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
     for key, value in payload.items():
@@ -2413,7 +2953,9 @@ def load_training_diagnostics(model_path: Path) -> Dict[str, Any]:
     return flatten_metric_payload("diag", payload)
 
 
-def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Path) -> Dict[str, Any]:
+def run_one_pending(
+    pending: PendingRun, args: argparse.Namespace, repo_root: Path
+) -> Dict[str, Any]:
     run_spec = pending.run_spec
     model_path = Path(run_spec.model_path)
     generated_config_path = Path(run_spec.generated_config_path)
@@ -2433,8 +2975,12 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
     }
     row.update(run_spec.variant_tags)
 
-    existing_metrics_payload = load_json_if_exists(model_path / "run_metrics.json") or {}
-    if pending.action != "train_metrics" and isinstance(existing_metrics_payload, Mapping):
+    existing_metrics_payload = (
+        load_json_if_exists(model_path / "run_metrics.json") or {}
+    )
+    if pending.action != "train_metrics" and isinstance(
+        existing_metrics_payload, Mapping
+    ):
         for timing_key in (
             "training_wall_clock_sec",
             "training_start_time_wall_sec",
@@ -2451,23 +2997,35 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
         if pending.action == "train_metrics":
             reservation_id = acquire_quota_reservation(args, summary_root, model_path)
             print(f"[RUN] {run_spec.variant_name} -> {model_path}")
-            train_result = run_subprocess_with_monitor(run_spec.command, repo_root, args.vram_poll_interval)
+            train_result = run_subprocess_with_monitor(
+                run_spec.command, repo_root, args.vram_poll_interval
+            )
             row["returncode"] = train_result["returncode"]
             row["training_wall_clock_sec"] = train_result["training_wall_clock_sec"]
-            row["training_start_time_wall_sec"] = train_result.get("training_start_time_wall_sec")
-            row["training_end_time_wall_sec"] = train_result.get("training_end_time_wall_sec")
+            row["training_start_time_wall_sec"] = train_result.get(
+                "training_start_time_wall_sec"
+            )
+            row["training_end_time_wall_sec"] = train_result.get(
+                "training_end_time_wall_sec"
+            )
             row["peak_vram_mb"] = train_result["peak_vram_mb"]
             if train_result["returncode"] != 0:
                 row["status"] = "failed"
-                row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
+                row["model_path_size_bytes"] = cleanup_run_directory(
+                    model_path, run_spec.iterations, args.cleanup_after_run
+                )
                 metrics_json_path = write_run_metrics_json(model_path, row)
                 row["metrics_json_path"] = str(metrics_json_path.resolve())
                 return row
-            checkpoint_path = find_best_available_checkpoint(model_path, run_spec.iterations)
+            checkpoint_path = find_best_available_checkpoint(
+                model_path, run_spec.iterations
+            )
             if checkpoint_path is None:
                 row["status"] = "failed"
                 row["error"] = "Training finished without any checkpoint file."
-                row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
+                row["model_path_size_bytes"] = cleanup_run_directory(
+                    model_path, run_spec.iterations, args.cleanup_after_run
+                )
                 metrics_json_path = write_run_metrics_json(model_path, row)
                 row["metrics_json_path"] = str(metrics_json_path.resolve())
                 return row
@@ -2476,7 +3034,9 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
             if checkpoint_path is None:
                 row["status"] = "failed"
                 row["error"] = "metrics_only requested but no checkpoint was found."
-                row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
+                row["model_path_size_bytes"] = cleanup_run_directory(
+                    model_path, run_spec.iterations, args.cleanup_after_run
+                )
                 metrics_json_path = write_run_metrics_json(model_path, row)
                 row["metrics_json_path"] = str(metrics_json_path.resolve())
                 return row
@@ -2497,12 +3057,16 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
                 if peak_vram_mb is None:
                     row["peak_vram_mb"] = peak_eval_vram_mb
                 elif peak_eval_vram_mb is not None:
-                    row["peak_vram_mb"] = max(float(peak_vram_mb), float(peak_eval_vram_mb))
+                    row["peak_vram_mb"] = max(
+                        float(peak_vram_mb), float(peak_eval_vram_mb)
+                    )
             except Exception as exc:
                 row["status"] = "metrics_failed"
                 row["metrics_error"] = str(exc)
 
-        if not args.skip_metrics and not bool(getattr(args, "skip_checkpoint_metrics", False)):
+        if not args.skip_metrics and not bool(
+            getattr(args, "skip_checkpoint_metrics", False)
+        ):
             try:
                 checkpoint_rows = evaluate_checkpoint_history(
                     repo_root=repo_root,
@@ -2511,8 +3075,12 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
                     training_timing=row,
                 )
                 row["checkpoint_metrics_rows"] = len(checkpoint_rows)
-                row["checkpoint_metrics_csv_path"] = str((model_path / str(args.checkpoint_metrics_filename)).resolve())
-                row["checkpoint_metrics_jsonl_path"] = str((model_path / str(args.checkpoint_metrics_jsonl_filename)).resolve())
+                row["checkpoint_metrics_csv_path"] = str(
+                    (model_path / str(args.checkpoint_metrics_filename)).resolve()
+                )
+                row["checkpoint_metrics_jsonl_path"] = str(
+                    (model_path / str(args.checkpoint_metrics_jsonl_filename)).resolve()
+                )
             except Exception as exc:
                 row["checkpoint_metrics_status"] = "failed"
                 row["checkpoint_metrics_error"] = str(exc)
@@ -2533,12 +3101,16 @@ def run_one_pending(pending: PendingRun, args: argparse.Namespace, repo_root: Pa
                 row["mobile_error"] = str(exc)
                 if bool(getattr(args, "require_mobilegs_report", False)):
                     row["status"] = "failed"
-                    row["error"] = f"Mobile-GS post-training compression/benchmark failed: {exc}"
+                    row["error"] = (
+                        f"Mobile-GS post-training compression/benchmark failed: {exc}"
+                    )
         else:
             row["mobile_status"] = "skipped"
 
         row.update(load_training_diagnostics(model_path))
-        row["model_path_size_bytes"] = cleanup_run_directory(model_path, run_spec.iterations, args.cleanup_after_run)
+        row["model_path_size_bytes"] = cleanup_run_directory(
+            model_path, run_spec.iterations, args.cleanup_after_run
+        )
         if bool(getattr(args, "quota_reservation", True)):
             try:
                 used_gb, limit_gb = query_lquota_gb(args)
@@ -2600,18 +3172,30 @@ def slurm_worker_gres(args: argparse.Namespace) -> str:
     return "gpu:1"
 
 
-def print_slurm_capacity_plan(args: argparse.Namespace, run_specs: Sequence[RunSpec]) -> None:
+def print_slurm_capacity_plan(
+    args: argparse.Namespace, run_specs: Sequence[RunSpec]
+) -> None:
     nodes = slurm_node_count(args)
     tasks = max(1, int(args.slurm_tasks))
     gpus = max(1, int(args.slurm_gpus))
     print("[SLURM PLAN]")
-    print(f"  partition={args.slurm_partition} qos={args.slurm_qos} account={args.slurm_account or '<none>'}")
-    print(f"  nodes={nodes} total_gpus={gpus} gpus_per_node={slurm_gpus_per_node(args)} tasks={tasks} tasks_per_node={slurm_tasks_per_node(args)}")
-    print(f"  cpus_per_task={slurm_cpus_per_task(args)} mem_per_node={args.slurm_mem} mem_per_worker={slurm_mem_per_worker(args, tasks)} time={args.slurm_time}")
+    print(
+        f"  partition={args.slurm_partition} qos={args.slurm_qos} account={args.slurm_account or '<none>'}"
+    )
+    print(
+        f"  nodes={nodes} total_gpus={gpus} gpus_per_node={slurm_gpus_per_node(args)} tasks={tasks} tasks_per_node={slurm_tasks_per_node(args)}"
+    )
+    print(
+        f"  cpus_per_task={slurm_cpus_per_task(args)} mem_per_node={args.slurm_mem} mem_per_worker={slurm_mem_per_worker(args, tasks)} time={args.slurm_time}"
+    )
     print(f"  max_parallel_training_runs={min(gpus, tasks)}")
     print(f"  generated_run_specs={len(run_specs)}")
-    print(f"  worker_gres={slurm_worker_gres(args)} sbatch_gres={slurm_gres_per_node(args)}")
-    print(f"  quota_limit_gb={args.quota_limit_gb} quota_reserve_gb={args.quota_reserve_gb} peak_storage_reserved_per_active_run_gb={args.train_run_peak_storage_gb}")
+    print(
+        f"  worker_gres={slurm_worker_gres(args)} sbatch_gres={slurm_gres_per_node(args)}"
+    )
+    print(
+        f"  quota_limit_gb={args.quota_limit_gb} quota_reserve_gb={args.quota_reserve_gb} peak_storage_reserved_per_active_run_gb={args.train_run_peak_storage_gb}"
+    )
 
 
 def parse_mem_to_mb(mem_value: str) -> int:
@@ -2621,7 +3205,13 @@ def parse_mem_to_mb(mem_value: str) -> int:
         raise ValueError(f"Could not parse memory value: {mem_value}")
     value = float(match.group(1))
     unit = match.group(2).upper()
-    multipliers = {"": 1.0 / (1024 * 1024), "K": 1.0 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024.0}
+    multipliers = {
+        "": 1.0 / (1024 * 1024),
+        "K": 1.0 / 1024,
+        "M": 1.0,
+        "G": 1024.0,
+        "T": 1024.0 * 1024.0,
+    }
     return max(1, int(value * multipliers[unit]))
 
 
@@ -2631,7 +3221,9 @@ def format_mem_from_mb(mem_mb: int) -> str:
     return f"{mem_mb}M"
 
 
-def slurm_mem_per_worker(args: argparse.Namespace, num_workers: int | None = None) -> str:
+def slurm_mem_per_worker(
+    args: argparse.Namespace, num_workers: int | None = None
+) -> str:
     # --mem is requested per allocated node. Divide by workers per node rather
     # than by all workers in a multi-node allocation.
     workers = max(1, num_workers if num_workers is not None else args.slurm_tasks)
@@ -2648,7 +3240,9 @@ def slurm_workspace(summary_root: Path, job_id: str | None = None) -> Path:
 
 
 def parse_capacity_to_gb(text: str) -> float | None:
-    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTP]?)(?:i?B|B)?", text.strip(), re.IGNORECASE)
+    match = re.search(
+        r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTP]?)(?:i?B|B)?", text.strip(), re.IGNORECASE
+    )
     if not match:
         return None
     value = float(match.group(1))
@@ -2712,7 +3306,9 @@ def resolve_quota_command(args: argparse.Namespace) -> str | None:
 def query_lquota_gb(args: argparse.Namespace) -> tuple[float, float]:
     quota_cmd = resolve_quota_command(args)
     if quota_cmd is not None:
-        result = subprocess.run([quota_cmd], check=False, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(
+            [quota_cmd], check=False, capture_output=True, text=True, timeout=15
+        )
         raw_text = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
         used_match = re.search(r"USED\s*=\s*([^\s]+)", raw_text, re.IGNORECASE)
         limit_match = re.search(r"LIMIT\s*=\s*([^\s]+)", raw_text, re.IGNORECASE)
@@ -2726,7 +3322,9 @@ def query_lquota_gb(args: argparse.Namespace) -> tuple[float, float]:
             f"falling back to du on {args.quota_fallback_root}"
         )
 
-    fallback_root = Path(str(getattr(args, "quota_fallback_root", str(Path.home())))).expanduser()
+    fallback_root = Path(
+        str(getattr(args, "quota_fallback_root", str(Path.home())))
+    ).expanduser()
     if not fallback_root.exists():
         raise RuntimeError(
             f"Quota command '{args.quota_command}' could not be resolved and fallback root "
@@ -2754,7 +3352,7 @@ def query_lquota_gb(args: argparse.Namespace) -> tuple[float, float]:
         )
 
     used_bytes = int(fields[0])
-    used_gb = used_bytes / (1024.0 ** 3)
+    used_gb = used_bytes / (1024.0**3)
     limit_gb = float(args.quota_limit_gb)
     print(
         f"[QUOTA] Falling back to du --apparent-size for {fallback_root}: "
@@ -2794,7 +3392,9 @@ def save_quota_reservations(path: Path, payload: Sequence[Mapping[str, Any]]) ->
     write_json(path, list(payload))
 
 
-def acquire_quota_reservation(args: argparse.Namespace, summary_root: Path, model_path: Path) -> str | None:
+def acquire_quota_reservation(
+    args: argparse.Namespace, summary_root: Path, model_path: Path
+) -> str | None:
     if not bool(getattr(args, "quota_reservation", True)):
         return None
     lock_path, reservations_path = quota_paths(summary_root)
@@ -2806,7 +3406,9 @@ def acquire_quota_reservation(args: argparse.Namespace, summary_root: Path, mode
             reservations = load_quota_reservations(reservations_path)
             used_gb, limit_gb = query_lquota_gb(args)
             reserved_gb = sum(float(item.get("gb", 0.0)) for item in reservations)
-            available_gb = limit_gb - used_gb - float(args.quota_reserve_gb) - reserved_gb
+            available_gb = (
+                limit_gb - used_gb - float(args.quota_reserve_gb) - reserved_gb
+            )
             if available_gb >= float(args.train_run_peak_storage_gb):
                 reservations.append(
                     {
@@ -2837,7 +3439,11 @@ def release_quota_reservation(summary_root: Path, reservation_id: str | None) ->
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         reservations = load_quota_reservations(reservations_path)
-        reservations = [item for item in reservations if str(item.get("reservation_id")) != reservation_id]
+        reservations = [
+            item
+            for item in reservations
+            if str(item.get("reservation_id")) != reservation_id
+        ]
         save_quota_reservations(reservations_path, reservations)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
@@ -2907,7 +3513,11 @@ def cleanup_model_artifacts(model_path: Path, keep_checkpoint: Path | None) -> N
         return
     if not cleanup_is_safe_for_model_path(model_path):
         return
-    keep_resolved = keep_checkpoint.resolve() if keep_checkpoint and keep_checkpoint.exists() else None
+    keep_resolved = (
+        keep_checkpoint.resolve()
+        if keep_checkpoint and keep_checkpoint.exists()
+        else None
+    )
     for ckpt in model_path.glob("chkpnt*.pth"):
         try:
             if keep_resolved is not None and ckpt.resolve() == keep_resolved:
@@ -2933,7 +3543,9 @@ def cleanup_existing_artifacts(run_specs: Sequence[RunSpec], enabled: bool) -> N
         cleanup_run_directory(Path(run_spec.model_path), run_spec.iterations, True)
 
 
-def dump_assignments(workspace: Path, assignments: Sequence[WorkerAssignment]) -> List[Path]:
+def dump_assignments(
+    workspace: Path, assignments: Sequence[WorkerAssignment]
+) -> List[Path]:
     paths: List[Path] = []
     workspace.mkdir(parents=True, exist_ok=True)
     for assignment in assignments:
@@ -2960,14 +3572,22 @@ def run_worker_from_assignment(args: argparse.Namespace, repo_root: Path) -> int
     payload = load_json(Path(args.assignment_file))
     worker_index = int(payload.get("worker_index", -1))
     runs_payload = payload.get("runs", [])
-    print(f"[WORKER {worker_index}] Loaded {len(runs_payload)} runs from {args.assignment_file}")
+    print(
+        f"[WORKER {worker_index}] Loaded {len(runs_payload)} runs from {args.assignment_file}"
+    )
 
     for item in runs_payload:
         run_spec = RunSpec(**item["run_spec"])
-        pending = PendingRun(run_spec=run_spec, action=item["action"], estimated_cost=float(item.get("estimated_cost", 0.0)))
+        pending = PendingRun(
+            run_spec=run_spec,
+            action=item["action"],
+            estimated_cost=float(item.get("estimated_cost", 0.0)),
+        )
         try:
             row = run_one_pending(pending, args, repo_root)
-            print(f"[WORKER {worker_index}] Finished {run_spec.variant_name} status={row.get('status')}")
+            print(
+                f"[WORKER {worker_index}] Finished {run_spec.variant_name} status={row.get('status')}"
+            )
         except Exception as exc:
             fallback = {
                 "status": "failed",
@@ -2979,13 +3599,23 @@ def run_worker_from_assignment(args: argparse.Namespace, repo_root: Path) -> int
                 "returncode": -1,
                 "error": str(exc),
             }
-            metrics_json_path = write_run_metrics_json(Path(run_spec.model_path), fallback)
-            print(f"[WORKER {worker_index}] Exception in {run_spec.variant_name}: {exc}")
-            print(f"[WORKER {worker_index}] Wrote failure record to {metrics_json_path}")
+            metrics_json_path = write_run_metrics_json(
+                Path(run_spec.model_path), fallback
+            )
+            print(
+                f"[WORKER {worker_index}] Exception in {run_spec.variant_name}: {exc}"
+            )
+            print(
+                f"[WORKER {worker_index}] Wrote failure record to {metrics_json_path}"
+            )
     return 0
 
 
-def gather_and_write_summaries(args: argparse.Namespace, run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]]) -> None:
+def gather_and_write_summaries(
+    args: argparse.Namespace,
+    run_specs: Sequence[RunSpec],
+    existing_rows: Sequence[Dict[str, Any]],
+) -> None:
     summary_root = summary_output_root(args, run_specs)
     rows = collect_summary_rows(run_specs, existing_rows)
     summary_csv_path = summary_root / args.summary_filename
@@ -2999,7 +3629,9 @@ def gather_and_write_summaries(args: argparse.Namespace, run_specs: Sequence[Run
     if not bool(getattr(args, "skip_checkpoint_metrics", False)):
         checkpoint_rows = collect_checkpoint_metric_rows(args, run_specs)
         checkpoint_csv_path = summary_root / str(args.checkpoint_metrics_filename)
-        checkpoint_jsonl_path = summary_root / str(args.checkpoint_metrics_jsonl_filename)
+        checkpoint_jsonl_path = summary_root / str(
+            args.checkpoint_metrics_jsonl_filename
+        )
         write_csv_summary(checkpoint_csv_path, checkpoint_rows)
         append_jsonl(checkpoint_jsonl_path, checkpoint_rows)
         print(f"Wrote checkpoint CSV summary to {checkpoint_csv_path}")
@@ -3007,7 +3639,12 @@ def gather_and_write_summaries(args: argparse.Namespace, run_specs: Sequence[Run
         print(f"Collected {len(checkpoint_rows)} checkpoint rows")
 
 
-def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]], pending_runs: Sequence[PendingRun]) -> int:
+def run_slurm_driver(
+    args: argparse.Namespace,
+    run_specs: Sequence[RunSpec],
+    existing_rows: Sequence[Dict[str, Any]],
+    pending_runs: Sequence[PendingRun],
+) -> int:
     summary_root = summary_output_root(args, run_specs)
     job_id = os.environ.get("SLURM_JOB_ID")
     workspace = slurm_workspace(summary_root, job_id)
@@ -3075,7 +3712,9 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
             step_cmd.append("--no-cleanup-existing-artifacts")
         if args.skip_metrics:
             step_cmd.append("--skip-metrics")
-        print(f"[SLURM STEP] worker={worker_index} cpus={cpus_per_task} mem={mem_per_worker} cmd={shell_join(step_cmd)}")
+        print(
+            f"[SLURM STEP] worker={worker_index} cpus={cpus_per_task} mem={mem_per_worker} cmd={shell_join(step_cmd)}"
+        )
         processes.append(subprocess.Popen(step_cmd))
 
     for proc in processes:
@@ -3085,7 +3724,12 @@ def run_slurm_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], exi
     return 0
 
 
-def local_serial_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], existing_rows: Sequence[Dict[str, Any]], pending_runs: Sequence[PendingRun]) -> int:
+def local_serial_driver(
+    args: argparse.Namespace,
+    run_specs: Sequence[RunSpec],
+    existing_rows: Sequence[Dict[str, Any]],
+    pending_runs: Sequence[PendingRun],
+) -> int:
     repo_root = repo_root_from_args(args)
     total = len(run_specs)
     already_done = max(0, total - len(pending_runs))
@@ -3099,7 +3743,9 @@ def local_serial_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], 
         )
         try:
             row = run_one_pending(pending, args, repo_root)
-            print(f"[TOTAL PROGRESS] {current}/{total} finished={run_spec.variant_name} status={row.get('status')}")
+            print(
+                f"[TOTAL PROGRESS] {current}/{total} finished={run_spec.variant_name} status={row.get('status')}"
+            )
         except Exception as exc:
             fallback = {
                 "status": "failed",
@@ -3113,21 +3759,31 @@ def local_serial_driver(args: argparse.Namespace, run_specs: Sequence[RunSpec], 
             }
             write_run_metrics_json(Path(run_spec.model_path), fallback)
             print(f"[LOCAL] Exception in {run_spec.variant_name}: {exc}")
-            print(f"[TOTAL PROGRESS] {current}/{total} finished={run_spec.variant_name} status=failed")
+            print(
+                f"[TOTAL PROGRESS] {current}/{total} finished={run_spec.variant_name} status=failed"
+            )
     gather_and_write_summaries(args, run_specs, existing_rows)
     return 0
 
 
 def build_submit_command(args: argparse.Namespace) -> List[str]:
     script_path = Path(__file__).resolve()
-    log_dir = Path(args.slurm_log_dir).resolve() if args.slurm_log_dir else (summary_output_root(args, []) / "slurm_logs").resolve()
+    log_dir = (
+        Path(args.slurm_log_dir).resolve()
+        if args.slurm_log_dir
+        else (summary_output_root(args, []) / "slurm_logs").resolve()
+    )
     log_dir.mkdir(parents=True, exist_ok=True)
     cpus_per_task = slurm_cpus_per_task(args)
     nodes = slurm_node_count(args)
     tasks_per_node = slurm_tasks_per_node(args)
     gres_per_node = slurm_gres_per_node(args)
 
-    batch_chdir = Path(args.slurm_chdir).resolve() if args.slurm_chdir else repo_root_from_args(args).resolve()
+    batch_chdir = (
+        Path(args.slurm_chdir).resolve()
+        if args.slurm_chdir
+        else repo_root_from_args(args).resolve()
+    )
 
     submit_cmd = [
         "sbatch",
@@ -3153,10 +3809,13 @@ def build_submit_command(args: argparse.Namespace) -> List[str]:
     for extra in args.slurm_extra_sbatch_args:
         submit_cmd.extend(shlex.split(extra))
 
-    print(f"[SLURM SUBMIT] runner={effective_runner(args)} python={effective_python(args)} uv={uv_binary(args)} quota={resolve_quota_command(args) or args.quota_command} quota_fallback_root={args.quota_fallback_root} chdir={batch_chdir} export={args.slurm_export} step_cpus={cpus_per_task} step_mem={slurm_mem_per_worker(args)} gres_per_node={gres_per_node}")
+    print(
+        f"[SLURM SUBMIT] runner={effective_runner(args)} python={effective_python(args)} uv={uv_binary(args)} quota={resolve_quota_command(args) or args.quota_command} quota_fallback_root={args.quota_fallback_root} chdir={batch_chdir} export={args.slurm_export} step_cpus={cpus_per_task} step_mem={slurm_mem_per_worker(args)} gres_per_node={gres_per_node}"
+    )
 
     wrapped_args = [
-        arg for arg in sys.argv[1:]
+        arg
+        for arg in sys.argv[1:]
         if arg not in {"--submit-slurm", "--dry-run", "--write-configs-only"}
     ]
     wrapped_args.append("--slurm-driver")
@@ -3185,14 +3844,22 @@ def run_preflight(args: argparse.Namespace) -> int:
     print("[PREFLIGHT] batch_train.py environment check")
     print(f"  current_python={sys.executable}")
     print(f"  current_version={sys.version.split()[0]}")
-    print(f"  runner={effective_runner(args)} command_prefix={shell_join(command_prefix(args))}")
+    print(
+        f"  runner={effective_runner(args)} command_prefix={shell_join(command_prefix(args))}"
+    )
 
     probe = '\nimport importlib, json, sys\nresult = {\n    "python": sys.executable,\n    "version": sys.version.split()[0],\n    "modules": {},\n    "cuda": {},\n}\nfor module_name in ["yaml", "numpy", "torch", "PIL", "tqdm"]:\n    try:\n        module = importlib.import_module(module_name)\n        result["modules"][module_name] = getattr(module, "__version__", "present")\n    except Exception as exc:\n        result["modules"][module_name] = "MISSING: " + repr(exc)\ntry:\n    import torch\n    result["cuda"]["available"] = bool(torch.cuda.is_available())\n    result["cuda"]["device_count"] = int(torch.cuda.device_count())\n    result["cuda"]["devices"] = []\n    for idx in range(torch.cuda.device_count()):\n        props = torch.cuda.get_device_properties(idx)\n        result["cuda"]["devices"].append({\n            "index": idx,\n            "name": props.name,\n            "mem_gb": round(props.total_memory / (1024**3), 2),\n        })\nexcept Exception as exc:\n    result["cuda"]["error"] = repr(exc)\nprint(json.dumps(result, indent=2, sort_keys=True))\n'
 
     failures: list[str] = []
     cmd = [*command_prefix(args), "-c", probe]
     try:
-        completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+        completed = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
         print(completed.stdout.rstrip())
         if completed.returncode != 0:
             failures.append("runner-python")
@@ -3212,7 +3879,9 @@ def run_preflight(args: argparse.Namespace) -> int:
         print("  slurm: not required for this local run")
     if failures:
         print("[PREFLIGHT] missing requirements: " + ", ".join(failures))
-        print("[PREFLIGHT] install/use a training environment with at least PyYAML, PyTorch+CUDA, NumPy, Pillow, and tqdm.")
+        print(
+            "[PREFLIGHT] install/use a training environment with at least PyYAML, PyTorch+CUDA, NumPy, Pillow, and tqdm."
+        )
         return 2
     print("[PREFLIGHT] ok")
     return 0
@@ -3257,13 +3926,23 @@ def main(args: argparse.Namespace) -> int:
                 print(shell_join(run_spec.command))
         return 0
 
-    if args.cleanup_existing_artifacts and bool(getattr(args, "skip_checkpoint_metrics", False)):
+    if args.cleanup_existing_artifacts and bool(
+        getattr(args, "skip_checkpoint_metrics", False)
+    ):
         cleanup_existing_artifacts(run_specs, True)
     elif args.cleanup_existing_artifacts:
-        print("[CLEANUP] Deferring existing-artifact cleanup until checkpoint history metrics are recorded.")
+        print(
+            "[CLEANUP] Deferring existing-artifact cleanup until checkpoint history metrics are recorded."
+        )
 
-    checkpoint_metrics_required = None if bool(getattr(args, "skip_checkpoint_metrics", False)) else str(args.checkpoint_metrics_jsonl_filename)
-    pending_runs, existing_rows = build_pending_runs(run_specs, args.retry_failed_existing, checkpoint_metrics_required)
+    checkpoint_metrics_required = (
+        None
+        if bool(getattr(args, "skip_checkpoint_metrics", False))
+        else str(args.checkpoint_metrics_jsonl_filename)
+    )
+    pending_runs, existing_rows = build_pending_runs(
+        run_specs, args.retry_failed_existing, checkpoint_metrics_required
+    )
     print(
         f"[TOTAL PROGRESS] total={len(run_specs)} "
         f"already_complete={max(0, len(run_specs) - len(pending_runs))} "
