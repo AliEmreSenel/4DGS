@@ -30,6 +30,7 @@ dependencies = [
   "nbformat>=5.10.4",
   "opencv-python-headless>=4.13.0.92",
   "squarify>=0.4.4",
+  "pygame>=2.6.1",
 ]
 
 [tool.setuptools.packages.find]
