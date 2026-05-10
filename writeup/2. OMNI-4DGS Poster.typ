@@ -7,7 +7,7 @@
 #pop.set-theme(pop.uni-fr)
 
 #set text(size: pop.layout-a0.at("body-size"))
-#set par(justify: false, leading: 0.62em)
+#set par(justify: false, leading: 0.5em)
 
 #let box-spacing = 1.2em
 #set columns(gutter: box-spacing)
@@ -17,7 +17,7 @@
 // -----------------------------------------------------------------------------
 // Total content height (title box excluded) — kept for v(1fr) anchor
 // -----------------------------------------------------------------------------
-#let content-h = 101.2cm
+#let content-h = 105cm
 
 // -----------------------------------------------------------------------------
 // Colors
@@ -128,7 +128,7 @@
 
 // Custom box styles derived from the theme.
 #let result-heading-args = pop.uni-fr.heading-box-args
-#result-heading-args.insert("fill", blue)
+#result-heading-args.insert("fill", rgb("#2343a4"))
 
 #let result-body-args = pop.uni-fr.body-box-args
 #result-body-args.insert("fill", white)
@@ -351,7 +351,6 @@
       #pop.column-box(
         heading: "Bouncing Balls",
         heading-box-args: result-heading-args,
-        body-box-args: result-body-args,
       )[
         #img-slot(
           [Qualitative reconstruction grid],
@@ -363,7 +362,6 @@
       #pop.column-box(
         heading: "T-Rex",
         heading-box-args: result-heading-args,
-        body-box-args: result-body-args,
       )[
         #img-slot(
           [Frame and crop grid],
@@ -458,7 +456,6 @@
       #pop.column-box(
         heading: "Evaluation Result",
         heading-box-args: result-heading-args,
-        body-box-args: result-body-args,
       )[
         #img-slot(
           [Metric comparison grid],
@@ -468,18 +465,24 @@
       ]
 
       #pop.column-box(
-        heading: "MOG: Bitter Lesson",
+        heading: [MOG'D: Bitter Lesson #h(1fr) #box[#stack(dir: ttb, spacing: 5pt)[#text(size: 30pt)[Where is]][#text(size: 35pt)[Tebe?]]]],
         heading-box-args: result-heading-args,
-        body-box-args: result-body-args,
       )[
-        #img-slot(
-          [Motion and camera analysis],
-          [fixed camera · moving camera · artifacts],
-          height: 10.1cm,
+        #grid(
+          columns: (1fr, 1fr),
+          gutter: 0.5cm,
+          [
+            #image("./img/mog_still_cameras.png", width: 90%)
+            #align(left)[5 x Still Cameras]
+          ],
+          [
+            #image("./img/mog_moving_cameras.png", width: 90%)
+            #align(left)[5 x Moving Cameras]
+          ],
         )
-      ]
 
-      #v(1fr)
+        Random Init $=>$ Need _Moving Cameras_ for artifacts.
+      ]
 
       #pop.column-box(
         heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
@@ -539,6 +542,7 @@
             ellipsoid · RGB · sort-based · interleaved pruning · no dropout
           ]
         ]
+        #v(-20pt)
         #table(
           columns: (1fr, auto),
           inset: (x: 1.5pt, y: 2.5pt),
@@ -550,6 +554,150 @@
           [*Smallest*], [RGB $dot.c$ interleaved pruning],
           [*Fastest*], [see renderer: sort-free may not be fastest],
         )
+      ]
+      #pop.column-box(
+        heading: [Ablation Results #h(1fr) #fa-icon("flask")],
+        heading-box-args: final-heading-args,
+      )[
+        #set text(size: 0.8em)
+
+        #grid(
+          columns: (1fr, 2fr),
+          column-gutter: 8pt,
+
+          [\
+            #box(
+              width: 100%,
+              fill: rgb("#fff7ed"),
+              stroke: 0.8pt + orange,
+              radius: 10pt,
+              inset: 9pt,
+            )[
+              Cohen's Coefficient \ $g > 0.5 => "signif"$ \
+            ]],
+
+          [
+            #text(weight: "bold", size: 1em)[Best individual effects]
+            #v(-20pt)
+            #table(
+              columns: (0.9fr, 0.85fr, 0.5fr),
+              inset: (x: 4.5pt, y: 3.5pt),
+              align: (x, y) => if x == 2 { center } else { left },
+              stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
+
+              [Smallest], [RGB], [$4.91$],
+              [Eval VRAM], [RGB], [$3.66$],
+              [PSNR], [SH(3)], [$1.50$],
+              [LPIPS], [Sort], [$1.46$],
+              [Render FPS], [Sort], [$1.34$],
+              [Training time], [Sort], [$1.01$],
+            )
+            #v(-20pt)
+          ],
+        )
+
+        #let pct(fill, body) = box(width: 3.6em)[
+          #align(right)[#text(fill: fill, weight: "bold")[#body]]
+        ]
+
+        #table(
+          columns: (0.3fr, 2fr),
+          inset: (x: 5pt, y: 10pt),
+          align: left + top,
+          stroke: (x, y) => (
+            top: if y > 0 { 0.5pt + black } else { none },
+            right: if x == 0 { 0.5pt + black } else { none },
+          ),
+
+          [
+            *RGB* \
+            #text(fill: green, weight: "bold")[$+0.89$]
+          ],
+          [
+            Smaller, lighter, faster; lower quality
+            #v(-20pt)
+            #grid(
+              columns: (auto, 3.6em, auto, 3.6em, auto, 3.6em),
+              column-gutter: 8pt,
+              row-gutter: 4pt,
+
+              [Checkpoint], [#pct(green)[$-93%$]], [VRAM], [#pct(green)[$-79%$]], [Gaussians], [#pct(green)[$-33%$]],
+
+              [Train], [#pct(green)[$-78%$]], [FPS], [#pct(green)[$+79%$]], [], [],
+            )
+            #v(+20pt)
+          ],
+
+          [
+            *SH(3)* \
+            #text(fill: red, weight: "bold")[$-0.89$]
+          ],
+          [
+            Better quality, but expensive
+            #v(-20pt)
+            #grid(
+              columns: (auto, 3.6em, auto, 3.6em, auto, 3.6em),
+              column-gutter: 8pt,
+              row-gutter: 4pt,
+
+              [PSNR], [#pct(green)[$+32%$]], [LPIPS], [#pct(green)[$-83%$]], [SSIM], [#pct(green)[$+6.3%$]],
+            )
+            #v(+20pt)
+          ],
+
+          [
+            *Sort* \
+            #text(fill: green, weight: "bold")[$+0.84$]
+          ],
+          [
+            Strong practical winner on our dataset
+            #v(-20pt)
+            #grid(
+              columns: (auto, 3.6em, auto, 3.6em, auto, 3.6em),
+              column-gutter: 8pt,
+              row-gutter: 4pt,
+
+              [LPIPS], [#pct(green)[$-85%$]], [FPS], [#pct(green)[$+290%$]], [PSNR], [#pct(green)[$+29%$]],
+
+              [SSIM], [#pct(green)[$+8.2%$]], [Train time], [#pct(green)[$-85%$]], [VRAM], [#pct(green)[$-37%$]],
+            )
+            #v(+20pt)
+          ],
+
+          [
+            *Sort-free* \
+            #text(fill: red, weight: "bold")[$-0.84$]
+          ],
+          [
+            Fewer Gaussians, but worse overall
+            #v(-20pt)
+            #grid(
+              columns: (auto, 3.5em, auto, 4em, auto, 3em),
+              column-gutter: 8pt,
+              row-gutter: 4pt,
+
+              [Gaussians], [#pct(green)[$-39%$]], [LPIPS], [#pct(red)[$+570%$]], [FPS], [#pct(red)[$-75%$]],
+
+              [PSNR], [#pct(red)[$-23%$]], [SSIM], [#pct(red)[$-7.6%$]], [Train time], [#pct(red)[$+590%$]],
+
+              [VRAM], [#pct(red)[$+60%$]], [], [], [], [],
+            )
+
+          ],
+        )
+        #box(
+          width: 100%,
+          fill: rgb("#cee2f6"),
+          stroke: 1pt + rgb("#425161"),
+          radius: 14pt,
+          inset: 14pt,
+        )[
+          #text(fill: black, weight: "bold", size: 1.0em)[Surpassed SOTA: 1000FPS]
+          #linebreak()
+          #text(fill: black, size: 0.8em)[
+            ellipsoid · RGB · sort-based · interleaved pruning · no dropout
+          ]
+        ]
       ]
 
       // Push bibliography to the bottom of the column
@@ -568,34 +716,4 @@
       ]
     ],
   )
-
-
-  // -----------------------------------------------------------------------------
-  // Bottom bar
-  // -------------------------------------------------------------------------
-  #let bottom-box(body, text-relative-width: 70%, logo: none, ..args) = context {
-    let content = [
-      #set align(top + left)
-
-      #if logo == none {
-        box(width: 100%, body)
-      } else {
-        stack(
-          dir: ltr,
-          box(width: text-relative-width, body),
-          align(right + horizon, logo),
-        )
-      }
-    ]
-
-    place(
-      bottom + left,
-      dx: 0pt,
-      dy: 2.5em,
-    )[
-      #box(width: page.width)[
-        #content
-      ]
-    ]
-  }
 ]
