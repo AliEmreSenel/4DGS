@@ -127,19 +127,52 @@
 ]
 
 // Custom box styles derived from the theme.
+#let box-height = auto
+#let top-space = 8pt
+
 #let result-heading-args = pop.uni-fr.heading-box-args
 #result-heading-args.insert("fill", rgb("#2343a4"))
+#result-heading-args.insert("height", box-height)
+#result-heading-args.insert("inset", (
+  top: top-space,
+  right: 0.6em,
+  bottom: 0.6em,
+  left: 0.6em,
+))
 
 #let result-body-args = pop.uni-fr.body-box-args
 #result-body-args.insert("fill", white)
-#result-body-args.insert("inset", 18pt)
+#result-body-args.insert("height", box-height)
+#result-body-args.insert("inset", (
+  top: top-space,
+  right: 18pt,
+  bottom: 18pt,
+  left: 18pt,
+))
 
 #let final-heading-args = pop.uni-fr.heading-box-args
 #final-heading-args.insert("fill", navy)
+#final-heading-args.insert("height", box-height)
+#final-heading-args.insert("inset", (
+  top: top-space,
+  right: 0.6em,
+  bottom: 0.6em,
+  left: 0.6em,
+))
 
 #let final-body-args = pop.uni-fr.body-box-args
 #final-body-args.insert("fill", white)
-#final-body-args.insert("inset", 18pt)
+#final-body-args.insert("height", box-height)
+#final-body-args.insert("inset", (
+  top: top-space,
+  right: 18pt,
+  bottom: 18pt,
+  left: 18pt,
+))
+
+#let std-heading-args = pop.uni-fr.heading-box-args
+#std-heading-args.insert("height", box-height)
+#std-heading-args.insert("inset", (top: top-space, right: 0.6em, bottom: 0.6em, left: 0.6em))
 
 // -----------------------------------------------------------------------------
 // Title
@@ -304,11 +337,12 @@
     // Column 1
     // -------------------------------------------------------------------------
     [
-      #pop.column-box(heading: [Context #h(1fr) #fa-icon("map", solid: true)])[
+      #pop.column-box(
+        heading: [Context and Motivation #h(1fr) #fa-icon("map", solid: true)],
+        heading-box-args: std-heading-args,
+      )[
         4D Gaussian Splatting (4DGS) is the dominant approach to dynamic scene reconstruction from video. #h(1fr) _Fast and flexible_ #h(1fr)
-      ]
 
-      #pop.column-box(heading: [Research Motivation #h(1fr) #fa-icon("clipboard-question")])[
         Existing methods usually optimize one axis:
         *fidelity*, *FPS*, *memory*, or *train time*.
 
@@ -324,7 +358,10 @@
         #tag([Stability], fill: rgb("#f5f3ff"), text-fill: violet)
       ]
 
-      #pop.column-box(heading: [4D Gaussian Building Blocks #h(1fr) #fa-icon("puzzle-piece")])[
+      #pop.column-box(
+        heading: [4D Gaussian Building Blocks #h(1fr) #fa-icon("puzzle-piece")],
+        heading-box-args: std-heading-args,
+      )[
         Each primitive is centered in space-time and stores opacity, shape, rotation, and color. The native representation is expressive, but compact variants trade quality for speed and size.
 
         $
@@ -346,23 +383,22 @@
           [*Color*], [$"SH"_i$], [$"SH"(0) = "RGB" arrow.r.long.squiggly "SH"(3)$],
         )
       ]
-      #let result-img-width = 7cm
+      #let result-img-width = 8cm
 
       // Result boxes — col 1
       #pop.column-box(
         heading: [Bouncing Balls #h(1fr) #fa-icon("baseball")],
         heading-box-args: result-heading-args,
       )[
+        *Fixed*: #strike()[USplat], Sort, #strike()[Prune], #strike()[ESS], #strike()[Dropout], 10k.
         #grid(
-          columns: (1fr, 1fr, 1fr),
+          columns: (0.4fr, 1fr, 1fr),
           rows: (auto, auto, auto),
-          column-gutter: 10pt,
-          row-gutter: 10pt,
+          column-gutter: 5pt,
+          row-gutter: 5pt,
           align: center + horizon,
 
-          align(left)[*Fixed*: no USplat, Sort, no Prune, no ESS, no Dropout, 10k],
-          [#strong[Spherical]],
-          [#strong[Ellipsoid]],
+          [], [#strong[Spherical]], [#strong[Ellipsoid]],
 
           [#strong[Sort]],
           [#image(
@@ -375,8 +411,14 @@
           )],
 
           [#strong[Sort-free]],
-          [#image("./img/r_017_true.png", width: result-img-width)],
-          [#image("./img/r_017_true.png", width: result-img-width)],
+          [#image(
+            "./img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
         )
       ]
 
@@ -384,14 +426,15 @@
         heading: [TRex #h(1fr) #fa-icon("dragon")],
         heading-box-args: result-heading-args,
       )[
+        *Fixed*: #strike()[USplat], Sort, #strike()[Prune], #strike()[ESS], #strike()[Dropout], 20k
         #grid(
-          columns: (1fr, 1fr, 1fr),
+          columns: (0.4fr, 1fr, 1fr),
           rows: (auto, auto, auto),
           column-gutter: 10pt,
           row-gutter: 10pt,
           align: center + horizon,
 
-          align(left)[*Fixed*: no USplat, Sort, no Prune, no ESS, no Dropout, 20k], [#strong[RGB]], [#strong[SH(3)]],
+          [], [#strong[RGB]], [#strong[SH(3)]],
 
           [#strong[Ellipsoid]],
           [#image(
@@ -418,7 +461,10 @@
 
       #v(1fr)
 
-      #pop.column-box(heading: [Ablations and Evaluation #h(1fr) #fa-icon("swatchbook")])[
+      #pop.column-box(
+        heading: [Ablations and Evaluation #h(1fr) #fa-icon("swatchbook")],
+        heading-box-args: std-heading-args,
+      )[
         #table(
           columns: (0.5fr, 1.3fr),
           inset: 4.5pt,
@@ -426,7 +472,8 @@
           [*Shape*], [Ellipsoid $dot.c$ Sphere],
           [*Color*], [RGB $dot.c$ SH(3)],
           [*Renderer*], [Sorting $dot.c$ Sort-free],
-          [*Pruning*], [Opacity $dot.c$ Spatio-temporal | Densify?],
+          [*Pruning*], [Opacity $dot.c$ Spatio-temporal],
+          [*Densify*], [Edge-Guided, Loss Guided],
           [*Regularize*], [Dropout, Prune-Densify, Uncertainty],
         )
         Dynamic D-NeRF Data: *T-Rex*, *Bouncing Balls*
@@ -437,7 +484,7 @@
     // Column 2
     // -------------------------------------------------------------------------
     [
-      #pop.column-box(heading: [Rendering Equation #h(1fr) #fa-icon("photo-film")])[
+      #pop.column-box(heading: [Rendering Equation #h(1fr) #fa-icon("photo-film")], heading-box-args: std-heading-args)[
         Condition 4D distributions to time $t$ $=>$ 3D Gauss.\
         Project to camera plane and integrate colors.
 
@@ -464,7 +511,7 @@
       ]
 
 
-      #pop.column-box(heading: [Training Objective #h(1fr) #fa-icon("route")])[
+      #pop.column-box(heading: [Training Objective #h(1fr) #fa-icon("route")], heading-box-args: std-heading-args)[
         By Ablation: fidelity, background, 4D motion.
 
         #strong[Photometric #h(1em)]
@@ -506,18 +553,28 @@
           columns: (1fr, 1fr),
           gutter: 0.5cm,
           [
-            #image("./img/mog_still_cameras.png", width: 90%)
-            #align(left)[5 x Still Cameras]
+            #align(center)[
+              #box(width: 90%)[
+                #image("./img/mog_still_cameras.png", width: 100%)
+                #align(left)[5 x Still Cameras]
+              ]
+            ]
           ],
           [
-            #image("./img/mog_moving_cameras.png", width: 90%)
-            #align(left)[5 x Moving Cameras]
+            #align(center)[
+              #box(width: 90%)[
+                #image("./img/mog_moving_cameras.png", width: 100%)
+                #align(left)[5 x Moving Cameras]
+              ]
+            ]
           ],
         )
 
         Random Init $=>$ Need _Moving Cameras_ for artifacts.
 
-        Instant4D's MegaSAM Init was CUDA incompatible
+        Data is the real bottleneck.
+
+        Instant4D's MegaSAM Init was CUDA incompatible.
       ]
 
       #pop.column-box(
@@ -553,7 +610,7 @@
     // Column 3
     // -------------------------------------------------------------------------
     [
-      #pop.column-box(heading: [Feature Matrix #h(1fr) #fa-icon("list")])[
+      #pop.column-box(heading: [Feature Matrix #h(1fr) #fa-icon("list")], heading-box-args: std-heading-args)[
         #set text(size: 0.78em)
         #contrib-table-large
       ]
@@ -616,11 +673,11 @@
             #text(weight: "bold", size: 1em)[Best individual effects]
             #v(-20pt)
             #table(
-              columns: (0.9fr, 0.85fr, 0.5fr),
+              columns: (auto, auto, auto),
               inset: (x: 4.5pt, y: 3.5pt),
               align: (x, y) => if x == 2 { center } else { left },
               stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
-
+              [], [], [*Cohen g*],
               [Smallest], [RGB], [$4.91$],
               [Eval VRAM], [RGB], [$3.66$],
               [PSNR], [SH(3)], [$1.50$],
@@ -728,7 +785,7 @@
           radius: 14pt,
           inset: 14pt,
         )[
-          #text(fill: black, weight: "bold", size: 1.0em)[Surpassed SOTA: 1000FPS]
+          #text(fill: black, weight: "bold", size: 1.0em)[Surpassed `4DGS` and `1000FPS` Baselines]
           #linebreak()
           #text(fill: black, size: 0.8em)[
             ellipsoid · RGB · sort-based · interleaved pruning · no dropout
@@ -743,6 +800,7 @@
         heading: [Bibliography #h(1fr) #fa-icon("book-bookmark")],
         heading-box-args: final-heading-args,
       )[
+        #ref-line([Kerbl et al.], [3D Gaussian Splatting for Real-Time Radiance Field Rendering.])
         #ref-line([Yang et al.], [Native 4D Gaussian Splatting backbone.])
         #ref-line([Luo et al.], [Instant4D isotropic variants and spatio-temporal pruning.])
         #ref-line([Du et al.], [MobileGS sort-free rendering and compression ideas.])
