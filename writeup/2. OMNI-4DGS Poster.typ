@@ -342,32 +342,78 @@
 
           [*4D mean*], [$mu_i$], [mean is the gaussian center],
           [*Covariance*], [$Sigma_i$], [(sphere || ellipsoid) $=:$ *Isotropy*],
-          [*Opacity*], [$o_i$], [adjusts visibility, see-through],
+          [*Opacity*], [$o_i$], [adjusts visibility / see-through],
           [*Color*], [$"SH"_i$], [$"SH"(0) = "RGB" arrow.r.long.squiggly "SH"(3)$],
         )
       ]
+      #let result-img-width = 7cm
 
       // Result boxes — col 1
       #pop.column-box(
-        heading: "Bouncing Balls",
+        heading: [Bouncing Balls #h(1fr) #fa-icon("baseball")],
         heading-box-args: result-heading-args,
       )[
-        #img-slot(
-          [Qualitative reconstruction grid],
-          [native / OMNI / ablations],
-          height: 10.1cm,
+        #grid(
+          columns: (1fr, 1fr, 1fr),
+          rows: (auto, auto, auto),
+          column-gutter: 10pt,
+          row-gutter: 10pt,
+          align: center + horizon,
+
+          align(left)[*Fixed*: no USplat, Sort, no Prune, no ESS, no Dropout, 10k],
+          [#strong[Spherical]],
+          [#strong[Ellipsoid]],
+
+          [#strong[Sort]],
+          [#image(
+            "./img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+
+          [#strong[Sort-free]],
+          [#image("./img/r_017_true.png", width: result-img-width)],
+          [#image("./img/r_017_true.png", width: result-img-width)],
         )
       ]
 
       #pop.column-box(
-        heading: "T-Rex",
+        heading: [TRex #h(1fr) #fa-icon("dragon")],
         heading-box-args: result-heading-args,
       )[
-        #img-slot(
-          [Frame and crop grid],
-          [sort-based / sort-free / RGB / SH(3)],
-          height: 10.1cm,
+        #grid(
+          columns: (1fr, 1fr, 1fr),
+          rows: (auto, auto, auto),
+          column-gutter: 10pt,
+          row-gutter: 10pt,
+          align: center + horizon,
+
+          align(left)[*Fixed*: no USplat, Sort, no Prune, no ESS, no Dropout, 20k], [#strong[RGB]], [#strong[SH(3)]],
+
+          [#strong[Ellipsoid]],
+          [#image(
+            "./img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
+
+          [#strong[Spherical]],
+          [#image(
+            "./img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
         )
+
       ]
 
       #v(1fr)
@@ -452,20 +498,8 @@
         *+ dynamic regularization* $->$ better temporal consistency, but more expensive
       ]
 
-      // Result boxes — col 2
       #pop.column-box(
-        heading: "Evaluation Result",
-        heading-box-args: result-heading-args,
-      )[
-        #img-slot(
-          [Metric comparison grid],
-          [PSNR · SSIM · LPIPS · FPS · VRAM],
-          height: 10.1cm,
-        )
-      ]
-
-      #pop.column-box(
-        heading: [MOG'D: Bitter Lesson #h(1fr) #box[#stack(dir: ttb, spacing: 5pt)[#text(size: 30pt)[Where is]][#text(size: 35pt)[Tebe?]]]],
+        heading: [MOG'D: The Bitter Lesson #h(1fr) #box[#stack(dir: ttb, spacing: 5pt)[#text(size: 30pt)[*Where is*]][#text(size: 35pt)[*Tebe?*]]]],
         heading-box-args: result-heading-args,
       )[
         #grid(
@@ -482,6 +516,8 @@
         )
 
         Random Init $=>$ Need _Moving Cameras_ for artifacts.
+
+        Instant4D's MegaSAM Init was CUDA incompatible
       ]
 
       #pop.column-box(

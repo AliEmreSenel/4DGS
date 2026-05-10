@@ -4,7 +4,7 @@ from html import escape
 from urllib.parse import quote
 import argparse, csv, os
 
-STEPS = [1000, 2000, 3000, 4000, 5000, 6000, 7000]
+STEPS = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000]
 VIDEO_EXTS = {".mp4", ".webm", ".mov", ".m4v"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 EXTS = VIDEO_EXTS | IMAGE_EXTS
@@ -139,7 +139,7 @@ def trex_section(vs, outdir, metrics):
 
     return f"""
 <section>
-  <h2>trex / no_usplat / 10,000 steps</h2>
+  <h2>trex / no_usplat / 20,000 steps</h2>
   <p>Rows: gaussian x color x ESS. Columns: sorting x pruning x dropout.</p>
   <div class="wrap">
     <table><thead><tr><th></th>{head}</tr></thead><tbody>{body}</tbody></table>
