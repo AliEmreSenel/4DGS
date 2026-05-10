@@ -14,6 +14,9 @@
 #set block(spacing: box-spacing)
 #pop.update-poster-layout(spacing: box-spacing)
 
+
+#let result-img-width = 9.2cm
+
 // -----------------------------------------------------------------------------
 // Total content height (title box excluded) — kept for v(1fr) anchor
 // -----------------------------------------------------------------------------
@@ -383,83 +386,6 @@
           [*Color*], [$"SH"_i$], [$"SH"(0) = "RGB" arrow.r.long.squiggly "SH"(3)$],
         )
       ]
-      #let result-img-width = 8cm
-
-      // Result boxes — col 1
-      #pop.column-box(
-        heading: [Bouncing Balls #h(1fr) #fa-icon("baseball")],
-        heading-box-args: result-heading-args,
-      )[
-        *Fixed*: #strike()[USplat], Sort, #strike()[Prune], #strike()[ESS], #strike()[Dropout], 10k.
-        #grid(
-          columns: (0.4fr, 1fr, 1fr),
-          rows: (auto, auto, auto),
-          column-gutter: 5pt,
-          row-gutter: 5pt,
-          align: center + horizon,
-
-          [], [#strong[Spherical]], [#strong[Ellipsoid]],
-
-          [#strong[Sort]],
-          [#image(
-            "./img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
-            width: result-img-width,
-          )],
-          [#image(
-            "./img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
-            width: result-img-width,
-          )],
-
-          [#strong[Sort-free]],
-          [#image(
-            "./img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
-            width: result-img-width,
-          )],
-          [#image(
-            "./img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
-            width: result-img-width,
-          )],
-        )
-      ]
-
-      #pop.column-box(
-        heading: [TRex #h(1fr) #fa-icon("dragon")],
-        heading-box-args: result-heading-args,
-      )[
-        *Fixed*: #strike()[USplat], Sort, #strike()[Prune], #strike()[ESS], #strike()[Dropout], 20k
-        #grid(
-          columns: (0.4fr, 1fr, 1fr),
-          rows: (auto, auto, auto),
-          column-gutter: 10pt,
-          row-gutter: 10pt,
-          align: center + horizon,
-
-          [], [#strong[RGB]], [#strong[SH(3)]],
-
-          [#strong[Ellipsoid]],
-          [#image(
-            "./img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
-            width: result-img-width,
-          )],
-          [#image(
-            "./img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
-            width: result-img-width,
-          )],
-
-          [#strong[Spherical]],
-          [#image(
-            "./img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
-            width: result-img-width,
-          )],
-          [#image(
-            "./img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
-            width: result-img-width,
-          )],
-        )
-
-      ]
-
-      #v(1fr)
 
       #pop.column-box(
         heading: [Ablations and Evaluation #h(1fr) #fa-icon("swatchbook")],
@@ -478,6 +404,74 @@
         )
         Dynamic D-NeRF Data: *T-Rex*, *Bouncing Balls*
       ]
+
+      #pop.column-box(
+        heading: [Bouncing Balls #h(1fr) #fa-icon("baseball")],
+        heading-box-args: result-heading-args,
+      )[
+        *Fixed*: No (USplat, Prune, ESS, Dropout), Sort, 10k.
+        #grid(
+          columns: (0.1fr, 1fr, 1fr),
+          rows: (auto, auto, auto),
+          column-gutter: 5pt,
+          row-gutter: 5pt,
+          align: center + horizon,
+
+          [], [#strong[Sort]], [#strong[Sort-free]],
+
+          [#rotate(-90deg)[#strong[Spherical]]],
+          [#image(
+            "./img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+
+          [#rotate(-90deg)[#strong[Ellipsoid]]],
+          [#image(
+            "./img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+        )
+      ]
+
+
+      #pop.column-box(
+        heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
+        heading-box-args: final-heading-args,
+      )[
+        #grid(
+          columns: (1fr, 1fr),
+          gutter: 0.65em,
+
+          [
+            #callout(
+              [Sort-free in 4D],
+              [Adding time to MobileGS MLPs moves bottleneck from sorting to MLP eval.],
+              fill: rgb("#fff7ed"),
+              accent: orange,
+            )
+          ],
+
+          [
+            #callout(
+              [Uncertainty loss],
+              [USplat-style weighting is too expensive for full ablations, so we tested small-scale.],
+              fill: rgb("#f5f3ff"),
+              accent: violet,
+            )
+          ],
+        )
+      ]
+      // Result boxes — col 1
+
+
     ],
 
     // -------------------------------------------------------------------------
@@ -546,148 +540,57 @@
       ]
 
       #pop.column-box(
-        heading: [MOG'D: The Bitter Lesson #h(1fr) #box[#stack(dir: ttb, spacing: 5pt)[#text(size: 30pt)[*Where is*]][#text(size: 35pt)[*Tebe?*]]]],
+        heading: [TRex #h(1fr) #fa-icon("dragon")],
         heading-box-args: result-heading-args,
       )[
+        *Fixed*: No (USplat, Prune, ESS, Dropout), Sort, 20k.
         #grid(
-          columns: (1fr, 1fr),
-          gutter: 0.5cm,
-          [
-            #align(center)[
-              #box(width: 90%)[
-                #image("./img/mog_still_cameras.png", width: 100%)
-                #align(left)[5 x Still Cameras]
-              ]
-            ]
-          ],
-          [
-            #align(center)[
-              #box(width: 90%)[
-                #image("./img/mog_moving_cameras.png", width: 100%)
-                #align(left)[5 x Moving Cameras]
-              ]
-            ]
-          ],
-        )
+          columns: (0.1fr, 1fr, 1fr),
+          rows: (auto, auto, auto),
+          column-gutter: 10pt,
+          row-gutter: 10pt,
+          align: center + horizon,
 
-        Random Init $=>$ Need _Moving Cameras_ for artifacts.
+          [], [#strong[Ellipsoid]], [#strong[Spherical]],
 
-        Data is the real bottleneck.
+          [#rotate(-90deg)[#strong[RGB]]],
+          [#image(
+            "./img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
 
-        Instant4D's MegaSAM Init was CUDA incompatible.
-      ]
-
-      #pop.column-box(
-        heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
-        heading-box-args: final-heading-args,
-      )[
-        #grid(
-          columns: (1fr, 1fr),
-          gutter: 0.65em,
-
-          [
-            #callout(
-              [Sort-free in 4D],
-              [Adding time to MobileGS MLPs moves bottleneck from sorting to MLP eval.],
-              fill: rgb("#fff7ed"),
-              accent: orange,
-            )
-          ],
-
-          [
-            #callout(
-              [Uncertainty loss],
-              [USplat-style weighting is too expensive for full ablations, so we tested small-scale.],
-              fill: rgb("#f5f3ff"),
-              accent: violet,
-            )
-          ],
+          [#rotate(-90deg)[#strong[SH(3)]]],
+          [#image(
+            "./img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
         )
       ]
-    ],
 
-    // -------------------------------------------------------------------------
-    // Column 3
-    // -------------------------------------------------------------------------
-    [
-      #pop.column-box(heading: [Feature Matrix #h(1fr) #fa-icon("list")], heading-box-args: std-heading-args)[
-        #set text(size: 0.78em)
-        #contrib-table-large
-      ]
 
-      #pop.column-box(
-        heading: [Main takeaway #h(1fr) #fa-icon("file-lines")],
-        heading-box-args: final-heading-args,
-      )[
-        #underline()[No configuration dominates all metrics]
-        Reconstruction, FPS, memory, train time $=>$ Fight
-
-        #box(
-          width: 100%,
-          fill: rgb("#cee2f6"),
-          stroke: 1pt + rgb("#425161"),
-          radius: 14pt,
-          inset: 14pt,
-        )[
-          #text(fill: black, weight: "bold", size: 1.0em)[Best Practical:]
-          #linebreak()
-          #text(fill: black, size: 0.8em)[
-            ellipsoid · RGB · sort-based · interleaved pruning · no dropout
-          ]
-        ]
-        #v(-20pt)
-        #table(
-          columns: (1fr, auto),
-          inset: (x: 1.5pt, y: 2.5pt),
-          column-gutter: 2pt,
-          align: left,
-          stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
-
-          [*Quality*], [ellipsoid $dot.c$ SH(3) $dot.c$ sort-based rendering],
-          [*Smallest*], [RGB $dot.c$ interleaved pruning],
-          [*Fastest*], [see renderer: sort-free may not be fastest],
-        )
-      ]
       #pop.column-box(
         heading: [Ablation Results #h(1fr) #fa-icon("flask")],
         heading-box-args: final-heading-args,
       )[
         #set text(size: 0.8em)
 
-        #grid(
-          columns: (1fr, 2fr),
-          column-gutter: 8pt,
-
-          [\
-            #box(
-              width: 100%,
-              fill: rgb("#fff7ed"),
-              stroke: 0.8pt + orange,
-              radius: 10pt,
-              inset: 9pt,
-            )[
-              Cohen's Coefficient \ $g > 0.5 => "signif"$ \
-            ]],
-
-          [
-            #text(weight: "bold", size: 1em)[Best individual effects]
-            #v(-20pt)
-            #table(
-              columns: (auto, auto, auto),
-              inset: (x: 4.5pt, y: 3.5pt),
-              align: (x, y) => if x == 2 { center } else { left },
-              stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
-              [], [], [*Cohen g*],
-              [Smallest], [RGB], [$4.91$],
-              [Eval VRAM], [RGB], [$3.66$],
-              [PSNR], [SH(3)], [$1.50$],
-              [LPIPS], [Sort], [$1.46$],
-              [Render FPS], [Sort], [$1.34$],
-              [Training time], [Sort], [$1.01$],
-            )
-            #v(-20pt)
-          ],
-        )
+        #box(
+          width: auto,
+          fill: rgb("#fff7ed"),
+          stroke: 0.8pt + orange,
+          radius: 10pt,
+          inset: 9pt,
+        )[
+          Cohen's Coefficient $g > 0.5 => "significant"$
+        ]
 
         #let pct(fill, body) = box(width: 3.6em)[
           #align(right)[#text(fill: fill, weight: "bold")[#body]]
@@ -778,6 +681,57 @@
 
           ],
         )
+      ]
+
+    ],
+
+    // -------------------------------------------------------------------------
+    // Column 3
+    // -------------------------------------------------------------------------
+    [
+      #pop.column-box(heading: [Feature Matrix #h(1fr) #fa-icon("list")], heading-box-args: std-heading-args)[
+        #set text(size: 0.78em)
+        #contrib-table-large
+      ]
+
+      #pop.column-box(
+        heading: [MOG'D: The Bitter Lesson #h(1fr)
+          #box(radius: 8pt, inset: 10pt, stroke: 0.05em + white)[
+            #text(size: 18pt)[*Where is*\ *Tebe?*]
+          ]],
+        heading-box-args: result-heading-args,
+      )[
+        #grid(
+          columns: (1fr, 1fr),
+          gutter: 0.5cm,
+          [
+            #align(center)[
+              #box(width: 90%)[
+                #image("./img/mog_still_cameras.png", width: 100%)
+                #align(center)[5 x Still Cameras]
+              ]
+            ]
+          ],
+          [
+            #align(center)[
+              #box(width: 90%)[
+                #image("./img/mog_moving_cameras.png", width: 100%)
+                #align(center)[5 x Moving Cameras]
+              ]
+            ]
+          ],
+        )
+
+        Random Init $=>$ Need _Moving Cameras_ for artifacts.
+
+        Data and CUDA compatibility are real bottlenecks.
+      ]
+      #pop.column-box(
+        heading: [Main takeaway #h(1fr) #fa-icon("file-lines")],
+        heading-box-args: final-heading-args,
+      )[
+        #underline()[No configuration dominates all metrics]
+
         #box(
           width: 100%,
           fill: rgb("#cee2f6"),
@@ -785,16 +739,49 @@
           radius: 14pt,
           inset: 14pt,
         )[
-          #text(fill: black, weight: "bold", size: 1.0em)[Surpassed `4DGS` and `1000FPS` Baselines]
+          #text(fill: black, weight: "bold", size: 1.0em)[Best Practical:]
           #linebreak()
           #text(fill: black, size: 0.8em)[
             ellipsoid · RGB · sort-based · interleaved pruning · no dropout
           ]
         ]
-      ]
+        #v(-20pt)
+        #table(
+          columns: (1fr, auto),
+          inset: (x: 1.5pt, y: 2.5pt),
+          column-gutter: 2pt,
+          align: left,
+          stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
 
-      // Push bibliography to the bottom of the column
-      #v(1fr)
+          [*Quality*], [ellipsoid $dot.c$ SH(3) $dot.c$ sort-based rendering],
+          [*Smallest*], [RGB $dot.c$ interleaved pruning],
+          [*Fastest*], [see renderer: sort-free may not be fastest],
+        )
+        #v(-20pt)
+
+        #table(
+          columns: (auto, auto, auto, auto),
+          inset: (x: 4.5pt, y: 3.5pt),
+          align: (x, y) => if x == 0 or x == 3 { center } else { left },
+          stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
+
+          table.cell(rowspan: 7, align: center + horizon)[
+            #move(dy: 10pt)[
+              #rotate(-90deg, reflow: true)[
+                #text(weight: "bold", size: 1em)[Single effect]
+              ]
+            ]
+          ],
+          [], [], [*Cohen g*],
+
+          [Smallest], [RGB], [$4.91$],
+          [Eval VRAM], [RGB], [$3.66$],
+          [PSNR], [SH(3)], [$1.50$],
+          [LPIPS], [Sort], [$1.46$],
+          [Render FPS], [Sort], [$1.34$],
+          [Training time], [Sort], [$1.01$],
+        )
+      ]
 
       #pop.column-box(
         heading: [Bibliography #h(1fr) #fa-icon("book-bookmark")],
