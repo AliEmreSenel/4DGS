@@ -503,9 +503,9 @@
         $
           C_p^("sf")(t, v) =
           sum_i
-          underbrace(beta_i (p,t), #[MLP weight])
+          underbrace(beta_i (p,t,v), #[MLP weight])
           c_i (v,t)
-          + underbrace(beta_("bg")(p,t)c_("bg"), "background")
+          + underbrace(beta_("bg")(p,t,v)c_("bg"), "background")
         $
         *+ input time t* $->$ Works in 4D, but expensive MLP
       ]
