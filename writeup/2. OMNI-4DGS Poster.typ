@@ -144,15 +144,153 @@
 // -----------------------------------------------------------------------------
 // Title
 // -----------------------------------------------------------------------------
-#pop.title-box(
-  [OMNI-4DGS: Fast, Light and Precise Video-to-Model Reconstruction],
+#let title-grid-box(
+  title,
+  subtitle: none,
+  authors: none,
+  institutes: none,
+  keywords: none,
+  right-body: none,
+  logo: none,
+  background: none,
+  text-relative-width: 62%,
+  spacing: 5%,
+  title-size: none,
+  subtitle-size: none,
+  authors-size: none,
+  institutes-size: none,
+  keywords-size: none,
+  right-area-height: 7.2em,
+) = context {
+  let text-relative-width = text-relative-width
+
+  let pt = pop._state-poster-theme.get()
+  let pl = pop._state-poster-layout.get()
+
+  let title-size = if title-size == none { pl.at("title-size") } else { title-size }
+  let subtitle-size = if subtitle-size == none { pl.at("subtitle-size") } else { subtitle-size }
+  let authors-size = if authors-size == none { pl.at("authors-size") } else { authors-size }
+  let institutes-size = if institutes-size == none { pl.at("institutes-size") } else { institutes-size }
+  let keywords-size = if keywords-size == none { pl.at("keywords-size") } else { keywords-size }
+
+  let right-content = if right-body != none { right-body } else { logo }
+
+  let title-text = [
+    #set text(size: title-size)
+    #title\
+  ]
+
+  let lower-text = [
+    #set text(size: subtitle-size)
+    #if subtitle != none { [#subtitle\ ] }
+
+    #v(0.35em, weak: true)
+
+    #set text(size: authors-size)
+    #if authors != none { [#authors\ ] }
+
+    #if institutes != none {
+      [
+        #set text(size: institutes-size)
+        #institutes
+      ]
+    }
+
+    #if keywords != none {
+      [
+        #v(0.45em, weak: true)
+        #set text(size: keywords-size)
+        #keywords
+      ]
+    }
+  ]
+
+  if right-content == none {
+    text-relative-width = 100%
+  }
+
+  let title-box-args = pt.at(
+    "title-box-args",
+    default: pt.at("heading-box-args", default: ()),
+  )
+
+  let title-text-args = pt.at(
+    "title-text-args",
+    default: pt.at("heading-text-args", default: ()),
+  )
+
+  let title-box-function = pt.at(
+    "title-box-function",
+    default: rect,
+  )
+
+  let title-content = box(width: 100%)[
+    #box(width: 100%)[
+      #title-text
+    ]
+
+    #box(width: text-relative-width)[
+      #lower-text
+    ]
+
+    #if right-content != none {
+      place(top + right)[
+        #box(
+          width: 100% - text-relative-width,
+          height: right-area-height,
+        )[
+          #right-content
+        ]
+      ]
+    }
+  ]
+
+  pop.common-box(
+    heading: [
+      #if background != none {
+        [
+          #background
+          #v(-measure(background).height)
+        ]
+      }
+      #title-content
+    ],
+    heading-box-args: title-box-args,
+    heading-text-args: title-text-args,
+    heading-box-function: title-box-function,
+  )
+}
+
+#title-grid-box(
+  [OMNI-4DGS: Fast, Light and Precise Video-To-Model Reconstruction],
   authors: "Ali Emre Senel¹ · Tebe Nigrelli¹ · Stefana Chiriac¹",
-  institutes: "¹Bocconi University, Milan, Italy",
+  institutes: [¹Bocconi University, Milan, Italy],
   keywords: "4D Gaussian Splatting · Dynamic Scene Reconstruction · Ablations · Efficient Rendering",
+
+  text-relative-width: 80%,
+  spacing: 0%,
+  right-area-height: 7.2em,
+
+  right-body: [
+    #box(width: 100%, height: 80%)[
+      #set text(size: 0.7em)
+
+      #place(top + right)[
+        #text(weight: "semibold")[2026-05-12]
+      ]
+
+      #place(top + right, dy: 3.5em)[
+        #text(weight: "bold")[Università Bocconi] \ Milano
+      ]
+
+      #place(bottom + right)[
+        #fa-icon("github")
+        #h(0.25em)
+        #text(weight: "medium")[AliEmreSenel/4DGS]
+      ]
+    ]
+  ],
 )
-
-
-
 // -----------------------------------------------------------------------------
 // Full-height single 3-column layout
 // -----------------------------------------------------------------------------
@@ -209,6 +347,32 @@
         )
       ]
 
+      // Result boxes — col 1
+      #pop.column-box(
+        heading: "Bouncing Balls",
+        heading-box-args: result-heading-args,
+        body-box-args: result-body-args,
+      )[
+        #img-slot(
+          [Qualitative reconstruction grid],
+          [native / OMNI / ablations],
+          height: 10.1cm,
+        )
+      ]
+
+      #pop.column-box(
+        heading: "T-Rex",
+        heading-box-args: result-heading-args,
+        body-box-args: result-body-args,
+      )[
+        #img-slot(
+          [Frame and crop grid],
+          [sort-based / sort-free / RGB / SH(3)],
+          height: 10.1cm,
+        )
+      ]
+
+      #v(1fr)
 
       #pop.column-box(heading: [Ablations and Evaluation #h(1fr) #fa-icon("swatchbook")])[
         #table(
@@ -222,33 +386,6 @@
           [*Regularize*], [Dropout, Prune-Densify, Uncertainty],
         )
         Dynamic D-NeRF Data: *T-Rex*, *Bouncing Balls*
-      ]
-
-      // Result boxes — col 1
-      #box(width: 100%, fill: bottom-blue, radius: 14pt, inset: 10pt)[
-        #pop.column-box(
-          heading: "Bouncing Balls",
-          heading-box-args: result-heading-args,
-          body-box-args: result-body-args,
-        )[
-          #img-slot(
-            [Qualitative reconstruction grid],
-            [native / OMNI / ablations],
-            height: 10.1cm,
-          )
-        ]
-
-        #pop.column-box(
-          heading: "T-Rex",
-          heading-box-args: result-heading-args,
-          body-box-args: result-body-args,
-        )[
-          #img-slot(
-            [Frame and crop grid],
-            [sort-based / sort-free / RGB / SH(3)],
-            height: 10.1cm,
-          )
-        ]
       ]
     ],
 
@@ -318,30 +455,58 @@
       ]
 
       // Result boxes — col 2
-      #box(width: 100%, fill: bottom-blue, radius: 14pt, inset: 10pt)[
-        #pop.column-box(
-          heading: "Evaluation Result",
-          heading-box-args: result-heading-args,
-          body-box-args: result-body-args,
-        )[
-          #img-slot(
-            [Metric comparison grid],
-            [PSNR · SSIM · LPIPS · FPS · VRAM],
-            height: 10.1cm,
-          )
-        ]
+      #pop.column-box(
+        heading: "Evaluation Result",
+        heading-box-args: result-heading-args,
+        body-box-args: result-body-args,
+      )[
+        #img-slot(
+          [Metric comparison grid],
+          [PSNR · SSIM · LPIPS · FPS · VRAM],
+          height: 10.1cm,
+        )
+      ]
 
-        #pop.column-box(
-          heading: "MOG: Bitter Lesson",
-          heading-box-args: result-heading-args,
-          body-box-args: result-body-args,
-        )[
-          #img-slot(
-            [Motion and camera analysis],
-            [fixed camera · moving camera · artifacts],
-            height: 10.1cm,
-          )
-        ]
+      #pop.column-box(
+        heading: "MOG: Bitter Lesson",
+        heading-box-args: result-heading-args,
+        body-box-args: result-body-args,
+      )[
+        #img-slot(
+          [Motion and camera analysis],
+          [fixed camera · moving camera · artifacts],
+          height: 10.1cm,
+        )
+      ]
+
+      #v(1fr)
+
+      #pop.column-box(
+        heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
+        heading-box-args: final-heading-args,
+      )[
+        #grid(
+          columns: (1fr, 1fr),
+          gutter: 0.65em,
+
+          [
+            #callout(
+              [Sort-free in 4D],
+              [Adding time to MobileGS MLPs moves bottleneck from sorting to MLP eval.],
+              fill: rgb("#fff7ed"),
+              accent: orange,
+            )
+          ],
+
+          [
+            #callout(
+              [Uncertainty loss],
+              [USplat-style weighting is too expensive for full ablations, so we tested small-scale.],
+              fill: rgb("#f5f3ff"),
+              accent: violet,
+            )
+          ],
+        )
       ]
     ],
 
@@ -386,35 +551,6 @@
           [*Fastest*], [see renderer: sort-free may not be fastest],
         )
       ]
-
-      #pop.column-box(
-        heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
-        heading-box-args: final-heading-args,
-      )[
-        #grid(
-          columns: (1fr, 1fr),
-          gutter: 0.65em,
-
-          [
-            #callout(
-              [Sort-free in 4D],
-              [Adding time to MobileGS MLPs moves bottleneck from sorting to MLP eval.],
-              fill: rgb("#fff7ed"),
-              accent: orange,
-            )
-          ],
-
-          [
-            #callout(
-              [Uncertainty loss],
-              [USplat-style weighting is too expensive for full ablations, so we tested small-scale.],
-              fill: rgb("#f5f3ff"),
-              accent: violet,
-            )
-          ],
-        )
-      ]
-
 
       // Push bibliography to the bottom of the column
       #v(1fr)
@@ -462,60 +598,4 @@
       ]
     ]
   }
-
-  #let footer-bg = rgb("#171044")
-  #let footer-muted = rgb("#aeb8d2")
-  #let footer-accent = rgb("#ffffff")
-
-  #bottom-box(
-    heading-box-args: (
-      width: 100%,
-      inset: 0pt,
-      outset: 0pt,
-      fill: none,
-      stroke: none,
-      radius: 0pt,
-    ),
-  )[
-    #rect(
-      width: 100%,
-      fill: footer-bg,
-      inset: (left: 0.9em, right: 0.9em, top: 0.35em, bottom: 0.4em),
-    )[
-      #set text(fill: footer-accent, size: 0.72em)
-
-      #grid(
-        columns: (1.05fr, 1.45fr, 1.05fr),
-        gutter: 1em,
-        align: horizon,
-
-        [
-          #align(left)[
-            #text(weight: "semibold")[2026-05-12]
-            #h(0.55em)
-            #text(fill: footer-muted)[Computer Vision]
-          ]
-        ],
-
-        [
-          #align(center)[
-            #fa-icon("github")
-            #h(0.45em)
-            #text(size: 1em, weight: "medium")[
-              github.com/AliEmreSenel/4D-Gaussian-Splattering-Research
-            ]
-          ]
-        ],
-
-        [
-          #align(right)[
-            #text(weight: "bold")[Università Bocconi]
-            #h(0.35em)
-            #text(fill: footer-muted)[Milano]
-            #h(1em)
-          ]
-        ],
-      )
-    ]
-  ]
 ]
