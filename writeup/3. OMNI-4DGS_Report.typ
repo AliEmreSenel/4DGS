@@ -93,7 +93,7 @@ $
                                      & + T_(N+1)(p, t) c_("bg")
 $
 
-*Sort-Free Rendering*, first proposed in @Hou2024SortFreeGS, computes color directly through a sum, where the weighing of each color contribution is computed by multiple small Multilayer Perceptrons (MLP). The MLP "compresses" information from the gaussians, resulting in smaller storage requirements and faster inference. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. We picked @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, with computing pixel color and gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
+*Sort-free rendering*, first proposed in @Hou2024SortFreeGS, computes color directly through a sum, where the weighing of each color contribution is computed by multiple small Multilayer Perceptrons (MLP). The MLP "compresses" information from the gaussians, resulting in smaller storage requirements and faster inference. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. We picked @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, with computing pixel color and gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
 
 $
   C_"pix" = (1 - T)
@@ -135,11 +135,11 @@ Other optimizations have also been developed for the rendering (inference) opera
 
 == Training
 
-We use *Backpropagation* for training, minimizing image similarity metrics, but additional loss components are also introduced by the architecture,. We use *Adam Optimizer* and *Batch training* to improve instability @yang2024_4dgs.
+We use backpropagation for training, minimizing image-similarity metrics, with additional loss components introduced by the architecture. We use the Adam optimizer and batch training to improve stability @yang2024_4dgs.
 
-Memory usage is proportional to the number of Gaussians, so one seeks to minimize this number by pruning less relevant ones. *Opacity Pruning* drops gaussians with opacity value smaller than a chosen threshold @yang2024_4dgs @du2026_mobilegs. *Contribution Pruning* accumulates a contribution value over training steps, and drops gaussians that remain not relevant enough for enough iterations. *Spatio-Temporal Pruning* drops the bottom $~ 90%$ quantile, ranking higher more persistent and longer-lasting gaussians @luo2025_instant4d. Finally, *Grid Pruning* de-duplicates gaussians by position, velocity, temporal scale and time placement @luo2025_instant4d. Pruning rules are correlated, so we only implement Spatio-Temporal pruning, which had to be written from scratch, and maintain Opacity Pruning from 4DGS-Native. *Densification* is the operation of increasing the number of gaussians: our references skipped it to speed up generation, but we reintroduce it. We use *Edge Guided*, which adds gaussians near image edges @Xu_2025_CVPR, and *Loss Guided*, which propagates per-pixel error back to the gaussians @sun2024highfidelityslam.
+Memory usage is proportional to the number of Gaussians, so one seeks to minimize this number by pruning less relevant ones. Opacity pruning drops Gaussians with opacity values below a chosen threshold @yang2024_4dgs @du2026_mobilegs. Contribution pruning accumulates a contribution value over training steps and drops Gaussians that remain insufficiently relevant for enough iterations. Spatio-Temporal pruning drops the bottom $~ 90%$ quantile, ranking higher more persistent and longer-lasting Gaussians @luo2025_instant4d. Finally, Grid pruning de-duplicates Gaussians by position, velocity, temporal scale, and time placement @luo2025_instant4d. Since most pruning rules are correlated, we only implemented Spatio-Temporal pruning, as it accounts for both spatial and temporal contribution, and kept Opacity Pruning from 4DGS-Native. Related to pruning, we apply densification to increase the number of Gaussians where necessary. We implement Edge-Guided densification, which adds Gaussians near image edges @Xu_2025_CVPR, and Gradient-Based densification, which splits Gaussians with high gradients @sun2024highfidelityslam.
 
-Custom `CUDA` kernels are used to compute pixel operations on the GPU directly, though it limits compatibility across codebases. For this reason, we opted for a mixed pruning-densify schedule, as opposed to MegaSAM @luo2025_instant4d.
+Rasterization is performed through custom `CUDA` kernels for speed. However, compatibility issues arise because the codebases use different CUDA versions. For this reason, we opted for a mixed pruning-densification schedule, aiming to simulate a better-than-random initialization, as opposed to MegaSAM, at the cost of worse initalization @luo2025_instant4d.
 
 == Loss
 
@@ -175,11 +175,15 @@ $
 
 where $dot(mu)_i$ is the temporal velocity estimated by finite difference. These four terms remain active throughout training.
 
-Reconstruction quality is then reported using three complementary image metrics: *Peak Signal to Noise Ratio* (PSNR) measures pixel-level fidelity, *Structural Similarity Index Measure* (SSIM) captures structural similarity in luminance, contrast, and texture, and *Learned Perceptual Image Patch Similarity* (LPIPS) estimates perceptual similarity using the similarity between the activations of two image patches in a network.
+Reconstruction quality is then reported using three complementary image metrics:
+
+- Peak Signal-to-Noise Ratio (PSNR): measures pixel-level fidelity.
+- Structural Similarity Index Measure (SSIM): captures structural similarity in luminance, contrast, and texture.
+- Learned Perceptual Image Patch Similarity (LPIPS): estimates perceptual similarity from neural feature activations.
 
 == Uncertainty-Aware Loss
 
-If loss minimization is applied to all Gaussians equally, low-importance splats are unconstrained, producing visual artifacts. Uncertainty Awareness addresses this problem, activating after base-model convergence. First, uncertainty $u_(i,t)$ is estimated per Gaussian per frame from alpha-blending weights: well-observed Gaussians contribute strongly to many pixels, thus receiving a low uncertainty score:
+When optimization is applied equally to all Gaussians, low-quality Gaussians remain unconstrained, producing visual inconsistencies. Uncertainty Awareness addresses this problem, activating after base-model convergence. First, uncertainty $u_(i,t)$ is estimated per Gaussian per frame from alpha-blending weights: well-observed Gaussians contribute strongly to many pixels, thus receiving a low uncertainty score:
 
 $
   sigma^2_(i,t) =
@@ -237,7 +241,7 @@ DQB is a soft interpolation, where $bold(mu)_(i,t)$ remains free and may deviate
 
 Taking inspiration from @Xu_2025_CVPR, we implement *Random Dropout Regularization* to ensure that remaining gaussians are not overly dependent on any particular subset of primitives. At each training iteration, a random mask disables a fraction of Gaussians before rendering, while the full model remains the reference target. This encourages neighboring primitives to share responsibility for explaining observed pixels, reducing sparse-view overfitting, floaters, and hollow artifacts. During inference, all Gaussians are restored, effectively aggregating many low-complexity submodels. The result is smoother geometry and improved generalization, while later refinement can recover high-frequency details lost through dropout during training.
 
-We also implement *Edge-guided Splitting Strategy* (ESS)
+We also implement *Edge-guided Splitting Strategy* (ESS). ESS increases Gaussian density near image discontinuities instead of distributing new primitives uniformly. We compute edge cues from the training views and use them to identify projected regions where reconstruction error is likely to concentrate around silhouettes, thin structures, and texture transitions. During densification, Gaussians associated with these high-gradient regions are preferentially split or duplicated, giving the model additional capacity where small geometric or color errors are most visible. This complements dropout: dropout regularizes the existing primitives, while ESS determines where extra primitives should be allocated.
 
 = Implementation Practices // TODO remove if not implemented
 
@@ -245,25 +249,25 @@ Implementation choices have been identified to reduce storage size and improve r
 
 == Training Compression
 
-The training procedure can be altered to use less memory, such as by storing a compressed representation, which can be unpacked at inference. These optimizations generaly target Spherical Harmonics, which are stored in numerous scalars @du2026_mobilegs.
+The training procedure can be altered to use less memory by changing how color is represented during optimization. These optimizations generally target Spherical Harmonics, which require many stored scalars at higher order @du2026_mobilegs. They do not necessarily unpack features at inference. For example, Teacher-Student SH Compression can keep colors in a lower-order representation such as SH(1) instead of recovering SH(3) at render time.
 
-*MLP Compression of SH* encodes the view-dependent color of the Gaussians into dense latent vectors using an MLP to : #box[$(h_d, h_v) = ("view", "diffuse")$], which isolate the information between gaussian-specific and perspective specific @du2026_mobilegs. To learn the split, while training "view", the diffuse component is fixed but camera angle changes. The opposite holds for "diffuse", where the view component is fixed. During inference, the MLPs are used to recover color, effectively trading compute for
+MLP compression of SH encodes the view-dependent color of the Gaussians into dense latent vectors using an MLP: #box[$(h_d, h_v) = ("view", "diffuse")$]. These components separate Gaussian-specific information from perspective-specific information @du2026_mobilegs. To learn the split, the diffuse component is fixed while the view component is trained across changing camera angles; the opposite holds when training the diffuse component. During inference, MLP decoding trades reduced storage for additional compute.
 
-*Teacher-Student SH Compression* works by training an MLP to compress existing high-order harmonic colors to lower order through a faithful mapping. The operation identifies the set of mappings that minimizes the color loss between the original representation and the lower-order one.
+Teacher-Student SH Compression distills high-order harmonic colors into a lower-order representation by minimizing the color loss between the teacher representation and the compact student representation.
 
-We do not provide support for MLP compression of SH. This issue is also similar to the case of sort-free rendering extended to 4D, which is mentioned in the results section.
+We do not use teacher-student compression, and we do not provide support for MLP compression of SH. This limitation is similar to the case of sort-free rendering extended to 4D, which is discussed in the results section.
 
 == At Rest Compression
 
-The model can be stored as the combination of compression MLPs, and lossy "codebook" approximations @du2026_mobilegs.
+The model can be stored using lossy codebook approximations and geometry compression @du2026_mobilegs. At-rest compression is applied after training and does not require MLPs.
 
-*Codebook Compression* is applied to gaussian features by splitting the complete vector of features into sub-vectors, which are replaced with the K-means nearest centroids to obtain a lossy compression of comparatively close vectors. The corresponding index for each gaussian is stored using Huffman Encoding. This technique is also referred to as Neural Vector Quantization (NVQ) @du2026_mobilegs.
+Codebook compression is applied to Gaussian features by splitting the complete feature vector into sub-vectors, which are replaced with the nearest K-means centroids to obtain lossy compression of comparatively similar vectors. The corresponding index for each Gaussian is stored using Huffman encoding. This technique is also referred to as Neural Vector Quantization (NVQ) @du2026_mobilegs.
 
-*GPCC Compression* is used to encode gaussian positions by first grouping them by position in a grid-based (voxels) discretization of space, then sorting them by Morton Order and storing them in PLY format. The algorithm is implemented in C++ as a single-threaded utility, which runs .
+GPCC compression encodes Gaussian positions by first grouping them through grid-based voxel discretization, then sorting them by Morton order and storing them in PLY format. The algorithm is implemented in C++ as a single-threaded offline utility.
 
 == Render / Inference Optimizations
 
-Similarly to how pruning reduces the number of gaussians, *per-frame visibility masking* increases render speed by loading fewer gaussians from memory, based on contribution to the view @yuan2025_4dgs1k. The technique stores a boolean mask for the gaussians every n frames (n=5 in @yuan2025_4dgs1k), which records if the gaussian is actively contributing to the image. During inference, at each frame t, only the gaussians that are visible in the last computed mask before t and the nearest after t are loaded, which both reduces memory use and compute.
+Similarly to how pruning reduces the number of gaussians, per-frame visibility masking increases render speed by loading fewer gaussians from memory, based on contribution to the view @yuan2025_4dgs1k. The technique stores a boolean mask for the gaussians every n frames (n=5 in @yuan2025_4dgs1k), which records if the gaussian is actively contributing to the image. During inference, at each frame t, only the gaussians that are visible in the last computed mask before t and the nearest after t are loaded, which both reduces memory use and compute.
 
 #place(
   bottom + right,
@@ -274,62 +278,33 @@ Similarly to how pruning reduces the number of gaussians, *per-frame visibility 
 ]
 == Points of Improvement
 
-Several techniques have been developed to improve the known limitations of GS, but any addition may negate the contribution of another. For example, Isotropic Gaussians allow for faster training and smaller memory footprint, but reduce the model's capacity. We run a shared parametrization model to test each architectural component in relation to the others. We combine the papers into a single architecture, which can be studied through ablations. We start from the 4DGS-Native Architecture, adding features from available implementations @yang2024_4dgs @luo2025_instant4d @du2026_mobilegs, and re-implementing the missing structures from the others @yuan2025_4dgs1k @guo2026uncertaintymattersdynamicgaussian.
-
-*Initialization* of gaussian position can be random, or be provided from a point cloud model such as MegaSAM in @luo2025_instant4d. Good initializations massively reducing training time and produce better results. We experiment with the addition of a pruning-densify schedule to improve the robustness of our results over a reduced training time.
-
-*Isotropy* involves choosing between Isotropic gaussians @luo2025_instant4d and Anisotropic Gaussians @yang2024_4dgs, corresponding to a tradeoff between faster training, stemming from a reduced number of variables, and more expressive Gaussians.
-
-*Rotation* encoding relies on two quaternions per-gaussian to learn and encode rotation. Quaternions are preferred to rotation matrices because of their simpler implementation smaller number of parameters, which avoids and reduces the number of variables
-
-*Color* can be represented with Spherical Harmonics, whose precision can be tuned: SH(0) represents RGB colors, while SH(3) uses 48 coefficients to define a color gradient over the gaussian's isosurfaces. Following the 4DGS-Native implementation, training SH of higher order is incremental: higher order harmonics are "unlocked" for learning over training.
-
-*Pruning* is usually treated as a penultimate step in training the model: train from inizialization, prune once, and finetune at the end. Different, yet similar, strategies were proposed for pruning: Opacity Pruning @du2026_mobilegs, which discards transparent gaussians, Contribution pruning @du2026_mobilegs, dropping gaussians that affect the loss minimally, Grid Pruning @luo2025_instant4d. We focus only on Spatio-Temporal Contribution @yuan2025_4dgs1k, as it captures both aspects of prevalence in time and in space.
-
-*Densification* consists of duplicating single Gaussians to give more expressivity where needed. In our reference models, the step is generally discarded to reduce training time, but we reintroduce it as it provides better than random Gaussian initialization than MegaSAM.
-
-*Rendering* changes primarily whether Sort-Based @yang2024_4dgs or Sort-Free @du2026_mobilegs are used. We extend the latter with a time component, to also capture time-dependent behavior.
-
-*Distillation* can be used to effectively reduce the storage size of the SH coefficients, by training a MLP to effectively compress color through a teacher-student model.
-
-*Storage* reduction techniques consist of Neural Vector Quantization (NVQ), used in conjunction with MLP compression @du2026_mobilegs.
-
-*Loss*, as all our reference papers except USPLAT use only _L1_ and _DSSIM_ metrics to train, with a $0.80 - 0.20$ weighing. We start from this prior and introduce the USPLAT later.
+Several techniques have been developed to improve the known limitations of GS, but any addition may negate the improvements of another. Starting from 4DGS-Native, we add or compare components from the available implementations @yang2024_4dgs @luo2025_instant4d @du2026_mobilegs, and re-implement missing structures from the remaining references @yuan2025_4dgs1k @guo2026uncertaintymattersdynamicgaussian. The contribution table summarizes which components are inherited, modified, reimplemented, benchmarked, or omitted. We use it as a compact map of the design space, while the ablation section reports the observed interactions under a shared parametrization.
 
 = Ablation Results
 
 We train variations of the same architecture on the `trex` and `bouncingballs` datasets for 20k training steps. We record performance metrics over training, namely PSNR, LPIPS, Peak RAM and VRAM usage, Memory Footprint, Number of Gaussians and render-time FPS. We also run USPLAT ablations on limited 7k step runs, due to the massive time overhead introduced by the USPLAT implementation available to us. We discuss our findings in the following section, and we provide the complete table of experiments is provided in the appendix. // TODO add table of results
 
-*Visual Quality*
+== Visual Quality
 
-*Memory Usage*
+== Memory Usage
 
-*Gaussian Count*
+== Gaussian Count
 
-*Inference FPS*
+== Inference FPS
 
-*Training time*
+== Training Time
 
 == Role of each Component
 
-// TODO add numbers indicatively
+The ablations show that component effects are not independent. Initialization, Gaussian parametrization, color representation, pruning, and rendering interact through the same budget of Gaussians, parameters, and CUDA execution time. We therefore report the main trends rather than restating each method.
 
-*Initialization* plays the role of a strong prior on the voxels in 4DGS. Consequently, random initialization will allow "floaters" in front of the cameras cameras are still in front of the camera, which require either multiple moving camera to improve scene reconstruction or a better initalization. This is particularly apparent in the MOG dataset comparison, which recreates a scene with fixed cameras and moving cameras. // TODO add side by side comparison
-
-// TODO add image
-
-*Isotropy* affects number of gaussians and the reconstruction error. Anisotropic gaussians are more expressive, hence a smaller number is required, at the cost of more variables.
-
-*Appearance* acts similar to isotropy: more RGB gaussians are required to encode color up to the same visual quality than SH(3) gaussians, but the memory use is drastically reduced.
-
-*Sorting* primarily affects training and inference time: sort-free training is much slower, . Moreover, the weight MLP is not able to learn anough features to
-
-*Pruning and Densification* affects the number of gaussians, with _no pruning_ allowing gaussians to grow unchecked, affecting memory but producing visually better results. On the other hand, _interleave_ pruning both adds and removes gaussians, with slightly better visual results.
-
-*Dropout and ESS* both resulted in limited visual improvements. We attribute their minimal help to the fact that our datasets were not highly detailed or complex.
-
-*USPLAT* could not be tested to the same extent as the other ablation due to its massive computation overhead. In fact, while a single run of the default model runs in ~20min, a single USPLAT ablation requires 5h. We ran all of the ablations for 7k iterations, but could not find conclusive differences beyond a very minor visual equality improvement. We were not able to reproduce the motion regularization improvements as they appear in the @guo2026uncertaintymattersdynamicgaussian. We attribute this to our reliance on an unofficial implementation @chien2026usplat4d. // TODO add reference
-\
+- Random initialization increases floaters in fixed-camera scenes, especially on MOG-style data. Structured initialization or a pruning-densification schedule reduces this failure mode, but the latter is only a partial substitute for a high-quality point-cloud prior.
+- Anisotropic Gaussians reached lower reconstruction error with fewer primitives, while isotropic Gaussians reduced variables per primitive and therefore favored memory and training speed.
+- RGB color reduced memory but required more primitives to approach SH(3) quality; progressive SH training remained more stable for higher-fidelity reconstructions.
+- Sort-free rendering did not provide the expected speedup in our 4D extension. The added time input and weight MLP increased training cost, and the learned weights were not expressive enough to consistently match sort-based quality.
+- Interleaved pruning and densification controlled Gaussian count better than either no pruning or one-shot pruning. It slightly improved visual quality while limiting memory growth.
+- Dropout and ESS produced limited gains on our datasets, likely because the scenes were not detailed enough for edge-aware capacity allocation or dropout regularization to matter strongly.
+- USPLAT showed only minor visual improvements in the 7k-step budget but imposed a large computational overhead: around 5h per ablation compared with about 20min for the default run. We could not reproduce the motion-regularization improvements reported by @guo2026uncertaintymattersdynamicgaussian, possibly because we relied on the unofficial implementation @chien2026usplat4d.
 
 == Choice of Model
 
