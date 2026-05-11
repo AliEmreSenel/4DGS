@@ -13,19 +13,19 @@
   <tr>
     <th>Ellipsoid</th>
     <td>
-      <video src="./writeup/img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.gif" width="100%">
     </td>
     <td>
-      <video src="./writeup/img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.gif" width="100%">
     </td>
   </tr>
   <tr>
     <th>Spherical</th>
     <td>
-      <video src="./writeup/img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.gif" width="100%">
     </td>
     <td>
-      <video src="./writeup/img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.gif" width="100%">
     </td>
   </tr>
 </table>
@@ -43,19 +43,19 @@
   <tr>
     <th>Ellipsoid</th>
     <td>
-      <video src="./writeup/img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.gif" width="100%">
     </td>
     <td>
-      <video src="./writeup/img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.gif" width="100%">
     </td>
   </tr>
   <tr>
     <th>Spherical</th>
     <td>
-      <video src="./writeup/img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.gif" width="100%">
     </td>
     <td>
-      <video src="./writeup/img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+      <img src="./writeup/img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.gif" width="100%">
     </td>
   </tr>
 </table>
@@ -119,3 +119,24 @@
 | Render <br> Sort-free          |         |           | ✓        |          | **Heavily modified** <br> [`sort_free_render`](gaussian_renderer/__init__.py#L195-L213), [`duplicateWithTileKeys`](diff-gaussian-rasterization-ms-nosorting/cuda_rasterizer/rasterizer_impl.cu#L127-L166), [`OIT render`](diff-gaussian-rasterization-ms-nosorting/cuda_rasterizer/rasterizer_impl.cu#L460-L555) |
 
 # References
+
+- [4DGS Native / 4D Gaussian Splatting](https://github.com/fudan-zvg/4d-gaussian-splatting): base 4DGS training/rendering pipeline and dynamic-scene representation.
+
+  - [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting): original 3DGS utilities and base Gaussian-splatting components.
+  - [diff-gaussian-rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization): CUDA Gaussian rasterizer.
+  - [simple-knn](https://gitlab.inria.fr/bkerbl/simple-knn): KNN CUDA extension used by Gaussian-splatting code.
+  - [Stratified-Transformer / pointops2](https://github.com/JIA-Lab-research/Stratified-Transformer): point cloud CUDA utility ops.
+
+- [Mobile-GS](https://github.com/xiaobiaodu/Mobile-GS): mobile-oriented Gaussian compression / pruning / rendering optimizations.
+
+  * [mpeg-pcc-tmc13](https://github.com/MPEGGroup/mpeg-pcc-tmc13): MPEG GPCC point-cloud compression backend.
+
+- [DropoutGS](https://github.com/xuyx55/DropoutGS): dropout-based Gaussian pruning/compression ideas.
+
+- [Instant4D](https://github.com/Zhanpeng1202/Instant4D): lightweight 4DGS pruning / isotropic Gaussian / fast dynamic-scene optimization ideas.
+
+- [4DGS-1K / 1000FPS 4DGS](https://github.com/4DGS-1K/4DGS-1K.github.io): 1000+ FPS 4DGS project reference and performance-oriented design ideas.
+
+- [USplat4D](https://github.com/cywhitebear/usplat4d): unified/static-dynamic 4D Gaussian splatting reference implementation.
+
+- [stb](https://github.com/nothings/stb): vendored image-writing utility, e.g. `stb_image_write.h`.
