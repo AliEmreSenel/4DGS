@@ -473,56 +473,57 @@
       ]
       // Result boxes — col 1
 
+      #v(1fr)
       #pop.column-box(
         heading: [Best Quality Ablation #h(1fr) #fa-icon("crown")],
         heading-box-args: final-heading-args,
       )[
         #set table(
           stroke: 0.25pt + black,
-          inset: (x: 4pt, y: 5pt),
+          inset: (x: 3pt, y: 4pt),
           align: center,
         )
+
         #box(
           width: 100%,
           fill: rgb("#cee2f6"),
           stroke: 1pt + rgb("#425161"),
           radius: 14pt,
-          inset: 14pt,
+          inset: 10pt,
         )[
-          For Quality: *ellipsoid · SH3 · sort · no-prune*
+          *ellipsoid · SH3 · sort · ESS · interleaved prune*
         ]
 
-        #v(-20pt)
+        #v(-18pt)
 
         #table(
-          columns: (0.5fr, 0.45fr, 0.45fr, 0.45fr, 0.35fr, 0.45fr, 0.45fr, 0.45fr),
-          inset: 10pt,
-          align: (x, y) => if x > 0 { center } else { left },
+          columns: (0.48fr, 0.62fr, 0.42fr, 0.42fr, 0.42fr, 0.35fr, 0.38fr, 0.42fr),
+          inset: 4.5pt,
+          align: (x, y) => if x > 1 { center } else { left },
           stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
 
-          text(size: 0.8em)[*Scene*],
-          text(size: 0.6em)[*PSNR ↑*],
-          text(size: 0.6em)[*SSIM ↑*],
-          text(size: 0.6em)[*LPIPS ↓*],
-          text(size: 0.6em)[*FPS ↑*],
-          text(size: 0.6em)[*MB ↓*],
-          text(size: 0.6em)[*Gauss ↓*],
-          text(size: 0.6em)[*Train ↓*],
+          text(size: 0.56em)[],
+          text(size: 0.56em)[*Method*],
+          text(size: 0.52em)[*PSNR ↑*],
+          text(size: 0.52em)[*SSIM ↑*],
+          text(size: 0.52em)[*LPIPS ↓*],
+          text(size: 0.52em)[*FPS ↑*],
+          text(size: 0.52em)[*MB ↓*],
+          text(size: 0.52em)[*Gauss ↓*],
 
-          [BBalls], [33.39], [0.982], [0.014], [290], [278], [150k], [4.9m],
+          [BBalls], [4DGS], [33.35], [0.982], [0.025], [462], [84], [134k],
+          [BBalls], [4DGS-1K], [33.45], [0.983], [0.025], [1509], [13], [20k],
+          [BBalls], [*Ours*], [*34.38*], [*0.985*], [*0.017*], [1133], [23], [37k],
 
-          [TRex], [30.63], [0.983], [0.023], [341], [301], [162k], [4.9m],
+          [TRex], [4DGS], [29.85], [0.980], [0.019], [202], [792], [1265k],
+          [TRex], [4DGS-1K], [30.47], [0.981], [0.018], [1361], [118], [189k],
+          [TRex], [*Ours*], [*32.05*], [*0.985*], [*0.015*], [786], [60], [97k],
         )
-
-        #align(left)[
-          #text(size: 25pt)[
-            Our Compute constraints $=>$ Ablations rendered at $200 times 200$.
-
-            Direct comparison with baselines is not possible: $400 times 400$.
-          ]
-        ]
       ]
     ],
+    // -------------------------------------------------------------------------
+    // Column 2
+    // -------------------------------------------------------------------------
 
     // -------------------------------------------------------------------------
     // Column 2
@@ -663,7 +664,7 @@
           radius: 10pt,
           inset: 9pt,
         )[
-          Hedges' Coefficient $g > 0.5 => "significant"$
+          Hedges' Coefficient $g > 0.5 => "significant change"$
         ]
 
         #let pct(fill, body) = box(width: 3.6em)[
