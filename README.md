@@ -77,12 +77,45 @@
   </tr>
 </table>
 
+# Conclusion
+
+## Repository layout
+
+| Path                         | Purpose                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `train.py`                   | Train or resume a 4D Gaussian checkpoint.                                  |
+| `render.py`                  | Render videos or image frames from a checkpoint.                           |
+| `interactive_viewer.py`      | Open a real-time CUDA viewer for a checkpoint.                             |
+| `batch_train.py`             | Generate, run, and evaluate ablation sweeps.                               |
+| `compress.py`                | Simple checkpoint compression and round-trip validation.                   |
+| `compression_postprocess.py` | Universal post-training compression, pruning, evaluation, and diagnostics. |
+| `mobile_export.py`           | Export a Mobile-GS/NVQ compressed payload.                                 |
+| `mobile_benchmark.py`        | Benchmark a Mobile-GS payload for size, FPS, and optional quality.         |
+| `html_export.py`             | Build a local HTML overview of rendered ablation outputs.                  |
+| `ablation_script.sh`         | Batch-render ablation checkpoints into consistently named videos.          |
+| `scripts/`                   | Dataset conversion, FPS profiling, rerun helpers, and utility scripts.     |
+| `configs/dnerf/`             | Standard D-NeRF scene configs.                                             |
+| `configs/dnerf_ablation/`    | Clean baseline configs intended for ablation sweeps.                       |
+
+## Setup and script guide
+
+Information on how to run each script is in the [Guide File](guide.md).
+
+## Reproducibility notes
+
+For experiments intended for comparison:
+
+1. Start with configs in `configs/dnerf_ablation/`.
+2. Use explicit `--matrix-preset` and `--axes` choices.
+3. Set `--seed` or `--seed-offset`.
+4. Keep `--test_iterations` and `--save_iterations` consistent across rows.
+5. Record the exact command and generated configs.
+6. Prefer `chkpnt_best.pth` for final render/benchmark comparisons.
+7. Use the same render mode, resolution, split, and temporal-mask settings when comparing FPS or visual quality.
+
 # Code Visualization
 
 ![](writeup/img/treemap.png)
-
-# Conclusion
-
 
 # Feature Matrix
 
