@@ -473,12 +473,41 @@
       ]
       // Result boxes — col 1
 
-      #pop.column-box(
-        heading: [Comparison with SOTA #h(1fr) #fa-icon("crown")],
-        heading-box-args: final-heading-args,
-      )[
+     #pop.column-box(
+  heading: [Comparison with SOTA #h(1fr) #fa-icon("crown")],
+  heading-box-args: final-heading-args,
+)[
+  #set table(
+    stroke: 0.25pt + black,
+    inset: (x: 4pt, y: 3pt),
+    align: center,
+  )
 
-      ]
+  #text(size: 6.5pt)[
+    Best config: *aniso · SH3 · sort · no-prune*
+  ]
+
+  #v(3pt)
+
+  #table(
+    columns: (auto, auto, auto, auto, auto, auto, auto, auto),
+    fill: (x, y) => if y == 0 { rgb("#eeeeee") } else { none },
+
+    [*Scene*], [*PSNR ↑*], [*SSIM ↑*], [*LPIPS ↓*], [*FPS \ ↑*], [*Stor. ↓*], [*Gauss ↓*], [*Train ↓*],
+
+    [Bounc. Balls], [33.39], [0.982], [0.014], [290], box[278 MB], [150k], [4.9m],
+
+    [T-Rex], [30.63], [0.983], [0.023], [341], box[301 MB], [162k], [4.9m],
+  )
+
+  #v(3pt)
+
+  #align(center)[
+    #text(size: 5.5pt)[
+      Rendered at 200×200. Published baselines use 400×400, so direct metric comparison is not valid.
+    ]
+  ]
+]
     ],
 
     // -------------------------------------------------------------------------
