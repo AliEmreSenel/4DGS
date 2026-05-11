@@ -473,45 +473,46 @@
       ]
       // Result boxes — col 1
 
-     #pop.column-box(
-  heading: [Comparison with SOTA #h(1fr) #fa-icon("crown")],
-  heading-box-args: final-heading-args,
-)[
-  #set table(
-    stroke: 0.25pt + black,
-    inset: (x: 4pt, y: 5pt),
-    align: center,
-  )
+      #pop.column-box(
+        heading: [Best Ablation Results #h(1fr) #fa-icon("crown")],
+        heading-box-args: final-heading-args,
+      )[
+        #set table(
+          stroke: 0.25pt + black,
+          inset: (x: 4pt, y: 5pt),
+          align: center,
+        )
 
-  #text(size: 25pt)[
-    Best Ablations: *aniso · SH3 · sort · no-prune*
-  ]
+        Best Ablations: *aniso · SH3 · sort · no-prune*
 
-  #v(3pt)
-  #show table.cell.where(y: 1): set text(size: 30pt)
-  #show table.cell.where(y: 0): set table.cell(inset: (y: 2pt))
-  #show table.cell.where(y: 0): set text(size: 25pt)
-  #show table.cell: it => align(center + horizon, it.body)
-  #table(
-    columns: (auto, auto, auto, auto, auto, auto, auto, auto),
-    align: center,
-    fill: (x, y) => if y == 0 { rgb("#eeeeee") } else { none },
+        #table(
+          columns: (0.5fr, 0.45fr, 0.45fr, 0.45fr, 0.35fr, 0.45fr, 0.45fr, 0.45fr),
+          inset: 10pt,
+          align: (x, y) => if x > 0 { center } else { left },
+          stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
 
-    [*Scene*], [*PSNR ↑*], [*SSIM ↑*], [*LPIPS ↓*], [*FPS ↑*], [*Stor. ↓*], [*Gauss ↓*], [*Train ↓*],
+          text(size: 0.8em)[*Scene*],
+          text(size: 0.6em)[*PSNR ↑*],
+          text(size: 0.6em)[*SSIM ↑*],
+          text(size: 0.6em)[*LPIPS ↓*],
+          text(size: 0.6em)[*FPS ↑*],
+          text(size: 0.6em)[*MB ↓*],
+          text(size: 0.6em)[*Gauss ↓*],
+          text(size: 0.6em)[*Train ↓*],
 
-    [Bounc. Balls], [33.39], [0.982], [0.014], [290], box[278 MB], [150k], [4.9m],
+          [BBalls], [33.39], [0.982], [0.014], [290], [278], [150k], [4.9m],
 
-    [#pad(y: 15pt)[T-Rex]], [30.63], [0.983], [0.023], [341], box[301 MB], [162k], [4.9m],
-  )
+          [TRex], [30.63], [0.983], [0.023], [341], [301], [162k], [4.9m],
+        )
 
-  #v(3pt)
+        #align(left)[
+          #text(size: 25pt)[
+            Our Compute constraints $=>$ Ablations rendered at $200 times 200$.
 
-  #align(left)[
-    #text(size: 25pt)[
-      Rendered at 200×200. Published baselines use 400×400, so direct metric comparison is not valid.
-    ]
-  ]
-]
+            Direct Comparison with baselines is not possible: $400 times 400$.
+          ]
+        ]
+      ]
     ],
 
     // -------------------------------------------------------------------------
@@ -533,24 +534,31 @@
           + underbrace(T_(N+1)c_("bg"), #[background])
         $
 
+        #let mhl(content) = box(
+          fill: yellow.lighten(70%),
+          inset: 0.10em,
+          outset: 1pt,
+          radius: 2pt,
+          text(size: 22pt, content),
+        )
+
         #strong[Sort-Free #h(1em)] MLP-learned blending weights:
         #[
           #show math.equation: set text(size: 28pt)
 
           $
-            cases(
-              w_i (p, t, v) =
-              phi_i^2(p, t, v)
-              + phi_i (p, t, v) / (d_i^2(p, t, v))
-              + exp(s_(max, i) / (d_i (p, t, v))),
-              C_p^("sf")(t, v) =
-              (1 - T_p (t, v))
-              frac(
-                sum_i c_i (v, t) #text(fill: blue)[$alpha_i (p, t, v) w_i (p, t, v)$],
-                sum_i #text(fill: blue)[$alpha_i (p, t, v) w_i (p, t, v)$]
-              )
-              + T_p (t, v) c_("bg")
-            )
+            w_i (p, t, v) =
+            phi_i^2(p, t, v)
+            + phi_i (p, t, v) / (d_i^2(p, t, v))
+            + exp(s_(max, i) / (d_i (p, t, v))) \
+          $
+          $
+            C_p^("sf")(t, v) =
+            (1 - T_p (t, v)) & frac(
+                                 sum_i c_i (v, t) #mhl[$alpha_i (p, t, v) w_i (p, t, v)$],
+                                 sum_i #mhl[$alpha_i (p, t, v) w_i (p, t, v)$]
+                               ) \
+                             & quad + T_p (t, v) c_("bg")
           $
         ]
         *+ input time t* $->$ Works in 4D, but expensive MLP
