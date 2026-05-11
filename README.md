@@ -1,5 +1,89 @@
 # Abstract
 
+## Bouncing Balls ⚾
+
+**Fixed:** No USplat/Prune/ESS/Dropout, Sort, 10k.
+
+<table>
+  <tr>
+    <th></th>
+    <th>Sort</th>
+    <th>Sort-Free</th>
+  </tr>
+  <tr>
+    <th>Ellipsoid</th>
+    <td>
+      <video src="./writeup/img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+    </td>
+    <td>
+      <video src="./writeup/img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+    </td>
+  </tr>
+  <tr>
+    <th>Spherical</th>
+    <td>
+      <video src="./writeup/img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+    </td>
+    <td>
+      <video src="./writeup/img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.mp4" controls muted loop width="100%"></video>
+    </td>
+  </tr>
+</table>
+
+## TRex 🐉
+
+**Fixed:** No USplat/Prune/ESS/Dropout, Sort, 20k.
+
+<table>
+  <tr>
+    <th></th>
+    <th>SH(3)</th>
+    <th>RGB</th>
+  </tr>
+  <tr>
+    <th>Ellipsoid</th>
+    <td>
+      <video src="./writeup/img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+    </td>
+    <td>
+      <video src="./writeup/img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+    </td>
+  </tr>
+  <tr>
+    <th>Spherical</th>
+    <td>
+      <video src="./writeup/img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+    </td>
+    <td>
+      <video src="./writeup/img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.mp4" controls muted loop width="100%"></video>
+    </td>
+  </tr>
+</table>
+
+# MOG'D - Dataset
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./writeup/img/mog_still_cameras.png" width="90%">
+      <br>
+      <strong>5 x Still Cameras</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="./writeup/img/mog_moving_cameras.png" width="90%">
+      <br>
+      <strong>5 x Moving Cameras</strong>
+    </td>
+  </tr>
+</table>
+
+# Code Visualization
+
+![](writeup/img/treemap.png)
+
+# Conclusion
+
+
 # Feature Matrix
 
 | Feature                      | 1000FPS | Instant4D | MobileGS | Usplat4D | Code reference                                                                                                                                                                                                                                                                                                 |
@@ -33,11 +117,5 @@
 | Render <br> Visibility Mask    | ✓       |           |          |          | **Re-implemented** <br> [`build_temporal_visibility_filter`](utils/mobile_compression.py#L450-L535), [`attach_temporal_visibility_filter`](utils/mobile_compression.py#L538-L553), [`_select_temporal_active_mask`](gaussian_renderer/__init__.py#L85-L156)                                                      |
 | Render <br> Sort-based         | ✓       | ✓         |          | ✓        | **Existing** <br> [`sorted render path`](gaussian_renderer/__init__.py#L231-L253), [`duplicateWithKeys`](diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu#L70-L113), [`SortPairs`](diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu#L184-L197)                                       |
 | Render <br> Sort-free          |         |           | ✓        |          | **Heavily modified** <br> [`sort_free_render`](gaussian_renderer/__init__.py#L195-L213), [`duplicateWithTileKeys`](diff-gaussian-rasterization-ms-nosorting/cuda_rasterizer/rasterizer_impl.cu#L127-L166), [`OIT render`](diff-gaussian-rasterization-ms-nosorting/cuda_rasterizer/rasterizer_impl.cu#L460-L555) |
-
-# Conclusion
-
-# Code Visualization
-
-![](writeup/img/treemap.png)
 
 # References
