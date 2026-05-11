@@ -479,31 +479,35 @@
 )[
   #set table(
     stroke: 0.25pt + black,
-    inset: (x: 4pt, y: 3pt),
+    inset: (x: 4pt, y: 5pt),
     align: center,
   )
 
-  #text(size: 6.5pt)[
-    Best config: *aniso · SH3 · sort · no-prune*
+  #text(size: 25pt)[
+    Best Ablations: *aniso · SH3 · sort · no-prune*
   ]
 
   #v(3pt)
-
+  #show table.cell.where(y: 1): set text(size: 30pt)
+  #show table.cell.where(y: 0): set table.cell(inset: (y: 2pt))
+  #show table.cell.where(y: 0): set text(size: 25pt)
+  #show table.cell: it => align(center + horizon, it.body)
   #table(
     columns: (auto, auto, auto, auto, auto, auto, auto, auto),
+    align: center,
     fill: (x, y) => if y == 0 { rgb("#eeeeee") } else { none },
 
-    [*Scene*], [*PSNR ↑*], [*SSIM ↑*], [*LPIPS ↓*], [*FPS \ ↑*], [*Stor. ↓*], [*Gauss ↓*], [*Train ↓*],
+    [*Scene*], [*PSNR ↑*], [*SSIM ↑*], [*LPIPS ↓*], [*FPS ↑*], [*Stor. ↓*], [*Gauss ↓*], [*Train ↓*],
 
     [Bounc. Balls], [33.39], [0.982], [0.014], [290], box[278 MB], [150k], [4.9m],
 
-    [T-Rex], [30.63], [0.983], [0.023], [341], box[301 MB], [162k], [4.9m],
+    [#pad(y: 15pt)[T-Rex]], [30.63], [0.983], [0.023], [341], box[301 MB], [162k], [4.9m],
   )
 
   #v(3pt)
 
-  #align(center)[
-    #text(size: 5.5pt)[
+  #align(left)[
+    #text(size: 25pt)[
       Rendered at 200×200. Published baselines use 400×400, so direct metric comparison is not valid.
     ]
   ]
