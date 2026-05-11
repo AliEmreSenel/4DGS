@@ -346,7 +346,7 @@
       )[
         4D Gaussian Splatting (4DGS) is a leading approach to dynamic scene reconstruction from video.
 
-        _Fast and flexible_
+        _Fast and flexible_ $=>$ But not optimized!
 
         Existing methods usually optimize one axis:
         *fidelity*, *FPS*, *memory*, or *train time*.
@@ -474,7 +474,7 @@
       // Result boxes — col 1
 
       #pop.column-box(
-        heading: [Comparison with SOTA #h(1fr) #fa-icon("heart-crack")],
+        heading: [Comparison with SOTA #h(1fr) #fa-icon("crown")],
         heading-box-args: final-heading-args,
       )[
 
@@ -501,13 +501,25 @@
         $
 
         #strong[Sort-Free #h(1em)] MLP-learned blending weights:
-        $
-          C_p^("sf")(t, v) =
-          sum_i
-          underbrace(beta_i (p,t,v), #[MLP weight])
-          c_i (v,t)
-          + underbrace(beta_("bg")(p,t,v)c_("bg"), "background")
-        $
+        #[
+          #show math.equation: set text(size: 28pt)
+
+          $
+            cases(
+              w_i (p, t, v) =
+              phi_i^2(p, t, v)
+              + phi_i (p, t, v) / (d_i^2(p, t, v))
+              + exp(s_(max, i) / (d_i (p, t, v))),
+              C_p^("sf")(t, v) =
+              (1 - T_p (t, v))
+              frac(
+                sum_i c_i (v, t) #text(fill: blue)[$alpha_i (p, t, v) w_i (p, t, v)$],
+                sum_i #text(fill: blue)[$alpha_i (p, t, v) w_i (p, t, v)$]
+              )
+              + T_p (t, v) c_("bg")
+            )
+          $
+        ]
         *+ input time t* $->$ Works in 4D, but expensive MLP
       ]
 
