@@ -65,14 +65,14 @@
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="./writeup/img/mog_still_cameras.png" width="90%">
-      <br>
-      <strong>5 x Still Cameras</strong>
-    </td>
-    <td align="center" width="50%">
       <img src="./writeup/img/mog_moving_cameras.png" width="90%">
       <br>
       <strong>5 x Moving Cameras</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="./writeup/img/mog_still_cameras.png" width="90%">
+      <br>
+      <strong>5 x Still Cameras</strong>
     </td>
   </tr>
 </table>

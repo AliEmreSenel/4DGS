@@ -741,16 +741,16 @@
           [
             #align(center)[
               #box(width: 90%)[
-                #image("./img/mog_still_cameras.png", width: 100%)
-                #align(center)[5 x Still Cameras]
+                #image("./img/mog_moving_cameras.png", width: 100%)
+                #align(center)[5 x Moving Cameras]
               ]
             ]
           ],
           [
             #align(center)[
               #box(width: 90%)[
-                #image("./img/mog_moving_cameras.png", width: 100%)
-                #align(center)[5 x Moving Cameras]
+                #image("./img/mog_still_cameras.png", width: 100%)
+                #align(center)[5 x Still Cameras]
               ]
             ]
           ],
