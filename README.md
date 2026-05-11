@@ -2,8 +2,6 @@
 
 # Feature Matrix
 
-I didn’t edit `README.md`; here’s a drop-in version with a new `Code reference` column.
-
 | Feature                      | 1000FPS | Instant4D | MobileGS | Usplat4D | Code reference                                                                                                                                                                                                                                                                                                 |
 | ---------------------------- | ------- | --------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Gaussians <br> 4D              | ✓       | ✓         |          | ✓        | **Existing** <br> [`GaussianModel.__init__`](scene/gaussian_model.py#L198-L237), [`get_xyzt`](scene/gaussian_model.py#L422-L424), [`render`](gaussian_renderer/__init__.py#L159-L174)                                                                                                                            |

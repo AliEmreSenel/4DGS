@@ -344,7 +344,9 @@
         heading: [Context and Motivation #h(1fr) #fa-icon("map", solid: true)],
         heading-box-args: std-heading-args,
       )[
-        4D Gaussian Splatting (4DGS) is the dominant approach to dynamic scene reconstruction from video. #h(1fr) _Fast and flexible_ #h(1fr)
+        4D Gaussian Splatting (4DGS) is a leading approach to dynamic scene reconstruction from video.
+
+        _Fast and flexible_
 
         Existing methods usually optimize one axis:
         *fidelity*, *FPS*, *memory*, or *train time*.
@@ -397,8 +399,8 @@
           stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
           [*Shape*], [Ellipsoid $dot.c$ Sphere],
           [*Color*], [RGB $dot.c$ SH(3)],
-          [*Renderer*], [Sorting $dot.c$ Sort-free],
-          [*Pruning*], [Opacity $dot.c$ Spatio-temporal],
+          [*Renderer*], [Sorting $dot.c$ Sort-Free],
+          [*Pruning*], [Opacity $dot.c$ Spatio-Temporal],
           [*Densify*], [Edge-Guided, Loss Guided],
           [*Regularize*], [Dropout, Prune-Densify, Uncertainty],
         )
@@ -409,7 +411,7 @@
         heading: [Bouncing Balls #h(1fr) #fa-icon("baseball")],
         heading-box-args: result-heading-args,
       )[
-        *Fixed*: No (USplat, Prune, ESS, Dropout), Sort, 10k.
+        *Fixed*: No USplat/Prune/ESS/Dropout, Sort, 10k.
         #grid(
           columns: (0.1fr, 1fr, 1fr),
           rows: (auto, auto, auto),
@@ -417,17 +419,7 @@
           row-gutter: 5pt,
           align: center + horizon,
 
-          [], [#strong[Sort]], [#strong[Sort-free]],
-
-          [#rotate(-90deg)[#strong[Spherical]]],
-          [#image(
-            "./img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
-            width: result-img-width,
-          )],
-          [#image(
-            "./img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
-            width: result-img-width,
-          )],
+          [], [#strong[Sort]], [#strong[Sort-Free]],
 
           [#rotate(-90deg)[#strong[Ellipsoid]]],
           [#image(
@@ -436,6 +428,16 @@
           )],
           [#image(
             "./img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+
+          [#rotate(-90deg)[#strong[Spherical]]],
+          [#image(
+            "./img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+            width: result-img-width,
+          )],
+          [#image(
+            "./img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
             width: result-img-width,
           )],
         )
@@ -452,7 +454,7 @@
 
           [
             #callout(
-              [Sort-free in 4D],
+              [Sort-Free in 4D],
               [Adding time to MobileGS MLPs moves bottleneck from sorting to MLP eval.],
               fill: rgb("#fff7ed"),
               accent: orange,
@@ -471,7 +473,12 @@
       ]
       // Result boxes — col 1
 
+      #pop.column-box(
+        heading: [Comparison with SOTA #h(1fr) #fa-icon("heart-crack")],
+        heading-box-args: final-heading-args,
+      )[
 
+      ]
     ],
 
     // -------------------------------------------------------------------------
@@ -504,12 +511,13 @@
         *+ input time t* $->$ Works in 4D, but expensive MLP
       ]
 
+      #v(1fr)
 
       #pop.column-box(heading: [Training Objective #h(1fr) #fa-icon("route")], heading-box-args: std-heading-args)[
         By Ablation: fidelity, background, 4D motion.
 
         #strong[Photometric #h(1em)]
-        reconstruct each train view:
+        Reconstruct each train view:
         $
           cal(L)_"rgb" =
           underbrace((1 - lambda_"dssim") cal(L)_1, "pixel fit")
@@ -517,7 +525,7 @@
         $
 
         #strong[Opacity #h(1em)]
-        do not learn the background:
+        Do not learn the background:
         $
           cal(L)_"opa" =
           - 1 / abs(Omega)
@@ -528,7 +536,7 @@
         $
 
         #strong[Motion #h(1em)]
-        move softly (locally rigid, global speed):
+        Move softly (locally rigid, global speed):
         $
           cal(L)_"dyn" =
           underbrace(cal(L)_"rigid", #[near Gaussians \ move similarly])
@@ -539,11 +547,14 @@
         *+ dynamic regularization* $->$ better temporal consistency, but more expensive
       ]
 
+      #v(1fr)
+
       #pop.column-box(
         heading: [TRex #h(1fr) #fa-icon("dragon")],
         heading-box-args: result-heading-args,
       )[
-        *Fixed*: No (USplat, Prune, ESS, Dropout), Sort, 20k.
+        *Fixed*: No USplat/Prune/ESS/Dropout, Sort, 20k.
+
         #grid(
           columns: (0.1fr, 1fr, 1fr),
           rows: (auto, auto, auto),
@@ -551,30 +562,31 @@
           row-gutter: 10pt,
           align: center + horizon,
 
-          [], [#strong[Ellipsoid]], [#strong[Spherical]],
+          [], [#strong[SH(3)]], [#strong[RGB]],
 
-          [#rotate(-90deg)[#strong[RGB]]],
+          [#rotate(-90deg)[#strong[Ellipsoid]]],
+          [#image(
+            "./img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
           [#image(
             "./img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+            width: result-img-width,
+          )],
+
+          [#rotate(-90deg)[#strong[Spherical]]],
+          [#image(
+            "./img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
             width: result-img-width,
           )],
           [#image(
             "./img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
             width: result-img-width,
           )],
-
-          [#rotate(-90deg)[#strong[SH(3)]]],
-          [#image(
-            "./img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
-            width: result-img-width,
-          )],
-          [#image(
-            "./img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
-            width: result-img-width,
-          )],
         )
       ]
 
+      #v(1fr)
 
       #pop.column-box(
         heading: [Ablation Results #h(1fr) #fa-icon("flask")],
@@ -595,10 +607,14 @@
         #let pct(fill, body) = box(width: 3.6em)[
           #align(right)[#text(fill: fill, weight: "bold")[#body]]
         ]
+        #let summary-cell(body) = table.cell(
+          colspan: 6,
+          inset: (top: 0pt, bottom: 20pt, left: 0pt, right: 0pt),
+        )[#body]
 
         #table(
-          columns: (0.3fr, 2fr),
-          inset: (x: 5pt, y: 10pt),
+          columns: (5em, 1fr),
+          inset: (x: 5pt, y: 8pt),
           align: left + top,
           stroke: (x, y) => (
             top: if y > 0 { 0.5pt + black } else { none },
@@ -610,18 +626,20 @@
             #text(fill: green, weight: "bold")[$+0.89$]
           ],
           [
-            Smaller, lighter, faster; lower quality
-            #v(-20pt)
-            #grid(
-              columns: (auto, 3.6em, auto, 3.6em, auto, 3.6em),
+            #table(
+              columns: (1fr, 4em, 1fr, 4em, 1fr, 4em),
+              inset: 0pt,
               column-gutter: 8pt,
               row-gutter: 4pt,
+              stroke: none,
+              align: (x, y) => if x in (1, 3, 5) { right + top } else { left + top },
+
+              summary-cell[Smaller, lighter, faster; lower quality],
 
               [Checkpoint], [#pct(green)[$-93%$]], [VRAM], [#pct(green)[$-79%$]], [Gaussians], [#pct(green)[$-33%$]],
 
               [Train], [#pct(green)[$-78%$]], [FPS], [#pct(green)[$+79%$]], [], [],
             )
-            #v(+20pt)
           ],
 
           [
@@ -629,16 +647,18 @@
             #text(fill: red, weight: "bold")[$-0.89$]
           ],
           [
-            Better quality, but expensive
-            #v(-20pt)
-            #grid(
-              columns: (auto, 3.6em, auto, 3.6em, auto, 3.6em),
+            #table(
+              columns: (1fr, 4em, 1fr, 4em, 1fr, 4em),
+              inset: 0pt,
               column-gutter: 8pt,
               row-gutter: 4pt,
+              stroke: none,
+              align: (x, y) => if x in (1, 3, 5) { right + top } else { left + top },
+
+              summary-cell[Better quality, but expensive],
 
               [PSNR], [#pct(green)[$+32%$]], [LPIPS], [#pct(green)[$-83%$]], [SSIM], [#pct(green)[$+6.3%$]],
             )
-            #v(+20pt)
           ],
 
           [
@@ -646,43 +666,45 @@
             #text(fill: green, weight: "bold")[$+0.84$]
           ],
           [
-            Strong practical winner on our dataset
-            #v(-20pt)
-            #grid(
-              columns: (auto, 3.6em, auto, 3.6em, auto, 3.6em),
+            #table(
+              columns: (1fr, 4em, 1fr, 4em, 1fr, 4em),
+              inset: 0pt,
               column-gutter: 8pt,
               row-gutter: 4pt,
+              stroke: none,
+              align: (x, y) => if x in (1, 3, 5) { right + top } else { left + top },
+
+              summary-cell[Strong practical winner on our dataset],
 
               [LPIPS], [#pct(green)[$-85%$]], [FPS], [#pct(green)[$+290%$]], [PSNR], [#pct(green)[$+29%$]],
 
-              [SSIM], [#pct(green)[$+8.2%$]], [Train time], [#pct(green)[$-85%$]], [VRAM], [#pct(green)[$-37%$]],
+              [SSIM], [#pct(green)[$+8.2%$]], [Train], [#pct(green)[$-85%$]], [VRAM], [#pct(green)[$-37%$]],
             )
-            #v(+20pt)
           ],
 
           [
-            *Sort-free* \
+            *Sort-Free* \
             #text(fill: red, weight: "bold")[$-0.84$]
           ],
           [
-            Fewer Gaussians, but worse overall
-            #v(-20pt)
-            #grid(
-              columns: (auto, 3.5em, auto, 4em, auto, 3em),
+            #table(
+              columns: (1fr, 4em, 1fr, 4em, 1fr, 4em),
+              inset: 0pt,
               column-gutter: 8pt,
               row-gutter: 4pt,
+              stroke: none,
+              align: (x, y) => if x in (1, 3, 5) { right + top } else { left + top },
+
+              summary-cell[Fewer Gaussians, but worse overall],
 
               [Gaussians], [#pct(green)[$-39%$]], [LPIPS], [#pct(red)[$+570%$]], [FPS], [#pct(red)[$-75%$]],
 
-              [PSNR], [#pct(red)[$-23%$]], [SSIM], [#pct(red)[$-7.6%$]], [Train time], [#pct(red)[$+590%$]],
+              [PSNR], [#pct(red)[$-23%$]], [SSIM], [#pct(red)[$-7.6%$]], [Train], [#pct(red)[$+590%$]],
 
               [VRAM], [#pct(red)[$+60%$]], [], [], [], [],
             )
-
           ],
-        )
-      ]
-
+        )     ]
     ],
 
     // -------------------------------------------------------------------------
@@ -697,7 +719,7 @@
       #pop.column-box(
         heading: [MOG'D: The Bitter Lesson #h(1fr)
           #box(radius: 8pt, inset: 10pt, stroke: 0.05em + white)[
-            #text(size: 18pt)[*Where is*\ *Tebe?*]
+            #text(size: 20pt)[*Where is*\ *Tebe?*]
           ]],
         heading-box-args: result-heading-args,
       )[
@@ -724,8 +746,9 @@
 
         Random Init $=>$ Need _Moving Cameras_ for artifacts.
 
-        Data and CUDA compatibility are real bottlenecks.
+        Data and CUDA compatibility: the real bottlenecks.
       ]
+
       #pop.column-box(
         heading: [Main takeaway #h(1fr) #fa-icon("file-lines")],
         heading-box-args: final-heading-args,
@@ -755,31 +778,57 @@
 
           [*Quality*], [ellipsoid $dot.c$ SH(3) $dot.c$ sort-based rendering],
           [*Smallest*], [RGB $dot.c$ interleaved pruning],
-          [*Fastest*], [see renderer: sort-free may not be fastest],
+          [*Fastest*], [sort-based in experiments (faster)],
         )
         #v(-20pt)
 
         #table(
-          columns: (auto, auto, auto, auto),
-          inset: (x: 4.5pt, y: 3.5pt),
-          align: (x, y) => if x == 0 or x == 3 { center } else { left },
-          stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
+          columns: (auto, 1fr),
+          inset: 0pt,
+          column-gutter: 10pt,
+          stroke: none,
+          align: top,
 
-          table.cell(rowspan: 7, align: center + horizon)[
-            #move(dy: 10pt)[
-              #rotate(-90deg, reflow: true)[
-                #text(weight: "bold", size: 1em)[Single effect]
+          [
+            #table(
+              columns: (auto, auto, auto, auto),
+              inset: (x: 4.5pt, y: 3.5pt),
+              align: (x, y) => if x == 0 or x == 3 { center } else { left },
+              stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
+
+              table.cell(rowspan: 7, align: center + horizon)[
+                #move(dy: 10pt)[
+                  #rotate(-90deg, reflow: true)[
+                    #text(weight: "bold", size: 1em)[Single effect]
+                  ]
+                ]
+              ],
+              [], [], [*Cohen g*],
+
+              [Smallest], [RGB], [$4.91$],
+              [Eval VRAM], [RGB], [$3.66$],
+              [PSNR], [SH(3)], [$1.50$],
+              [LPIPS], [Sort], [$1.46$],
+              [Render FPS], [Sort], [$1.34$],
+              [Training time], [Sort], [$1.01$],
+            )
+          ],
+
+          table.cell(align: bottom)[
+            #box(
+              width: 100%,
+              fill: rgb("#cee2f6"),
+              stroke: 1pt + rgb("#425161"),
+              radius: 10pt,
+              inset: 9pt,
+            )[
+              #text(size: 0.72em)[
+                RGB $=>$ compactness and eval VRAM. \
+                SH(3) $=>$ +PSNR. \
+                Sorted $=>$ better LPIPS, FPS, and train time.
               ]
             ]
           ],
-          [], [], [*Cohen g*],
-
-          [Smallest], [RGB], [$4.91$],
-          [Eval VRAM], [RGB], [$3.66$],
-          [PSNR], [SH(3)], [$1.50$],
-          [LPIPS], [Sort], [$1.46$],
-          [Render FPS], [Sort], [$1.34$],
-          [Training time], [Sort], [$1.01$],
         )
       ]
 
@@ -789,8 +838,8 @@
       )[
         #ref-line([Kerbl et al.], [3D Gaussian Splatting for Real-Time Radiance Field Rendering.])
         #ref-line([Yang et al.], [Native 4D Gaussian Splatting backbone.])
-        #ref-line([Luo et al.], [Instant4D isotropic variants and spatio-temporal pruning.])
-        #ref-line([Du et al.], [MobileGS sort-free rendering and compression ideas.])
+        #ref-line([Luo et al.], [Instant4D isotropic variants and Spatio-Temporal pruning.])
+        #ref-line([Du et al.], [MobileGS Sort-Free rendering and compression ideas.])
         #ref-line([Hou et al.], [Sort-Free Gaussian Splatting.])
         #ref-line([Yuan et al.], [4DGS at 1000 FPS visibility masks and pruning schedules.])
         #ref-line([Guo et al.], [Uncertainty-aware training for dynamic Gaussian splatting.])
