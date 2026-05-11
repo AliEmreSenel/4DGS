@@ -1,6 +1,6 @@
 #let contrib-table = [
   #let grid = 0.42pt + luma(220)
-  #let group = 1.05pt + luma(135)
+  #let group = 1.05pt + luma(8.24%)
   #let emph = 1.9pt + luma(45)
 
   #let neutral = rgb("#9fa6a0")
@@ -50,7 +50,7 @@
     fill: bg,
     inset: (x: 2pt, y: 3.6pt),
   )[
-    #text(size: 10pt)[#body]
+    #text(size: 10pt, weight: "bold")[#body]
   ]
 
   #let L(body, bg: none) = table.cell(
@@ -103,7 +103,7 @@
     #set text(size: 10pt)
 
     #table(
-      columns: (0.62fr, 3fr, 3.45fr) + (0.72fr,) * 6,
+      columns: (0.62fr, 2.5fr, 3.45fr) + (0.72fr,) * 6,
       stroke: grid,
       align: center + horizon,
       inset: (x: 1.2pt, y: 3.2pt),
@@ -119,14 +119,11 @@
 
       table.cell(
         colspan: 3,
-        inset: (x: 3.5pt, y: 3.2pt),
+        inset: (x: 0pt, y: 0pt),
         stroke: none,
         align: left + top,
       )[
-        #stack(dir: ttb, spacing: 0pt)[
-          Implementations in each architecture, and our codebase:
-          #KG[existing] #KR[heavily modified] #KB[re-implemented]
-        ]
+        #KG[existing] #KR[heavily modified] #KB[re-implemented]
       ],
 
       VH([*4DGS-Nat.*]),
@@ -157,7 +154,7 @@
       E, E, X, E, E, XG,
 
       MGO([Anisotropic], bg: head-blue),
-      X, X, E, X, X, XR,
+      X, X, E, X, X, XG,
 
       MGL(3, [Color \ Basis], bg: head-orange),
       MGO([RGB], bg: head-orange),
@@ -178,19 +175,6 @@
       MGO([MegaSAM], bg: head-blue),
       E, E, X, E, E, E,
 
-      SEC(3, [*Compress*]),
-
-      C([SH], bg: head-orange),
-      L([MLP Distillation], bg: head-orange),
-      E, E, E, X, E, XR,
-
-      table.cell(rowspan: 2, align: center + horizon, fill: head-orange)[Codebook],
-      L([K-means ], bg: head-orange),
-      E, E, E, X, E, XR,
-
-      L([Spatial GPCC], bg: head-orange),
-      E, E, E, X, E, XR,
-
       SEC(3, [*Train*]),
 
       C([Weighting], bg: head-blue),
@@ -207,32 +191,32 @@
 
       SEC(9, [*Prune*]),
 
-      table.cell(rowspan: 2, align: center + horizon, fill: head-orange)[Criterion],
+      MGL(2, [Criterion], bg: head-orange),
       L([Contribution], bg: head-orange),
       X, E, E, X, E, XG,
 
       L([Gradient Loss], bg: head-orange),
       X, E, E, E, E, XG,
 
-      table.cell(rowspan: 2, align: center + horizon, fill: head-blue)[Quantile Filter],
+      MGL(2, [Quantile Filter], bg: head-blue),
       L([Spatio-Temporal], bg: head-blue),
       E, E, X, X, E, XB,
 
       L([Opacity], bg: head-blue),
       E, E, X, E, E, XG,
 
-      table.cell(rowspan: 2, align: center + horizon, fill: head-orange)[Strategy],
+      MGL(2, [Strategy], bg: head-orange),
       L([One-shot], bg: head-orange),
       E, X, X, E, X, XG,
 
       L([Scheduled], bg: head-orange),
       E, E, E, E, E, XB,
 
-      table.cell(rowspan: 2, align: center + horizon, fill: head-blue)[Increase],
-      L([Densify], bg: head-blue),
+      MGL(2, [Increase], bg: head-blue),
+      L([Gradient Based], bg: head-blue),
       X, E, E, E, E, XG,
 
-      L([Edge-guided], bg: head-blue),
+      L([Edge-guided Split], bg: head-blue),
       E, E, E, E, E, XB,
 
       C([Dropout], bg: head-orange),
@@ -259,30 +243,28 @@
       table.hline(y: 10, start: 0, end: 9, stroke: group),
       table.hline(y: 12, start: 0, end: 9, stroke: group),
       table.hline(y: 15, start: 0, end: 9, stroke: group),
-      table.hline(y: 18, start: 0, end: 9, stroke: group),
+      table.hline(y: 24, start: 0, end: 9, stroke: group),
       table.hline(y: 27, start: 0, end: 9, stroke: group),
-      table.hline(y: 30, start: 0, end: 9, stroke: group),
 
-      table.vline(x: 1, start: 1, end: 30, stroke: group),
-      table.vline(x: 3, start: 0, end: 30, stroke: group),
-      table.vline(x: 9, start: 0, end: 30, stroke: group),
+      table.vline(x: 1, start: 1, end: 27, stroke: group),
+      table.vline(x: 3, start: 0, end: 27, stroke: group),
+      table.vline(x: 9, start: 0, end: 27, stroke: group),
 
       // Subgroup boundaries.
       table.hline(y: 3, start: 1, end: 9, stroke: 0.75pt + luma(175)),
       table.hline(y: 5, start: 1, end: 9, stroke: 0.75pt + luma(175)),
       table.hline(y: 7, start: 1, end: 9, stroke: 0.75pt + luma(175)),
-      table.hline(y: 26, start: 1, end: 9, stroke: 0.75pt + luma(175)),
-      table.hline(y: 28, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+      table.hline(y: 23, start: 1, end: 9, stroke: 0.75pt + luma(175)),
+      table.hline(y: 25, start: 1, end: 9, stroke: 0.75pt + luma(175)),
 
       // Strong focus around proposed method.
-      table.vline(x: 8, start: 0, end: 30, stroke: emph),
-      table.vline(x: 9, start: 0, end: 30, stroke: emph),
+      table.vline(x: 8, start: 0, end: 27, stroke: emph),
+      table.vline(x: 9, start: 0, end: 27, stroke: emph),
       table.hline(y: 0, start: 8, end: 9, stroke: emph),
-      table.hline(y: 30, start: 8, end: 9, stroke: emph),
+      table.hline(y: 27, start: 8, end: 9, stroke: emph),
     )
   ]
 ]
-
 #let contrib-table-large = [
   #let grid = 0.42pt + luma(220)
   #let group = 1.05pt + luma(8.24%)
@@ -439,7 +421,7 @@
       E, E, X, E, E, XG,
 
       MGO([Anisotropic], bg: head-blue),
-      X, X, E, X, X, XR,
+      X, X, E, X, X, XG,
 
       MGL(3, [Color \ Basis], bg: head-orange),
       MGO([RGB], bg: head-orange),
@@ -498,10 +480,10 @@
       E, E, E, E, E, XB,
 
       MGL(2, [Increase], bg: head-blue),
-      L([Densify], bg: head-blue),
+      L([Gradient Based], bg: head-blue),
       X, E, E, E, E, XG,
 
-      L([Edge-guided], bg: head-blue),
+      L([Edge-guided Split], bg: head-blue),
       E, E, E, E, E, XB,
 
       C([Dropout], bg: head-orange),

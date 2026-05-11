@@ -298,7 +298,7 @@
 }
 
 #title-grid-box(
-  [OMNI-4DGS: Fast, Light and Precise Video-To-Model Reconstruction],
+  [OMNI-4DGS: Quality, Speed, and Memory in Dynamic Splatting],
   authors: "Ali Emre Senel¹ · Tebe Nigrelli¹ · Stefana Chiriac¹",
   institutes: [¹Bocconi University, Milan, Italy],
   keywords: "4D Gaussian Splatting · Dynamic Scene Reconstruction · Ablations · Efficient Rendering",
@@ -346,10 +346,10 @@
       )[
         4D Gaussian Splatting (4DGS) is a leading approach to dynamic scene reconstruction from video.
 
-        _Fast and flexible_ $=>$ But not optimized!
+        _Fast and flexible_ $=>$ but not optimized!
 
         Existing methods usually optimize one axis:
-        *fidelity*, *FPS*, *memory*, or *train time*.
+        *Fidelity*, *FPS*, *Memory*, or *Train Time*.
 
         The best? _*We test the optimizations together*_
 
@@ -382,7 +382,7 @@
           align: (x, y) => if x == 1 { center } else { left },
           stroke: (x, y) => if y > 0 { (top: 0.35pt + line-color) },
 
-          [*4D mean*], [$mu_i$], [mean is the gaussian center],
+          [*4D mean*], [$mu_i$], [mean is the Gaussian center],
           [*Covariance*], [$Sigma_i$], [(sphere || ellipsoid) $=:$ *Isotropy*],
           [*Opacity*], [$o_i$], [adjusts visibility / see-through],
           [*Color*], [$"SH"_i$], [$"SH"(0) = "RGB" arrow.r.long.squiggly "SH"(3)$],
@@ -401,10 +401,10 @@
           [*Color*], [RGB $dot.c$ SH(3)],
           [*Renderer*], [Sorting $dot.c$ Sort-Free],
           [*Pruning*], [Opacity $dot.c$ Spatio-Temporal],
-          [*Densify*], [Edge-Guided, Loss Guided],
+          [*Densify*], [Edge-Guided, Gradient Based],
           [*Regularize*], [Dropout, Prune-Densify, Uncertainty],
         )
-        Dynamic D-NeRF Data: *T-Rex*, *Bouncing Balls*
+        Dynamic D-NeRF Dataset: *T-Rex*, *Bouncing Balls*
       ]
 
       #pop.column-box(
@@ -445,7 +445,7 @@
 
 
       #pop.column-box(
-        heading: [Bottlenecks Incurred #h(1fr) #fa-icon("heart-crack")],
+        heading: [Bottlenecks Introduced #h(1fr) #fa-icon("heart-crack")],
         heading-box-args: final-heading-args,
       )[
         #grid(
@@ -474,7 +474,7 @@
       // Result boxes — col 1
 
       #pop.column-box(
-        heading: [Best Ablation Results #h(1fr) #fa-icon("crown")],
+        heading: [Best Quality Ablation #h(1fr) #fa-icon("crown")],
         heading-box-args: final-heading-args,
       )[
         #set table(
@@ -482,8 +482,17 @@
           inset: (x: 4pt, y: 5pt),
           align: center,
         )
+        #box(
+          width: 100%,
+          fill: rgb("#cee2f6"),
+          stroke: 1pt + rgb("#425161"),
+          radius: 14pt,
+          inset: 14pt,
+        )[
+          For Quality: *ellipsoid · SH3 · sort · no-prune*
+        ]
 
-        Best Ablations: *aniso · SH3 · sort · no-prune*
+        #v(-20pt)
 
         #table(
           columns: (0.5fr, 0.45fr, 0.45fr, 0.45fr, 0.35fr, 0.45fr, 0.45fr, 0.45fr),
@@ -509,7 +518,7 @@
           #text(size: 25pt)[
             Our Compute constraints $=>$ Ablations rendered at $200 times 200$.
 
-            Direct Comparison with baselines is not possible: $400 times 400$.
+            Direct comparison with baselines is not possible: $400 times 400$.
           ]
         ]
       ]
@@ -524,7 +533,7 @@
         Project to camera plane and integrate colors.
 
         #strong[Sort #h(1em)]
-        depth-sort and composit front-to-back:
+        Depth-sort and composite front-to-back:
         $
           C_p^("sort")(t, v) =
           sum_i
@@ -642,7 +651,7 @@
       #v(1fr)
 
       #pop.column-box(
-        heading: [Ablation Results #h(1fr) #fa-icon("flask")],
+        heading: [Experimental Evaluation #h(1fr) #fa-icon("flask")],
         heading-box-args: final-heading-args,
       )[
         #set text(size: 0.8em)
@@ -654,7 +663,7 @@
           radius: 10pt,
           inset: 9pt,
         )[
-          Cohen's Coefficient $g > 0.5 => "significant"$
+          Hedges' Coefficient $g > 0.5 => "significant"$
         ]
 
         #let pct(fill, body) = box(width: 3.6em)[
@@ -783,7 +792,7 @@
             #align(center)[
               #box(width: 90%)[
                 #image("./img/mog_moving_cameras.png", width: 100%)
-                #align(center)[5 x Moving Cameras]
+                #align(center)[5 x moving Cameras]
               ]
             ]
           ],
@@ -791,13 +800,13 @@
             #align(center)[
               #box(width: 90%)[
                 #image("./img/mog_still_cameras.png", width: 100%)
-                #align(center)[5 x Still Cameras]
+                #align(center)[5 x still Cameras]
               ]
             ]
           ],
         )
 
-        Random Init $=>$ Need _Moving Cameras_ for artifacts.
+        Random Init $=>$ Need _moving cameras_ for artifacts.
 
         Data and CUDA compatibility: the real bottlenecks.
       ]
@@ -815,7 +824,7 @@
           radius: 14pt,
           inset: 14pt,
         )[
-          #text(fill: black, weight: "bold", size: 1.0em)[Best Practical:]
+          #text(fill: black, weight: "bold", size: 1.0em)[Practical Choice:]
           #linebreak()
           #text(fill: black, size: 0.8em)[
             ellipsoid · RGB · sort-based · interleaved pruning · no dropout
@@ -856,7 +865,7 @@
                   ]
                 ]
               ],
-              [], [], [*Cohen g*],
+              [], [], [*Hedges' g*],
 
               [Smallest], [RGB], [$4.91$],
               [Eval VRAM], [RGB], [$3.66$],
@@ -876,9 +885,9 @@
               inset: 9pt,
             )[
               #text(size: 0.72em)[
-                RGB $=>$ compactness and eval VRAM. \
+                RGB $=>$ -MB, -VRAM. \
                 SH(3) $=>$ +PSNR. \
-                Sorted $=>$ better LPIPS, FPS, and train time.
+                Sorted $=>$ -LPIPS, +FPS, -train.
               ]
             ]
           ],
