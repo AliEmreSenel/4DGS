@@ -289,17 +289,6 @@ wheels = [
 ]
 
 [[package]]
-name = "diff-gaussian-rasterization"
-version = "0.1.0"
-source = { editable = "diff-gaussian-rasterization" }
-dependencies = [
-    { name = "torch" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "torch", specifier = ">=2.10" }]
-
-[[package]]
 name = "executing"
 version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -365,7 +354,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "dahuffman" },
-    { name = "diff-gaussian-rasterization" },
     { name = "imageio", extra = ["ffmpeg"] },
     { name = "imagesize" },
     { name = "ipykernel" },
@@ -391,7 +379,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dahuffman", specifier = ">=0.4.2" },
-    { name = "diff-gaussian-rasterization", editable = "diff-gaussian-rasterization" },
     { name = "imageio", extras = ["ffmpeg"], specifier = ">=2.37.3" },
     { name = "imagesize", specifier = "==1.4.1" },
     { name = "ipykernel", specifier = ">=7.2.0" },

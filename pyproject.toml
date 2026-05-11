@@ -17,7 +17,6 @@ dependencies = [
   "imagesize==1.4.1",
   "kornia==0.6.12",
   "omegaconf==2.3.0",
-  "diff-gaussian-rasterization",
   "tensorboard>=2.20.0",
   "imageio[ffmpeg]>=2.37.3",
   "pointops2",
@@ -41,7 +40,6 @@ include = ["arguments*", "externals*", "gaussian_renderer*", "scene*", "utils*"]
 url = "https://pypi.org/simple"
 
 [tool.uv.sources]
-diff-gaussian-rasterization = { path = "diff-gaussian-rasterization", editable = true }
 pointops2 = { workspace = true }
 simple-knn = { workspace = true }
 

@@ -31,3 +31,4 @@ eggs/
 /hpc_configs
 *.path
 *.html
+/chkpnt_best.pth
