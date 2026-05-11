@@ -1,0 +1,10 @@
+[package]
+name = "splat-cli"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+splat-format = { path = "../splat-format" }
+serde_json = "1"

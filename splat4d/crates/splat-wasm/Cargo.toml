@@ -1,0 +1,22 @@
+[package]
+name = "splat-wasm"
+version = "0.3.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+bytemuck = "1"
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_json = "1.0.149"
+splat-format = { path = "../splat-format" }
+wasm-bindgen = "0.2"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["console", "Blob", "BlobPropertyBag", "Url"]

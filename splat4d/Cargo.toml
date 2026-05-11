@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/splat-format",
+  "crates/splat-wasm",
+  "crates/splat-cli",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.3.0"

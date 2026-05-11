@@ -1,0 +1,13 @@
+html, body { margin: 0; background: #111; color: #eee; font: 14px system-ui, sans-serif; }
+main { max-width: 1600px; margin: 0 auto; padding: 18px; }
+header { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; }
+p { color: #bbb; margin: 0; }
+.controls { margin: 14px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.canvasWrap { position: relative; width: 100%; }
+canvas { width: 100%; height: auto; background: #000; border: 1px solid #333; outline: none; display: block; }
+#overlay { position: absolute; left: 10px; top: 10px; white-space: pre; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff; text-shadow: 0 1px 2px #000; background: rgba(0,0,0,0.45); padding: 8px; border-radius: 4px; pointer-events: none; display: none; }
+pre { background: #050505; padding: 12px; overflow: auto; min-height: 90px; border: 1px solid #333; }
+.help { min-height: 0; }
+input, select, button { background: #222; color: #eee; border: 1px solid #555; padding: 6px; }
+button.active { background: #345; }
