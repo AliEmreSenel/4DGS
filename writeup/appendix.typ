@@ -537,7 +537,7 @@
 
   #colbreak()
 
-  = Ablation Results
+  = Ablation Results <ablations>
 
   #set text(size: 9pt)
   #show math.equation: set text(size: 9pt)
@@ -1289,7 +1289,7 @@
         [19m],
       )
     ],
-    caption: [ Ablations: bouncingballs, 7k iter, sort],
+    caption: [ Ablations: bouncingballs, 7k iter, sort, (200x200)],
   )
 
   #figure(
@@ -2305,6 +2305,6 @@
         [42m],
       )
     ],
-    caption: [trex ablation results.],
+    caption: [trex ablation results (200x200)],
   )
 ]

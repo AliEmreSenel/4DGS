@@ -25,7 +25,7 @@
 )
 
 #let abstract = [
-  Dynamic scene reconstruction from video is a core problem in computer vision, with broad applications in AR, robotics, and content creation. 4D Gaussian Splatting (4DGS) has emerged as the dominant approach, offering fast training and flexible scene representation. However, existing methods each optimize for a single axis of performance, leaving practitioners without clear guidance on how to combine improvements or navigate tradeoffs. We present OMNI-4DGS, a unified architecture that integrates recent advances in representation, rendering, and training into a single jointly-evaluated system. Through systematic ablations, we show that no single configuration dominates across all metrics: reconstruction fidelity, inference speed, memory footprint, and training time are in fundamental tension. Our results offer practical guidance for selecting configurations based on deployment priorities, and surface limitations of several recent techniques — including sort-free rendering and uncertainty-aware training — that do not transfer straightforwardly to the 4D setting. This positions OMNI-4DGS as a reference for practitioners designing 4DGS pipelines under real-world constraints.
+  Dynamic scene reconstruction from video is a core problem in computer vision, with broad applications in AR and robotics. 4D Gaussian Splatting (4DGS) has emerged as the dominant approach, offering fast training and flexible scene representation. However, existing methods each optimize for a single axis of performance, leaving practitioners without clear guidance on how to combine improvements or navigate tradeoffs. We present OMNI-4DGS, a unified architecture that integrates recent advances in representation, rendering, and training into a single jointly-evaluated system. Through ablations, we show that no configuration dominates all metrics. We also surpass Our results offer practical guidance for selecting configurations based on deployment priorities, and surface limitations of several recent techniques, also for sort-free rendering and uncertainty-aware training, which do not transfer immediately to the 4D setting. This positions OMNI-4DGS as a reference for designing 4DGS pipelines in real-world constraints.
 ]
 
 #show: cvpr2025.with(
@@ -41,7 +41,7 @@
 
 #show link: underline
 
-// TODO add link to github
+#link("https://github.com/AliEmreSenel/4DGS")[github.com/AliEmreSenel/4DGS]
 
 // TODO add references to why each technique is picked per-technique (ie. memory vs compute vs accuracy constraints)
 
@@ -198,9 +198,7 @@ $
 with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest confidence gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes,
 The kNN algorithm is used with $k = 8$ to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
 
-*Key-node loss* ensures that reliable Gaussians do not drift from their well-trained and certain positions, while their neighbourhoods move consistently.
-This is enforced by anchoring them to their pretrained positions $bold(mu)^circle$
-and applying motion locality constraints:
+*Key-node loss* ensures that reliable Gaussians do not drift from their well-trained and certain positions, while their neighbourhoods move consistently. This is enforced by anchoring them to their pretrained positions $bold(mu)^circle$ and applying motion locality constraints:
 
 $
   cal(L)_"key" =
@@ -237,52 +235,34 @@ $
 
 DQB is a soft interpolation, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USPLAT iterations to protect graph index integrity.
 
-== Gaussian Regularization
-
-Taking inspiration from @Xu_2025_CVPR, we implement *Random Dropout Regularization* to ensure that remaining gaussians are not overly dependent on any particular subset of primitives. At each training iteration, a random mask disables a fraction of Gaussians before rendering, while the full model remains the reference target. This encourages neighboring primitives to share responsibility for explaining observed pixels, reducing sparse-view overfitting, floaters, and hollow artifacts. During inference, all Gaussians are restored, effectively aggregating many low-complexity submodels. The result is smoother geometry and improved generalization, while later refinement can recover high-frequency details lost through dropout during training.
-
-We also implement *Edge-guided Splitting Strategy* (ESS). ESS increases Gaussian density near image discontinuities instead of distributing new primitives uniformly. We compute edge cues from the training views and use them to identify projected regions where reconstruction error is likely to concentrate around silhouettes, thin structures, and texture transitions. During densification, Gaussians associated with these high-gradient regions are preferentially split or duplicated, giving the model additional capacity where small geometric or color errors are most visible. This complements dropout: dropout regularizes the existing primitives, while ESS determines where extra primitives should be allocated.
-
-= Implementation Practices // TODO remove if not implemented
-
-Implementation choices have been identified to reduce storage size and improve render speed. As they fall beyond the scope of this project, we only benchmark them in some settings.
-
-== Training Compression
-
-The training procedure can be altered to use less memory by changing how color is represented during optimization. These optimizations generally target Spherical Harmonics, which require many stored scalars at higher order @du2026_mobilegs. They do not necessarily unpack features at inference. For example, Teacher-Student SH Compression can keep colors in a lower-order representation such as SH(1) instead of recovering SH(3) at render time.
-
-MLP compression of SH encodes the view-dependent color of the Gaussians into dense latent vectors using an MLP: #box[$(h_d, h_v) = ("view", "diffuse")$]. These components separate Gaussian-specific information from perspective-specific information @du2026_mobilegs. To learn the split, the diffuse component is fixed while the view component is trained across changing camera angles; the opposite holds when training the diffuse component. During inference, MLP decoding trades reduced storage for additional compute.
-
-Teacher-Student SH Compression distills high-order harmonic colors into a lower-order representation by minimizing the color loss between the teacher representation and the compact student representation.
-
-We do not use teacher-student compression, and we do not provide support for MLP compression of SH. This limitation is similar to the case of sort-free rendering extended to 4D, which is discussed in the results section.
-
-== At Rest Compression
-
-The model can be stored using lossy codebook approximations and geometry compression @du2026_mobilegs. At-rest compression is applied after training and does not require MLPs.
-
-Codebook compression is applied to Gaussian features by splitting the complete feature vector into sub-vectors, which are replaced with the nearest K-means centroids to obtain lossy compression of comparatively similar vectors. The corresponding index for each Gaussian is stored using Huffman encoding. This technique is also referred to as Neural Vector Quantization (NVQ) @du2026_mobilegs.
-
-GPCC compression encodes Gaussian positions by first grouping them through grid-based voxel discretization, then sorting them by Morton order and storing them in PLY format. The algorithm is implemented in C++ as a single-threaded offline utility.
-
-== Render / Inference Optimizations
-
-Similarly to how pruning reduces the number of gaussians, per-frame visibility masking increases render speed by loading fewer gaussians from memory, based on contribution to the view @yuan2025_4dgs1k. The technique stores a boolean mask for the gaussians every n frames (n=5 in @yuan2025_4dgs1k), which records if the gaussian is actively contributing to the image. During inference, at each frame t, only the gaussians that are visible in the last computed mask before t and the nearest after t are loaded, which both reduces memory use and compute.
-
 #place(
   bottom + right,
   float: true,
   clearance: 0.8em,
 )[
-  #contrib-table
+  #figure(
+    contrib-table,
+    caption: [Contributions of Each Architecture],
+  ) <tab:contributions>
 ]
-== Points of Improvement
 
-Several techniques have been developed to improve the known limitations of GS, but any addition may negate the improvements of another. Starting from 4DGS-Native, we add or compare components from the available implementations @yang2024_4dgs @luo2025_instant4d @du2026_mobilegs, and re-implement missing structures from the remaining references @yuan2025_4dgs1k @guo2026uncertaintymattersdynamicgaussian. The contribution table summarizes which components are inherited, modified, reimplemented, benchmarked, or omitted. We use it as a compact map of the design space, while the ablation section reports the observed interactions under a shared parametrization.
+== Gaussian Regularization
+
+Taking inspiration from @Xu_2025_CVPR, we implement *Random Dropout Regularization* to ensure that remaining gaussians are not overly dependent on any particular subset of primitives. At each training iteration, a random mask disables a fraction of Gaussians before rendering, while the full model remains the reference target. This encourages neighboring primitives to share responsibility for explaining observed pixels, reducing sparse-view overfitting, floating artefacts, and hollow artifacts. During inference, all Gaussians are restored, effectively aggregating many low-complexity submodels. The result is smoother geometry and improved generalization, while later refinement can recover high-frequency details lost through dropout during training.
+
+We also implement *Edge-guided Splitting Strategy* (ESS) from @Xu_2025_CVPR. ESS increases Gaussian density near image discontinuities instead of distributing new primitives uniformly. We compute edge cues from the training views and use them to identify projected regions where reconstruction error is likely to concentrate around silhouettes, thin structures, and texture transitions. During densification, Gaussians associated with these high-gradient regions are preferentially split or duplicated, giving the model additional capacity where small geometric or color errors are most visible. This complements dropout: dropout regularizes the existing primitives, while ESS determines where extra primitives should be allocated.
+
+= OMNI Architecture
+
+We combine components from different codebases into a single unified architecture, to test the effectiveness of single components singularly. We summarize the contribution of each codebase in the unified @tab:contributions, which also highlights the efforts required to combine them.
+
+We train variations of the same architecture on the `trex` and `bouncingballs` datasets for 20k training steps, with inference of $400 times 400$, so our results are comparable @yang2024_4dgs. We record performance metrics over training, namely PSNR, LPIPS, Peak RAM and VRAM usage, Memory Footprint, Number of Gaussians and render-time FPS. We also run USPLAT ablations on limited 7k step runs, due to the massive time overhead introduced by the USPLAT implementation available to us. The full results are available in Appendix @ablations.
+
+We also record the "MOG" real-life dataset, which consists of 5 videos, captured with handheld mobile devices from different angles. The dataset depicts a sitting male subject, who raises his eyebrows, removes his glasses and puts them back on. We synchronize the videos using clapping as auditory signals to identify beginning and end of the clip. The cameramen were instructed to move their hands in circular motions while recording, to provide all-round imaging with fewer floating artefacts.
 
 = Ablation Results
 
-We train variations of the same architecture on the `trex` and `bouncingballs` datasets for 20k training steps. We record performance metrics over training, namely PSNR, LPIPS, Peak RAM and VRAM usage, Memory Footprint, Number of Gaussians and render-time FPS. We also run USPLAT ablations on limited 7k step runs, due to the massive time overhead introduced by the USPLAT implementation available to us. We discuss our findings in the following section, and we provide the complete table of experiments is provided in the appendix. // TODO add table of results
+The ablations show that component effects are not independent. Initialization, Gaussian parametrization, color representation, pruning, and rendering interact through the same budget of Gaussians, parameters, and CUDA execution time. We therefore report the main trends rather than restating each method.
 
 == Visual Quality
 
@@ -296,19 +276,52 @@ We train variations of the same architecture on the `trex` and `bouncingballs` d
 
 == Role of each Component
 
-The ablations show that component effects are not independent. Initialization, Gaussian parametrization, color representation, pruning, and rendering interact through the same budget of Gaussians, parameters, and CUDA execution time. We therefore report the main trends rather than restating each method.
-
-- Random initialization increases floaters in fixed-camera scenes, especially on MOG-style data. Structured initialization or a pruning-densification schedule reduces this failure mode, but the latter is only a partial substitute for a high-quality point-cloud prior.
+- Random initialization results in floating gaussians in fixed-camera scenes, especially on MOG-style data. Structured initialization or a pruning-densification schedule reduces this failure mode, but the latter is only a partial substitute for a high-quality point-cloud prior.
 - Anisotropic Gaussians reached lower reconstruction error with fewer primitives, while isotropic Gaussians reduced variables per primitive and therefore favored memory and training speed.
 - RGB color reduced memory but required more primitives to approach SH(3) quality; progressive SH training remained more stable for higher-fidelity reconstructions.
 - Sort-free rendering did not provide the expected speedup in our 4D extension. The added time input and weight MLP increased training cost, and the learned weights were not expressive enough to consistently match sort-based quality.
 - Interleaved pruning and densification controlled Gaussian count better than either no pruning or one-shot pruning. It slightly improved visual quality while limiting memory growth.
 - Dropout and ESS produced limited gains on our datasets, likely because the scenes were not detailed enough for edge-aware capacity allocation or dropout regularization to matter strongly.
-- USPLAT showed only minor visual improvements in the 7k-step budget but imposed a large computational overhead: around 5h per ablation compared with about 20min for the default run. We could not reproduce the motion-regularization improvements reported by @guo2026uncertaintymattersdynamicgaussian, possibly because we relied on the unofficial implementation @chien2026usplat4d.
+- USPLAT showed only minor visual improvements in the 7k-step budget but imposed a large computational overhead. We could not reproduce the motion-regularization improvements reported by @guo2026uncertaintymattersdynamicgaussian, possibly because we relied on the unofficial implementation @chien2026usplat4d, whose hyperparameter combination or design choice may be less than ideal.
 
 == Choice of Model
 
-We did not identify a clear winner among the ablations. In fact, depending on the list of priorities, we show a sequence of decision diagrams to pick the best set of ablations.
+We did not identify a clear winner among the ablations, but we propose some reasonable presets.
+
+= Beating Baselines
+
+With the following presets, we were able to surpass both 4DGS-Native @yang2024_4dgs and 1000FPS baselines @yuan2025_4dgs1k: \ \
+
+
+*Anisotropic · SH(3) · sort · ESS · interleaved prune*
+
+#table(
+  columns: (0.5fr, 0.75fr, 0.42fr, 0.42fr, 0.42fr, 0.35fr, 0.38fr, 0.42fr),
+  inset: 4.5pt,
+  align: (x, y) => if x > 1 { center } else { left },
+  stroke: (x, y) => if y > 0 { (top: 0.35pt + black) },
+
+  text(size: 0.8em)[],
+  text(size: 0.9em)[*Method*],
+  text(size: 0.8em)[*PSNR↑*],
+  text(size: 0.8em)[*SSIM↑*],
+  text(size: 0.8em)[*LPIPS↓*],
+  text(size: 0.8em)[*FPS↑*],
+  text(size: 0.8em)[*MB↓*],
+  text(size: 0.8em)[*Gauss↓*],
+
+  table.vline(x: 2, stroke: black + 1pt),
+
+  [BBalls], [4DGS], [33.35], [0.982], [0.025], [462], [84], [134k],
+  [BBalls], [4DGS-1K], [33.45], [0.983], [0.025], [1509], [13], [20k],
+  [BBalls], [*Ours*], [*34.38*], [*0.985*], [*0.017*], [1133], [23], [*37k*],
+  
+  table.hline(stroke: black + 1pt),
+  
+  [TRex], [4DGS], [29.85], [0.980], [0.019], [202], [792], [1265k],
+  [TRex], [4DGS-1K], [30.47], [0.981], [0.018], [1361], [118], [189k],
+  [TRex], [*Ours*], [*32.05*], [*0.985*], [*0.015*], [786], [60], [*97k*],
+)
 
 = Discussion and Limitations
 
