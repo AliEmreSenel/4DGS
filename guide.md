@@ -546,3 +546,57 @@ uv run python scripts/collect_low_psnr_reruns_small.py \
   --out-dir rerun_cfg \
   --dry-run
 ```
+
+```markdown
+## Gaussian visualizer
+
+Export an interactive 3D Plotly visualization of the Gaussians from a checkpoint:
+
+```bash
+uv run python export_4dgs_plotly_html.py \
+  output/best_checkpoints/trex800.pth \
+  --toggle-checkpoint output/best_checkpoints/bouncingballs800.pth \
+  --checkpoint-labels trex bouncingballs \
+  --t 0.5 \
+  --out plotly_gaussians.html \
+  --max-gaussians 2000 \
+  --gray-opacity-knee 0.06 \
+  --gray-opacity-power 2.5 \
+  --gray-min-opacity 0.015 \
+  --leftover-opacity 1.0 \
+  --include-plotlyjs cdn \
+  --sigma 2.0
+```
+
+Open `plotly_gaussians.html` in a browser to inspect the Gaussian ellipsoids at a chosen timestamp. When `--toggle-checkpoint` is supplied, a **Dataset** button appears on the page to switch between the two checkpoints without reloading.
+
+The script also writes a companion data file:
+
+```text
+plotly_data/<output-stem>.js
+```
+
+This file must stay alongside the HTML when sharing or moving the output.
+
+### Flags
+
+| Flag                       | Meaning                                                                                   |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| `checkpoint`               | Path to the primary `.pth` checkpoint to visualize.                                       |
+| `--toggle-checkpoint`      | Optional second checkpoint toggled by a button in the page.                               |
+| `--checkpoint-labels`      | Two labels for the dataset toggle button, e.g. `trex bouncingballs`.                      |
+| `--t`                      | Timestamp to evaluate the Gaussians at. Required.                                         |
+| `--out`                    | Output HTML path. Default `gaussians_snippet.html`.                                       |
+| `--max-gaussians`          | Maximum number of Gaussians to render. `0` exports all. Default `1000`.                   |
+| `--opacity-min`            | Minimum alpha to include a Gaussian. Default `0.0`.                                       |
+| `--sigma`                  | Ellipsoid radius in standard deviations. Larger = bigger ellipsoids. Default `1.0`.       |
+| `--ellipsoid-res`          | Sphere mesh resolution per ellipsoid. Default `6`.                                        |
+| `--gray-opacity-knee`      | Transition knee for de-emphasising gray Gaussians during selection. Default `0.08`.       |
+| `--gray-opacity-power`     | Sharpness of the color/white opacity transition during selection. Default `2.0`.          |
+| `--white-opacity-start`    | RGB min-channel threshold where near-white Gaussians are favored. Default `0.82`.         |
+| `--gray-min-opacity`       | Minimum selection weight for gray or low-chroma Gaussians. Default `0.015`.               |
+| `--render-opacity`         | Final rendered opacity applied uniformly to every selected Gaussian. Default `1.0`.       |
+| `--leftover-opacity`       | Alias for `--render-opacity`, kept for backwards compatibility.                           |
+| `--camera-center`          | Camera origin used for SH color evaluation, as three floats. Default `0.0 0.0 0.0`.      |
+| `--include-plotlyjs`       | `cdn` for a standalone file with a CDN script tag; `false` for an embeddable snippet.     |
+```
