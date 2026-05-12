@@ -32,3 +32,5 @@ eggs/
 *.path
 *.html
 /chkpnt_best.pth
+/plotly_data
+*.html
