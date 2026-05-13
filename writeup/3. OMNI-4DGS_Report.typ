@@ -25,7 +25,7 @@
 )
 
 #let abstract = [
-  Dynamic scene reconstruction from video is a core problem in computer vision, with broad applications in AR and robotics. 4D Gaussian Splatting (4DGS) has emerged as the dominant approach, offering fast training and flexible scene representation. However, existing methods each optimize for a single axis of performance, leaving practitioners without clear guidance on how to combine improvements or navigate tradeoffs. We present OMNI-4DGS, a unified architecture that integrates recent advances in representation, rendering, and training into a single jointly-evaluated system. Through ablations, we show that no configuration dominates all metrics. We also surpass Our results offer practical guidance for selecting configurations based on deployment priorities, and surface limitations of several recent techniques, also for sort-free rendering and uncertainty-aware training, which do not transfer immediately to the 4D setting. This positions OMNI-4DGS as a reference for designing 4DGS pipelines in real-world constraints.
+Dynamic scene reconstruction converts videos into compact, renderable 4D models. The dominant approach, Native 4D Gaussian Splatting, is fast and effective but often suffers from Gaussian overgrowth, high VRAM use, large checkpoints, slow rendering, and fragile pruning or densification choices. OMNI-4DGS addresses these quality-efficiency tradeoffs by jointly evaluating representation, rendering, and training decisions. We ablate covariance type, RGB versus SH(3), rendering strategy, pruning schedules, ESS, dropout, and motion regularization across quality and efficiency metrics. The best preset improves visual quality while reducing model size, reaching 34.38 PSNR/37k Gaussians on `bouncingballs` and 32.05 PSNR/97k on `trex`, making 4DGS more deployment-ready.
 ]
 
 #show: cvpr2025.with(
@@ -260,37 +260,37 @@ We train variations of the same architecture on the `trex` and `bouncingballs` d
 
 We also record the "MOG" real-life dataset, which consists of 5 videos, captured with handheld mobile devices from different angles. The dataset depicts a sitting male subject, who raises his eyebrows, removes his glasses and puts them back on. We synchronize the videos using clapping as auditory signals to identify beginning and end of the clip. The cameramen were instructed to move their hands in circular motions while recording, to provide all-round imaging with fewer floating artefacts.
 
-= Ablation Results
+= Ablation Experiments
 
-The ablations show that component effects are not independent. Initialization, Gaussian parametrization, color representation, pruning, and rendering interact through the same budget of Gaussians, parameters, and CUDA execution time. We therefore report the main trends rather than restating each method.
+The ablations show that component effects are not independent: initialization, Gaussian parametrization, color representation, pruning, and rendering interact through the same budget of Gaussians, parameters, and CUDA execution time. We therefore report the main trends. To compare effects across metrics with different units, we use Hedges' $g$, a standardized mean-difference coefficient. Since some metrics are better when higher, such as PSNR, SSIM and FPS, while others are better when lower, such as LPIPS, memory and Gaussian count, we report direction-corrected $g$ values: positive values indicate improvement and negative values indicate degradation.
 
 == Visual Quality
 
+Visual quality improves most from anisotropic Gaussians, SH(3) color, and interleaved pruning. Anisotropic Gaussians outperform isotropic ones with higher PSNR ($+28.0%$, $g=1.40$), higher SSIM ($+6.2%$, $g=1.06$), and lower LPIPS ($-67.1%$, $g=1.15$), showing that directional covariance is important for representing geometry and motion-dependent appearance. SH(3) also strongly improves quality over RGB, raising PSNR from $23.82$ to $30.65$ and reducing LPIPS from $0.0925$ to $0.0280$. Interleaved pruning and densification further improves PSNR, SSIM, and LPIPS, while early initialization pruning degrades all quality metrics. Pruning is therefore useful only after meaningful Gaussian structure has formed.
+
 == Memory Usage
+
+Memory usage is mainly determined by color representation, pruning strategy, and Gaussian count. RGB is the most memory-efficient color model, reducing checkpoint size from $1183.5$ to $303.4$ MB ($-74.4%$, $g=1.66$) and evaluation VRAM from $2231.6$ to $1542.2$ MB ($-30.9%$, $g=0.71$). However, this comes with a large quality loss, so RGB is best suited to compact deployment rather than high-fidelity reconstruction. SH(3) gives much better quality but increases memory. Pruning is consistently beneficial: final pruning reduces checkpoint size by $80.6%$, while interleaved pruning reduces VRAM by $28.6%$. No pruning is harmful across memory, size, time, and FPS.
 
 == Gaussian Count
 
+Gaussian count shows how well each component controls model growth. Interleaved pruning and densification gives the strongest reduction, lowering the count from $2,077,623$ to $769,462$ ($-63.0%$, $g=0.92$). Anisotropic Gaussians also reduce the required primitives from $2,190,855$ to $970,152$ ($-55.7%$, $g=0.84$) while improving quality, meaning they increase representational efficiency rather than merely adding complexity. SH(3) and no-dropout also reduce counts substantially, likely because better appearance modeling and more stable optimization reduce densification pressure. In contrast, no pruning causes uncontrolled growth, while early initialization pruning removes useful structure too early and harms quality and compactness.
+
 == Inference FPS
+
+Inference FPS benefits most from pruning and from reducing active primitive cost. Final pruning is the strongest FPS-oriented component, increasing render speed from $199.7$ to $362.0$ FPS ($+81.2%$, $g=1.03$). No-dropout also improves FPS from $191.0$ to $317.6$ ($+66.2%$, $g=0.79$), likely because it produces fewer Gaussians and a simpler final model. No pruning lowers FPS due to larger Gaussian count and memory use. Interleaved pruning reduces count and VRAM, but gives weaker FPS gains than final pruning, suggesting that throughput also depends on primitive distribution, memory layout, and renderer implementation, not only the total number of Gaussians.
 
 == Training Time
 
+Training time is most affected by dropout, pruning, and color representation. Removing dropout gives the largest improvement, reducing training time from $19696.5$ to $4881.7$ seconds ($-75.2%$, $g=1.62$). Dropout therefore adds optimization cost without clear quality or compactness gains. Interleaved pruning and densification also reduces training time from $19196.7$ to $9607.7$ seconds ($-50.0%$, $g=0.91$), consistent with its lower Gaussian count and VRAM. SH(3) unexpectedly reduces time from $16476.3$ to $10677.6$ seconds, likely because it explains appearance variation with fewer primitives. No pruning and dropout are the most harmful choices because they increase model size or slow convergence.
+
 == Role of each Component
 
-- Random initialization results in floating gaussians in fixed-camera scenes, especially on MOG-style data. Structured initialization or a pruning-densification schedule reduces this failure mode, but the latter is only a partial substitute for a high-quality point-cloud prior.
-- Anisotropic Gaussians reached lower reconstruction error with fewer primitives, while isotropic Gaussians reduced variables per primitive and therefore favored memory and training speed.
-- RGB color reduced memory but required more primitives to approach SH(3) quality; progressive SH training remained more stable for higher-fidelity reconstructions.
-- Sort-free rendering did not provide the expected speedup in our 4D extension. The added time input and weight MLP increased training cost, and the learned weights were not expressive enough to consistently match sort-based quality.
-- Interleaved pruning and densification controlled Gaussian count better than either no pruning or one-shot pruning. It slightly improved visual quality while limiting memory growth.
-- Dropout and ESS produced limited gains on our datasets, likely because the scenes were not detailed enough for edge-aware capacity allocation or dropout regularization to matter strongly.
-- USPLAT showed only minor visual improvements in the 7k-step budget but imposed a large computational overhead. We could not reproduce the motion-regularization improvements reported by @guo2026uncertaintymattersdynamicgaussian, possibly because we relied on the unofficial implementation @chien2026usplat4d, whose hyperparameter combination or design choice may be less than ideal.
+Anisotropic Gaussians are one of the most beneficial components: they improve PSNR, SSIM, LPIPS, and reduce Gaussian count. Isotropic Gaussians use fewer variables per primitive but lose too much representational power. RGB reduces memory and checkpoint size but hurts quality, while SH(3) improves visual fidelity and reduces primitive count at the cost of higher VRAM and checkpoint size. Interleaved pruning best balances quality, count, memory, and training time; final pruning is strongest for FPS and deployment size; early initialization pruning is harmful. Dropout gives no clear benefit, and removing it improves time, FPS, count, and PSNR. Sort-free rendering, ESS, and USPLAT provided limited gains or excessive overhead in this setting.
 
 == Choice of Model
 
-We did not identify a clear winner among the ablations, but we propose some reasonable presets.
-
-= Beating Baselines
-
-With the following presets, we were able to surpass both 4DGS-Native @yang2024_4dgs and 1000FPS baselines @yuan2025_4dgs1k: \ \
+We did not identify a clear winner among the ablations, but we propose some reasonable presets. However, with the following presets, we were able to surpass both 4DGS-Native @yang2024_4dgs and 1000FPS baselines @yuan2025_4dgs1k: \ \
 
 
 *Anisotropic · SH(3) · sort · ESS · interleaved prune*
@@ -323,8 +323,10 @@ With the following presets, we were able to surpass both 4DGS-Native @yang2024_4
   [TRex], [*Ours*], [*32.05*], [*0.985*], [*0.015*], [786], [60], [*97k*],
 )
 
-= Discussion and Limitations
+== Discussion and Limitations
 
-
+4DGS design is a coupled resource tradeoff: each component affects Gaussian count, per-primitive parameters, memory bandwidth, CUDA time, and stability. Anisotropic covariance improves PSNR, SSIM, and LPIPS despite higher per-Gaussian cost by reducing required primitives. SH(3) similarly increases appearance capacity and lowers densification pressure, while RGB is insufficient for high fidelity. Pruning must follow structure formation: early pruning destabilizes training, interleaved pruning balances quality and compactness, and final pruning aids deployment. Best results use anisotropy, SH(3), sort rendering, ESS, and interleaved pruning. Limitations include narrow datasets, noisy MOG capture, approximate USPLAT comparison, CUDA adaptations, and weak initialization causing floating Gaussians.
 
 = Conclusion
+
+We presented *OMNI-4DGS*, a unified architecture and ablation study for fast, compact dynamic reconstruction with Native 4D Gaussian Splatting. Our results show that efficient 4DGS depends on increasing expressiveness per Gaussian while controlling primitive growth. Anisotropic covariance and SH(3) improve reconstruction quality, while interleaved pruning and densification reduce Gaussian count, memory, and training time. Final pruning further improves FPS and checkpoint size for deployment. In contrast, early pruning, dropout, and the adapted sort-free renderer were not consistently beneficial. Overall, the *anisotropic · SH(3) · sort · ESS · interleaved prune* preset achieves the best tested quality-compactness tradeoff across `trex` and `bouncingballs`.
