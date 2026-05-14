@@ -378,10 +378,14 @@ BLACK_CHECK=0 bash ablation_script.sh
 
 ## HTML result browser
 
+Two scripts generate HTML pages from rendered output. `html_export.py` is the general-purpose browser - it scans a directory recursively and visualises the full range of ablation experiments. `html_poster.py` is a hardcoded, narrowed version built specifically for the poster figures; it shows a fixed set of scenes and configurations and does not accept a directory argument.
+
 Create a local HTML overview of rendered ablation videos and images:
 
 ```bash
 uv run python html_export.py output/ablation_vids -o ablations.html
+uv run python html_poster.py output/ablation_vids -o ablations.html
+
 ```
 
 Disable recursive search:
