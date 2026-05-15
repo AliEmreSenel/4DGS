@@ -609,9 +609,9 @@
 
   - `MB` size column includes optimizer checkpoint state size. True size is in the order of 1/3 of the MB size.
   - `FPS` is a relative measure as it is hardware-dependent.
-  - `Iter` represents
+  - `Iter` reports the checkpoint iteration, in thousands, selected as the best checkpoint for that row.
 
-  In the following tables, the best cells for each metric are colored in green, while the worse 25% of values are in red.
+  In the following tables, the best cells for each metric are colored in green, while the worst 25% of values are in red.
 
 
   #show figure: set block(breakable: true)
