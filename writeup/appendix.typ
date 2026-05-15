@@ -544,7 +544,7 @@
   - 4x Lenovo ThinkSystem SR630 v4: 2x Intel Xeon 6517P 16-core CPUs, 1024 GB DDR5-6400M RAM, 2x NVIDIA H100 GPUs with 94 GB RAM.
   - 4x Dell PowerEdge R650: 2x Intel Xeon 4316 20-core CPUs, 512 GB DDR4-3200 RAM.
 
-  = Ablation Cover
+  = Ablation Cover <ablation-coverage>
 
   Each trained ablation was run once; reported effect sizes are descriptive rather than estimates of run-to-run significance. FPS comparisons are indicative because throughput depends on hardware resources and renderer settings.
 
@@ -3142,5 +3142,28 @@
       )
     ],
     caption: [ Ablations: bouncingballs, 7k iter, sort, (200x200)],
+  )
+
+  = MOG - Dataset <mog>
+
+  #grid(
+    columns: (1fr, 1fr),
+    gutter: 0.5cm,
+    [
+      #align(center)[
+        #box(width: 90%)[
+          #image("./img/mog_moving_cameras.png", width: 100%)
+          #align(center)[5 x moving Cameras]
+        ]
+      ]
+    ],
+    [
+      #align(center)[
+        #box(width: 90%)[
+          #image("./img/mog_still_cameras.png", width: 100%)
+          #align(center)[5 x still Cameras]
+        ]
+      ]
+    ],
   )
 ]

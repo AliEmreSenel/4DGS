@@ -25,7 +25,7 @@
 )
 
 #let abstract = [
-  Dynamic scene reconstruction converts videos into compact, renderable 4D models. The dominant approach, Native 4D Gaussian Splatting, is fast and effective but often suffers from Gaussian overgrowth, high VRAM use, large checkpoints, slow rendering, and fragile pruning or densification choices. OMNI-4DGS studies these quality-efficiency tradeoffs by jointly evaluating representation, rendering, and training decisions. We ablate covariance type, RGB versus SH(3), rendering strategy, pruning schedules, ESS, dropout, and motion regularization across quality and efficiency metrics. The best tested quality-compact preset improves visual quality while keeping model size compact, reaching 34.42 PSNR/29k Gaussians on `bouncingballs` and 31.89 PSNR/81k on `trex`, improving the quality-compactness tradeoff for practical 4DGS deployment.
+  Dynamic scene reconstruction converts videos into compact, renderable 4D models. The dominant approach, Native 4D Gaussian Splatting is fast and effective but often suffers from Gaussian overgrowth, high VRAM use, large checkpoints, slow rendering, and fragile pruning or densification choices. OMNI-4DGS studies these quality-efficiency tradeoffs by jointly evaluating representation, rendering, and training decisions. We ablate covariance type, RGB versus SH(3), rendering strategy, pruning schedules, ESS, dropout, and motion regularization across quality and efficiency metrics. Our best tested quality-compact preset improves visual quality while keeping model size compact, reaching 34.42 PSNR/29k Gaussians on _bouncingballs_ and 31.89 PSNR/81k on _trex_, improving the quality-compactness tradeoff for practical 4DGS deployment.
 ]
 
 #show: cvpr2025.with(
@@ -45,29 +45,31 @@
 
 = Introduction
 
-Gaussian Splatting has been used extensively for scene reconstruction from videos, thanks to its relatively small training requirements. In the 4D setting (4DGS), frames from a video are used to train a machine learning model to "learn" a scene in space. This representation can then be used to produce novel camera views as a function of time, position, orientation, and space. \
+Gaussian Splatting has been used extensively for scene reconstruction from videos, thanks to its relatively small training requirements. In the 4D setting (4DGS), frames from a video are used to train a model that represents a scene in space and time. This representation can then be rendered from novel camera views as a function of time, position, orientation, and space. \
 
-In a 4DGS model, the building blocks of the scene are a vast number of Gaussian distributions in space, parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing for diagonal deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of each Gaussian, encoded by a fixed number of Spherical Harmonic (SH) coefficients, which can uniformly approximate color distributions. Compared to constant color, SH coefficients allow smooth coloring over the surface, where expressiveness depends on the number of coefficients. Both Covariance+Rotation and SH reduce the number of Gaussians needed, since they allow a greater range of behavior at the cost of more variables. Training involves the iterative reconstruction of ground-truth images from the dataset by rendering the Gaussians. Multiple similarity metrics are used to steer each Gaussian's features in the correct direction, balancing color fidelity with a known depth map or a structural similarity metric. The final output consists of the list of Gaussians, which can be projected to a camera plane and rasterized to obtain a reconstructed image. During inference, camera position is fixed, and a pixel color is obtained by integrating the scene through the view-pixel ray: each Gaussian color contribution is added, while accounting for opacity, distance, and leftover un-occluded light, crossing the Gaussians in the correct order. Naturally, this allows for the generation of new camera angles. \
+In a 4DGS model, the scene is represented by many Gaussian primitives, parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing anisotropic deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of each Gaussian, encoded by a fixed number of Spherical Harmonic (SH) coefficients, which approximate view-dependent color. Compared to constant color, SH coefficients allow smoother appearance at the cost of more variables. Both Covariance+Rotation and SH can reduce the number of Gaussians needed by increasing per-primitive expressiveness.
 
-Extending the task from static scenes to dynamic scenes, where the objects move or change shape and color, the state of the art (SOTA) architecture is Native 4D Gaussian Splatting (4DGS-Native) @yang2024_4dgs. This model extends Gaussian features by adding a time scalar to position, centering the Gaussians in time, and time covariance components, allowing each Gaussian to move to some extent. With this extension, rendering must first condition the Gaussians with respect to time, before being able to render them as in the 3D setting. All mentions of 4D Gaussian Splatting refer to the native representation. \
+Training iteratively reconstructs ground-truth images by rendering the Gaussians and optimizing image-similarity losses. The final output is a list of Gaussians, which can be projected to a camera plane and rasterized to obtain a reconstructed image. During inference, each pixel color is obtained by integrating Gaussian contributions along the view ray, while accounting for opacity, distance, and remaining transmittance. \
 
-Although the field of dynamic scene reconstruction has attracted a lot of interest and produced impressive results, many problems persist with the current models: scenes are affected by a high number of low-importance Gaussians, which drastically increase training time; rendering techniques are limited by costly sorting algorithms; and initialization or training strategies are non-obvious. In this paper, we combine several 4DGS-Native improvements into a unified implementation and evaluate their performance through ablations.
+Extending the task from static scenes to dynamic scenes, where objects move or change shape and color, Native 4D Gaussian Splatting (4DGS-Native) @yang2024_4dgs adds a time coordinate and time covariance components to each Gaussian. Rendering must therefore first condition the Gaussians with respect to time before rendering them as in the 3D setting. All mentions of 4DGS refer to the native representation. \
+
+Although dynamic scene reconstruction has produced impressive results, many problems persist: scenes contain many low-importance Gaussians, which increase training time; rendering is limited by costly sorting algorithms; and initialization or training strategies are non-obvious. In this paper, we combine several improvements into a unified implementation, evaluating performance through ablations.
 
 == Gaussian Representation
 
-The parametrization of Gaussians in Native 4DGS is a tradeoff between using few variables and being expressive enough that fewer Gaussians are necessary to describe a scene. In 4DGS-Native, each Gaussian is characterized by a position vector $(mu_x, mu_y, mu_z, mu_t) = mu in RR^4$ representing the center of the Gaussian, that is, the mean of the distribution, a covariance matrix $Sigma in RR^(4 times 4)$, which distorts the Gaussian in time and space, a rotation, represented using two quaternions $r_1, r_2 in HH$. For color, the Gaussians are equipped with opacity $o in [0,1]$, and a series of SH coefficients, which are used to uniformly approximate color fields on a sphere surface: SH(m) uses $(m + 1)^2$ coefficients for color channels, so SH(3) requires 21 scalars in total, per Gaussian, to encode its color. SH(0) corresponds to plain RGB colors.
+To understand where these tradeoffs arise, we first describe the Gaussian representation itself. The parametrization of Gaussians in Native 4DGS is a tradeoff between using few variables and being expressive enough that fewer Gaussians are necessary to describe a scene. In 4DGS-Native, each Gaussian is characterized by a position vector $(mu_x, mu_y, mu_z, mu_t) = mu in RR^4$ representing the center of the Gaussian, that is, the mean of the distribution, a covariance matrix $Sigma in RR^(4 times 4)$, which distorts the Gaussian in time and space, a rotation, represented using two quaternions \ $r_1, r_2 in HH$. For color, the Gaussians are equipped with opacity $o in [0,1]$, and a series of SH coefficients, which approximate color fields on a sphere surface: SH(m) uses $(m + 1)^2$ coefficients per color channel, so SH(3) requires 16 coefficients per channel, or 48 RGB scalars per Gaussian. SH(0) corresponds to plain RGB colors.
 
 $
   G_i = (mu_i, Sigma_i, o_i, (r_1, r_2), arrow("SH")_i(3))
 $
 
-Variations of this representation have also been developed to reduce the number of variables, which reduces training time and storage size but also lowers expressiveness. Isotropic Gaussians are spherical, but retain the time covariance, allowing them to shrink or grow in time. This is encoded in a matrix with a $3 times 3$ constant-values submatrix, and a time-varying time vector. Here, $bold(1)$ represents the matrix with $1$ in each entry.
+Variations of this representation have also been developed to reduce the number of variables, which reduces training time and storage size but also lowers expressiveness. Isotropic Gaussians are spherical, but retain the time covariance, allowing them to shrink or grow in time, but using 8 fewer scalars. This is encoded in a matrix with a $3 times 3$ constant-values submatrix, and a time-varying time vector. Here, $bold(1)$ represents the matrix with $1$ in each entry.
 
 $
   Sigma =
   mat(
-    Sigma_"xyz", 0;
-    0, sigma_t,
+    Sigma_"xyz", Sigma_(x y z,t);
+    Sigma_(x y z,t)^T, sigma_t,
   )               &&   "with"
                        Sigma_"xyz" = S_"xyz" bold(1)_(3 x 3) \
   Sigma = Sigma^T && => Sigma_(x y z,t) = Sigma_(t, x y z)^T
@@ -75,9 +77,9 @@ $
 
 == Projection and Rendering
 
-Images may be reproduced from 4DGS-Native Gaussians by first conditioning the distributions in time, which produces a 3D normal distribution. This colored "cloud" is mapped to a 2D camera plane using a world-to-camera projection matrix, reproducing a pixel image. During training, the operation enables the calculation of loss, since the reprojected image can be directly compared to one of the reference images. Generalization loss can also be calculated from pictures the model was not trained on. Image reconstruction is obtained by first fixing camera position and orientation, then evaluating per-pixel color as a function of all the visible Gaussians. More precisely, each pixel induces a ray that marches outwards, intersecting all Gaussians on the way between the focal point of the camera and the background, passing through the pixel point. The color of the pixel is obtained through the integration of each per-Gaussian color contribution. The formula for the final color is traditionally sort-dependent, but we also investigate sort-free rendering, as it can reduce the render bottleneck in related work, such as @du2026_mobilegs.
+Images may be reproduced from 4DGS-Native Gaussians by first conditioning the distributions in time, which produces a 3D normal distribution. This colored "cloud" is mapped to a 2D camera plane using a world-to-camera projection matrix, reproducing a pixel image. During training, the operation enables the calculation of loss, since the reprojected image can be directly compared to one of the reference images. Generalization loss can also be calculated with images the model was not trained on. Image reconstruction is obtained by first fixing camera position and orientation, then evaluating per-pixel color as a function of all visible Gaussians. More precisely, each pixel induces a ray that marches outwards, intersecting all Gaussians on the way between the focal point of the camera and the background, and passes through the pixel point. The color of the pixel is obtained through the integration of each per-Gaussian color contribution. The formula for the final color is traditionally sort-dependent, but we also investigate sort-free rendering, as it was shown to reduce render time in related work @du2026_mobilegs.
 
-*Sort-based rendering* consists of filtering the view to only consider relevant Gaussians, and processing them one at a time, integrating their colors in order to obtain the resulting color of a pixel. For rendering, overall opacity is calculated sequentially in order to obtain "leftover" light level (Transmittance) $T_i (p, t)$, which modulates the color contribution $c_i (v,t)$ for each successive Gaussian. Finally, leftover light $T_(N+1)$ is attributed to background color $c_("bg")$. In the most general formulation, color is view-direction dependent, as well as time dependent. Moreover, the formula offers limited parallelization, as the sorting operation is a bottleneck.
+*Sort-based rendering* consists of filtering the view to only consider relevant Gaussians, and processing them one at a time, integrating their colors in order, to obtain the resulting color of a pixel. For rendering, overall opacity is calculated sequentially to obtain Transmittance $T_i (p, t)$, that is, the "leftover" light level, which modulates the color contribution $c_i (v,t)$ for each successive Gaussian. Remaining light $T_(N+1)$ is attributed to background color $c_("bg")$. In the most general formulation, color is view-direction dependent, as well as time dependent. Moreover, the formula offers limited parallelization, as the sorting operation is a bottleneck.
 
 $
   cases(
@@ -87,8 +89,8 @@ $
 $
 
 $
-  C_p(t, v) = sum_(i=1)^N T_i (p, t) & alpha_i (p, t) c_i (v, t) \
-                                     & + T_(N+1)(p, t) c_("bg")
+  C_p (t, v) = sum_(i=1)^N T_i (p, t) & alpha_i (p, t) c_i (v, t) \
+                                      & + T_(N+1)(p, t) c_("bg")
 $
 
 *Sort-free rendering*, first proposed in @Hou2024SortFreeGS, computes color directly through a sum, where the weighting of each color contribution is computed by multiple small Multilayer Perceptrons (MLP). The MLP "compresses" information from the Gaussians, resulting in smaller storage requirements and faster inference. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. We used @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, for computing pixel color and Gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
@@ -111,9 +113,9 @@ $
 
 $
   w_i =
-  underbrace(phi_i^2, "MLP override")
-  + underbrace(frac(phi_i, d_i^2), "proximity")
-  + underbrace(exp(frac(s_"max", d_i)), "distance effects")
+  underbrace(phi_i^2, #[MLP \ override])
+  + underbrace(frac(phi_i, d_i^2), #[proximity \ effects])
+  + underbrace(exp(frac(s_"max", d_i)), #[distance\ effects])
 $
 
 $
@@ -133,11 +135,11 @@ Other optimizations have also been developed for the rendering (inference) opera
 
 == Training
 
-We use backpropagation for training, minimizing image-similarity metrics, with additional loss components introduced by the architecture. We use the Adam optimizer and batch training to improve stability @yang2024_4dgs.
+Backpropagation is used for training, minimizing image-similarity metrics, with additional loss components as they are introduced by the architecture. We use the Adam optimizer and batch training to improve stability @yang2024_4dgs.
 
-Memory usage is proportional to the number of Gaussians, so one seeks to minimize this number by pruning less relevant ones. Opacity pruning drops Gaussians with opacity values below a chosen threshold @yang2024_4dgs @du2026_mobilegs. Contribution pruning accumulates a contribution value over training steps and drops Gaussians that remain insufficiently relevant for enough iterations. Spatio-Temporal pruning drops the bottom $~ 90%$ quantile, ranking higher more persistent and longer-lasting Gaussians @luo2025_instant4d. Finally, Grid pruning de-duplicates Gaussians by position, velocity, temporal scale, and time placement @luo2025_instant4d. Since most pruning rules are correlated, we only implemented Spatio-Temporal pruning, as it accounts for both spatial and temporal contribution, and kept Opacity Pruning from 4DGS-Native. Related to pruning, we apply densification to increase the number of Gaussians where necessary. We implement Edge-Guided densification, which adds Gaussians near image edges @Xu_2025_CVPR, and Gradient-Based densification, which splits Gaussians with high gradients @sun2024highfidelityslam.
+As memory usage is proportional to the number of Gaussians, one seeks to minimize this number by pruning less relevant ones. Opacity pruning drops Gaussians with opacity values below a chosen threshold @yang2024_4dgs @du2026_mobilegs. Contribution pruning accumulates a contribution value over training steps and drops Gaussians that remain insufficiently relevant for enough iterations. Spatio-Temporal pruning drops the bottom $~ 90%$ quantile, attributing a higher ranking to more visible and longer-lasting Gaussians @luo2025_instant4d. Finally, Grid pruning de-duplicates Gaussians by position, velocity, temporal scale, and time placement @luo2025_instant4d. However, since most pruning rules tend to be correlated, in trying to achieve the same goal, we only implement Spatio-Temporal pruning, as it accounts for both spatial and temporal contributions, and kept Opacity Pruning from 4DGS-Native. Related to pruning, we apply densification to increase the number of Gaussians where necessary. We also implement Edge-Guided densification, adding Gaussians near image edges @Xu_2025_CVPR, and Gradient-Based densification, splitting Gaussians with high loss gradients @sun2024highfidelityslam.
 
-Rasterization is performed through custom `CUDA` kernels for speed. However, compatibility issues arise because the codebases use different CUDA versions. For this reason, we opted for a mixed pruning-densification schedule, aiming to simulate a better-than-random initialization, as opposed to MegaSAM, at the cost of worse initialization @luo2025_instant4d.
+Rasterization is performed through custom `CUDA` kernels for speed. However, compatibility issues arise because the codebases use different versions. For this reason, we opted for a mixed pruning-densification schedule, aiming to simulate a better-than-random initialization, as opposed to MegaSAM, at the cost of worse initialization @luo2025_instant4d.
 
 == Loss
 
@@ -177,15 +179,15 @@ Reconstruction quality is then reported using three complementary image metrics:
 
 - Peak Signal-to-Noise Ratio (PSNR): measures pixel-level fidelity.
 - Structural Similarity Index Measure (SSIM): captures structural similarity in luminance, contrast, and texture.
-- Learned Perceptual Image Patch Similarity (LPIPS): estimates perceptual similarity from neural feature activations.
+- Learned Perceptual Image Patch Similarity (LPIPS): estimates similarity from neural feature activations.
 
 == Uncertainty-Aware Loss
 
-When optimization is applied equally to all Gaussians, low-quality Gaussians remain unconstrained, producing visual inconsistencies. Uncertainty Awareness addresses this problem, activating after base-model convergence. First, uncertainty $u_(i,t)$ is estimated per Gaussian per frame from alpha-blending weights: well-observed Gaussians contribute strongly to many pixels, thus receiving a low uncertainty score:
+When optimization is applied equally to all Gaussians, low-quality Gaussians remain unconstrained, producing visual inconsistencies. Uncertainty Awareness addresses this problem, activating after base-model convergence @chien2026usplat4d. First, uncertainty $u_(i,t)$ is estimated per Gaussian per frame from alpha-blending weights: well-observed Gaussians contribute strongly to many pixels, thus receiving low uncertainty:
 
 $
   sigma^2_(i,t) =
-  1 / (sum_(h in P_(i,t)) (T^h_(i,t) dot alpha_i)^2),
+  1 / (sum_(h in P_(i,t)) (T^h_(i,t) alpha_i)^2),
   quad
   u_(i,t) = cases(
     sigma^2_(i,t) & " " bb(I)_(i,t),
@@ -193,7 +195,7 @@ $
   )
 $
 
-with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest-confidence Gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes, we use kNN with $k = 8$ to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
+with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest-confidence Gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes, kNN with $k = 8$ is used to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
 
 *Key-node loss* ensures that reliable Gaussians do not drift from their well-trained and certain positions, while their neighbourhoods move consistently. This is enforced by anchoring them to their pretrained positions $bold(mu)^circle$ and applying motion locality constraints:
 
@@ -230,10 +232,10 @@ $
   norm(bold(mu)_(i,t) - bold(mu)^"DQB"_(i,t))^2_(U^(-1)_(w,t,i))
 $
 
-DQB is a soft interpolation, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USPLAT iterations to protect graph index integrity.
+DQB is a soft interpolation for rotations, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USPLAT iterations to protect graph index integrity.
 
 #place(
-  bottom + right,
+  top + right,
   float: true,
   clearance: 0.8em,
 )[
@@ -245,21 +247,21 @@ DQB is a soft interpolation, where $bold(mu)_(i,t)$ remains free and may deviate
 
 == Gaussian Regularization
 
-Taking inspiration from @Xu_2025_CVPR, we implement *Random Dropout Regularization* to ensure that remaining Gaussians are not overly dependent on any particular subset of primitives. At each training iteration, a random mask disables a fraction of Gaussians before rendering, while the full model remains the reference target. This encourages neighboring primitives to share responsibility for explaining observed pixels, reducing sparse-view overfitting, floating artifacts, and hollow artifacts. During inference, all Gaussians are restored, effectively aggregating many low-complexity submodels. The intended effect is smoother geometry and improved generalization, while later refinement can recover high-frequency details lost through dropout during training.
+Taking inspiration from @Xu_2025_CVPR, we implement *Random Dropout Regularization*, extending it from 3D to 4D, to ensure that remaining Gaussians are not overly dependent on any particular subset of primitives. At each training iteration, a random mask disables a fraction of Gaussians before rendering, while the full model remains the reference target. This encourages neighboring primitives to share responsibility for explaining observed pixels, reducing sparse-view overfitting, floating artifacts, and hollow artifacts. During inference, all Gaussians are restored, effectively aggregating many low-complexity submodels. The intended effect is smoother geometry and improved generalization, while later refinement can recover high-frequency details.
 
-We also implement *Edge-guided Splitting Strategy* (ESS) from @Xu_2025_CVPR. ESS increases Gaussian density near image discontinuities instead of distributing new primitives uniformly. We compute edge cues from the training views and use them to identify projected regions where reconstruction error is likely to concentrate around silhouettes, thin structures, and texture transitions. During densification, Gaussians associated with these high-gradient regions are preferentially split or duplicated, giving the model additional capacity where small geometric or color errors are most visible. This complements dropout: dropout regularizes the existing primitives, while ESS determines where extra primitives should be allocated.
+We also implement and *Edge-guided Splitting Strategy* (ESS) from @Xu_2025_CVPR. ESS increases Gaussian density near image discontinuities instead of distributing new primitives uniformly. We compute edge cues from the training views and use them to identify projected regions where reconstruction error is likely to concentrate around silhouettes, thin structures, and texture transitions. During densification, Gaussians associated with these high-gradient regions are preferentially split or duplicated, giving the model additional capacity where small geometric or color errors are most visible. This complements dropout: dropout regularizes the existing primitives, while ESS determines where extra primitives should be allocated.
 
 = OMNI Architecture
 
-We combine components from different codebases into a single unified architecture to test the effectiveness of each component. We summarize our codebase in @tab:contributions, which also highlights the efforts required to combine them.
+Having described the individual components, we now explain how they are integrated into our unified OMNI-4DGS pipeline. We combine components from different codebases into a single unified architecture to test the effectiveness of each component. We summarize our codebase in @tab:contributions, which also highlights the efforts required to combine them.
 
-We train ablations on the `trex` dataset with inference of $400 times 400$, allowing results to be compared with SOTA @yang2024_4dgs. We save the best checkpoint and store its metrics. We record PSNR, LPIPS, peak RAM and VRAM usage, memory footprint, number of Gaussians, and render-time FPS. We also run USPLAT ablations on limited 7k-step runs, due to the massive time overhead introduced by the available USPLAT implementation (Appendix @ablations). For completeness, we tested the `bouncingballs` dataset. For each ablation, we report the best checkpoint over the training trajectory rather than necessarily the final 30k-step checkpoint. Although runs were allowed to continue up to 30k iterations, performance generally peaked earlier, around 10k--15k iterations, after which mild degradation started. Each ablation was run once, so effect sizes should be interpreted descriptively rather than as estimates of run-to-run statistical significance. Baseline values are taken from the corresponding papers rather than rerun under identical hardware. Moreover, FPS depends strongly on resources and renderers:  comparisons are indicative rather than hardware-normalized.
+We train ablations on the `trex` dataset with inference of $400 times 400$, allowing results to be compared with SOTA @yang2024_4dgs. We record PSNR, LPIPS, peak RAM and VRAM usage, memory footprint, number of Gaussians, and render-time FPS. For completeness, we tested the `bouncingballs` dataset. We also run USPLAT ablations on limited 7k-step runs, due to the massive time overhead introduced by our reference USPLAT implementation (Appendix @ablations, while @ablation-coverage explains Ablations Coverage). We run each ablation once, reporting the best checkpoint over training rather than necessarily the final 30k-step checkpoint. Although runs were allowed to continue up to 30k iterations, performance generally peaked earlier, at around 10k--15k iterations, after which mild degradation started. Each ablation was run once, so effect sizes should be interpreted descriptively rather than as estimates of run-to-run statistical significance. Baseline values are taken from the corresponding papers rather than rerun under identical hardware. Moreover, FPS depends strongly on resources and renderers:  comparisons are indicative rather than hardware-normalized.
 
-We also record the "MOG" real-world dataset, which consists of 5 videos, captured with handheld mobile phones from different angles. The dataset depicts a sitting male subject, who raises his eyebrows, removes his glasses and puts them back on. We synchronize the videos using clapping as auditory signals to identify beginning and end of the clip. The cameras rotate in swirling motions while fixated on the subject, for all-round imaging with fewer floating artifacts.
+We also recorded the "MOG" real-world dataset, which consists of 5 videos captured with handheld mobile phones from different angles. The dataset depicts a seated subject, who raises his eyebrows, removes his glasses and puts them back on. We synchronize the videos using clapping as auditory signals to identify beginning and end of the clip. The cameras rotate in swirling motions while fixated on the subject, for all-round imaging with fewer floating artifacts. We use MOG only as a qualitative capture, not for quantitative comparison @mog.
 
 = Ablation Experiments
 
-From analyzing the `trex` dataset, component effects are not independent: initialization, Gaussian parametrization, color representation, pruning, and rendering all interact through the same budget of Gaussians, parameters, and execution time. To compare effects across metrics with different units, we use Hedges' $g$, a standardized mean-difference coefficient. Since metrics have different improvement directions (higher is better for PSNR, SSIM, and FPS, but lower is better for LPIPS, memory, and Gaussian count) we report direction-corrected $g$ values, where positive indicates improvement and negative indicates degradation.
+We use this unified implementation to isolate the effect of each design choice. From analyzing the `trex` dataset, component effects are not independent: initialization, Gaussian parametrization, color representation, pruning, and rendering all interact through the same budget of Gaussians, parameters, and execution time. To compare effects across metrics with different units, we report relative changes and direction-corrected Hedges' $g$ values, where positive indicates improvement and negative indicates degradation. Since each ablation was run once, these values should be interpreted descriptively rather than as estimates of run-to-run statistical significance.
 
 == Visual Quality
 
@@ -267,15 +269,15 @@ Visual quality improves most from anisotropic Gaussians and SH(3) color, with th
 
 == Memory Usage
 
-Memory usage is mainly determined by color representation, pruning strategy, and Gaussian count. RGB is the most memory-efficient color model, reducing checkpoint size from $45.1$ to $4.8$ MB ($-89.3%$, $g=2.78$) and evaluation VRAM from $784.8$ to $631.9$ MB ($-19.5%$, $g=0.64$). However, this comes with a large quality loss, so RGB is best suited to compact deployment rather than high-fidelity reconstruction. SH(3) gives much better quality, but increases memory. Pruning is beneficial when it reduces active primitives during training: interleaved pruning and densification reduces evaluation VRAM from $752.8$ to $575.0$ MB ($-23.6%$, $g=0.75$) and gives the smallest mean checkpoint size among pruning schedules. No pruning is less compact than the interleaved schedule, but remains competitive only when speed is prioritized over memory.
+This quality gain, however, comes with a memory cost. Memory usage is mainly determined by color representation, pruning strategy, and Gaussian count. RGB is the most memory-efficient color model, reducing checkpoint size from $45.1$ to $4.8$ MB ($-89.3%$, $g=2.78$) and evaluation VRAM from $784.8$ to $631.9$ MB ($-19.5%$, $g=0.64$). However, this comes with a large quality loss, so RGB is best suited to compact deployment rather than high-fidelity reconstruction. SH(3) gives much better quality, but increases memory. Pruning is beneficial when it reduces active primitives during training: interleaved pruning and densification reduces evaluation VRAM from $752.8$ to $575.0$ MB ($-23.6%$, $g=0.75$) and gives the smallest mean checkpoint size among pruning schedules. No pruning is less compact than the interleaved schedule, but remains competitive only when speed is prioritized over memory.
 
 == Gaussian Count
 
-Gaussian count is highly scene-dependent, but it qualitatively measures how efficiently the Gaussians are used. Interleaved pruning and densification gives the lowest mean count among pruning schedules, lowering the average to $72.8$k Gaussians while also giving the lowest VRAM and checkpoint size. Anisotropic Gaussians also reduce the required primitives from $82.6$k to $70.8$k while improving quality, meaning they increase representational efficiency rather than merely adding complexity. SH(3) and no-dropout also reduce counts, likely because better appearance modeling and more stable optimization reduce densification pressure. In contrast, ESS increases the mean count from $71.2$k to $82.2$k, so its edge allocation must be balanced against compactness.
+The same trend is visible when looking at Gaussian count. Gaussian count is highly scene-dependent, but it qualitatively measures how efficiently the Gaussians are used. Interleaved pruning and densification gives the lowest mean count among pruning schedules, lowering the average to $72.8$k Gaussians while also giving the lowest VRAM and checkpoint size. Anisotropic Gaussians also reduce the required primitives from $82.6$k to $70.8$k while improving quality, meaning they increase representational efficiency rather than merely adding complexity. SH(3) and no-dropout also reduce counts, likely because better appearance modeling and more stable optimization reduce densification pressure. In contrast, ESS increases the mean count from $71.2$k to $82.2$k, so its edge allocation must be balanced against compactness.
 
 == Inference FPS
 
-Inference FPS benefits most from removing dropout and from reducing active primitive cost. No-dropout improves FPS from $493.7$ to $791.4$ ($+60.3%$, $g=0.69$), likely because it produces fewer Gaussians and a simpler final model. Final pruning gives the highest mean FPS among pruning schedules at $690.4$ FPS, while interleaved pruning reduces count and VRAM but reaches $621.7$ FPS on average. This suggests that throughput depends on primitive distribution, memory layout, and renderer implementation, not only the total number of Gaussians.
+Speed shows a slightly different pattern. Inference FPS benefits most from removing dropout and from reducing active primitive cost. No-dropout improves FPS from $493.7$ to $791.4$ ($+60.3%$, $g=0.69$), likely because it produces fewer Gaussians and a simpler final model. Final pruning gives the highest mean FPS among pruning schedules at $690.4$ FPS, while interleaved pruning reduces count and VRAM but reaches $621.7$ FPS on average. This suggests that throughput depends on primitive distribution, memory layout, and renderer implementation, not only the total number of Gaussians.
 
 == Training Time
 
@@ -283,47 +285,52 @@ Training time is most affected by dropout, pruning, and color representation. Re
 
 == Role of each Component
 
-Anisotropic Gaussians are one of the most beneficial components: they improve PSNR, SSIM, LPIPS, and reduce Gaussian count. Isotropic Gaussians use fewer variables per primitive but lose too much representational power. RGB reduces memory and checkpoint size but hurts quality, while SH(3) improves visual fidelity and reduces primitive count at the cost of higher VRAM and checkpoint size. Interleaved pruning best balances quality, count, memory, and VRAM; final pruning is strongest for FPS; early initialization pruning is not selected by the strongest quality-compact configurations. Dropout gives no clear benefit, and removing it improves time, FPS, count, and mean PSNR. Sort-free rendering was not tested as extensively as the other components because it substantially increased training duration, typically by around $2 times$--$3 times$ compared with the sorted renderer, while also giving worse overall performance. ESS and USPLAT likewise provided limited gains or excessive overhead in this setting.
+Taken together, these results suggest that no component should be evaluated in isolation. Anisotropic Gaussians are one of the most beneficial components: they improve PSNR, SSIM, LPIPS, and reduce Gaussian count. Isotropic Gaussians use fewer variables per primitive but lose too much representational power. RGB reduces memory and checkpoint size but hurts quality, while SH(3) improves visual fidelity and reduces primitive count at the cost of higher VRAM and checkpoint size. Interleaved pruning best balances quality, count, memory, and VRAM; final pruning is strongest for FPS; early initialization pruning is not selected by the strongest quality-compact configurations. Dropout gives no clear benefit, and removing it improves time, FPS, count, and mean PSNR. Sort-free rendering was not tested as extensively as the other components because it substantially increased training duration, typically by around $2 times$--$3 times$ compared with the sorted renderer, while also giving worse overall performance. ESS and USPLAT likewise provided limited gains or excessive overhead in this setting.
 
 == Choice of Model
 
-We did not identify a clear winner among the ablations, beyond individual tendencies: the best combination must be considered on a case-by-case basis. However, in our investigations the best quality-compact configuration improves visual quality over the reported 4DGS-Native @yang2024_4dgs and 4DGS-1K @yuan2025_4dgs1k baselines, while remaining more compact than 4DGS-Native but slower than 4DGS-1K: \ \
+We did not identify a clear winner among the ablations, beyond individual tendencies: the best combination must be considered on a case-by-case basis. However, in our experiments the best quality-compact configuration improves visual quality over the reported 4DGS-Native @yang2024_4dgs and 4DGS-1K @yuan2025_4dgs1k baselines, while remaining more compact than 4DGS-Native but slower than 4DGS-1K: \ \
 
+#block(breakable: false)[
+  #[*Anisotropic · SH(3) · sort · ESS · interleaved prune*]
 
-*Anisotropic · SH(3) · sort · ESS · interleaved prune*
+  #v(3pt)
 
-#table(
-  columns: (0.5fr, 0.75fr, 0.42fr, 0.42fr, 0.42fr, 0.35fr, 0.38fr, 0.42fr),
-  inset: 4.5pt,
-  align: (x, y) => if x > 1 { center } else { left },
-  stroke: (x, y) => if y > 0 { (top: 0.35pt + black) },
+  #table(
+    columns: (0.5fr, 0.75fr, 0.42fr, 0.42fr, 0.42fr, 0.35fr, 0.38fr, 0.42fr),
+    inset: 4.5pt,
+    align: (x, y) => if x > 1 { center } else { left },
+    stroke: (x, y) => if y > 0 { (top: 0.35pt + black) },
 
-  text(size: 0.8em)[],
-  text(size: 0.9em)[*Method*],
-  text(size: 0.8em)[*PSNR↑*],
-  text(size: 0.8em)[*SSIM↑*],
-  text(size: 0.8em)[*LPIPS↓*],
-  text(size: 0.8em)[*FPS↑*],
-  text(size: 0.8em)[*MB↓*],
-  text(size: 0.8em)[*Gauss↓*],
+    text(size: 0.8em)[],
+    text(size: 0.9em)[*Method*],
+    text(size: 0.8em)[*PSNR↑*],
+    text(size: 0.8em)[*SSIM↑*],
+    text(size: 0.8em)[*LPIPS↓*],
+    text(size: 0.8em)[*FPS↑*],
+    text(size: 0.8em)[*MB↓*],
+    text(size: 0.8em)[*Gauss↓*],
 
-  table.vline(x: 2, stroke: black + 1pt),
+    table.vline(x: 2, stroke: black + 1pt),
 
-  [BBalls], [4DGS], [33.35], [0.982], [0.025], [462], [84], [134k],
-  [], [4DGS-1K], [33.45], [0.983], [0.025], [1509], [13], [20k],
-  [], [*Ours*], [*34.42*], [*0.985*], [*0.016*], [460], [18], [29k],
-  
-  table.hline(stroke: black + 1pt),
-  
-  [TRex], [4DGS], [29.85], [0.980], [0.019], [202], [792], [1265k],
-  [], [4DGS-1K], [30.47], [0.981], [0.018], [1361], [118], [189k],
-  [], [*Ours*], [*31.89*], [*0.984*], [*0.016*], [386], [50], [*81k*],
-)
+    [BBalls], [4DGS], [33.35], [0.982], [0.025], [462], [84], [134k],
+    [], [4DGS-1K], [33.45], [0.983], [0.025], [1509], [13], [20k],
+    [], [*Ours*], [*34.42*], [*0.985*], [*0.016*], [460], [18], [29k],
+
+    table.hline(stroke: black + 1pt),
+
+    [TRex], [4DGS], [29.85], [0.980], [0.019], [202], [792], [1265k],
+    [], [4DGS-1K], [30.47], [0.981], [0.018], [1361], [118], [189k],
+    [], [*Ours*], [*31.89*], [*0.984*], [*0.016*], [386], [50], [*81k*],
+  )
+]
 
 == Discussion and Limitations
 
-4DGS design is a coupled resource tradeoff: each component affects Gaussian count, per-primitive parameters, memory bandwidth, CUDA time, and stability. Anisotropic covariance improves PSNR, SSIM, and LPIPS despite higher per-Gaussian cost by reducing required primitives. SH(3) similarly increases appearance capacity and lowers densification pressure, while RGB is insufficient for high fidelity. Pruning must follow the target deployment constraint: interleaved pruning balances quality, serialized compactness, and VRAM, while final pruning aids FPS. Best quality-compact results use anisotropy, SH(3), sort rendering, ESS, interleaved pruning, and no dropout. Limitations include narrow datasets, noisy MOG capture, approximate USPLAT comparison, baselines taken from papers, hardware-dependent FPS, CUDA adaptations, and weak initialization causing floating Gaussians.
+These results highlight the central theme of our study: 4DGS performance is governed by coupled tradeoffs rather than independent improvements. 4DGS design is a coupled resource tradeoff: each component affects Gaussian count, per-primitive parameters, memory bandwidth, CUDA time, and stability. Anisotropic covariance improves PSNR, SSIM, and LPIPS despite higher per-Gaussian cost by reducing required primitives. SH(3) similarly increases appearance capacity and lowers densification pressure, while RGB is insufficient for high fidelity. Pruning must follow the target deployment constraint: interleaved pruning balances quality, serialized compactness, and VRAM, while final pruning aids FPS. Best quality-compact results use anisotropy, SH(3), sort rendering, ESS, interleaved pruning, and no dropout. Limitations include narrow datasets, noisy MOG capture, approximate USPLAT comparison, baselines taken from papers, hardware-dependent FPS, CUDA adaptations, and weak initialization causing floating Gaussians.
 
 = Conclusion
 
-We have presented *OMNI-4DGS*, a unified framework for fast, compact dynamic reconstruction built on Native 4D Gaussian Splatting, combining architectural choices from recent work into a single ablation study. Efficient 4DGS requires increasing expressiveness per Gaussian while controlling primitive growth: anisotropic covariance and SH(3) improve reconstruction quality, interleaved pruning and densification reduce Gaussian count, serialized model size, and VRAM, and a final one-shot prune further improves FPS at deployment. Dropout and the adapted sort-free renderer were not consistently beneficial across scenes. The *anisotropic · SH(3) · sort · ESS · interleaved prune* configuration achieved the best tested quality-compactness tradeoff on both `trex` and `bouncingballs`.
+We presented *OMNI-4DGS*, a unified framework for fast, compact dynamic reconstruction built on Native 4D Gaussian Splatting, combining architectural choices from recent work into a single ablation study. Efficient 4DGS requires increasing expressiveness per Gaussian while controlling primitive growth: anisotropic covariance and SH(3) improve reconstruction quality, interleaved pruning and densification reduce Gaussian count, serialized model size, and VRAM, and a final one-shot prune further improves FPS at deployment. Dropout and the adapted sort-free renderer were not consistently beneficial across scenes. The *anisotropic · SH(3) · sort · ESS · interleaved prune* configuration achieved the best tested quality-compactness tradeoff on both `trex` and `bouncingballs`.
+
+#colbreak()
