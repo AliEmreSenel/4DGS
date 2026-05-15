@@ -27,6 +27,7 @@ Important runtime behavior:
 import argparse
 import ast
 import csv
+import concurrent.futures
 import fcntl
 import hashlib
 import itertools
@@ -155,6 +156,11 @@ class AblationVariant:
 
 @dataclass
 class ScheduleOptions:
+    early_init_prune_step: int = 500
+    early_init_prune_ratio: float = 0.85
+    final_prune_fraction: float = 0.85
+    final_prune_ratio: float = 0.80
+
     one_shot_prune_step: int = 5001
     one_shot_prune_ratio: float = 0.50
     one_shot_densify_from_iter: int = 500
@@ -169,6 +175,8 @@ class ScheduleOptions:
     interleaved_densify_from_iter: int = 500
     interleaved_densify_until_iter: int = 7500
     interleaved_densification_interval: int = 100
+    schedule_reference_iters: int = 15000
+    scale_schedule_intervals: bool = True
 
 
 @dataclass(frozen=True)
@@ -300,18 +308,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--axes",
-        default="isotropy,appearance",
+        default="isotropy,appearance,pruning",
         help=(
             "Comma-separated ablation axes used only when --matrix-preset=cartesian "
             "or when axis flags are explicitly supplied without --matrix-preset. "
-            "Include ess to vary DropoutGS edge-guided splitting separately from RDR dropout."
+            "The default Cartesian matrix includes pruning; include ess to vary "
+            "DropoutGS edge-guided splitting separately from RDR dropout."
         ),
     )
     parser.add_argument("--isotropy-options", default="anisotropic,isotropic")
     parser.add_argument("--appearance-options", default="rgb,sh3")
     parser.add_argument("--sorting-options", default="sort")
     parser.add_argument(
-        "--pruning-options", default="no_pruning,interleaved_prune_densify"
+        "--pruning-options",
+        default="no_pruning,early_init_pruning,final_pruning,interleaved_prune_densify",
+        help=(
+            "Comma-separated pruning options for the pruning axis. Defaults to "
+            "no pruning, early init pruning at step 500 with 85%% removal, "
+            "final pruning at 85%% of training with 80%% removal, and interleaved densify/prune."
+        ),
     )
     parser.add_argument("--usplat-options", default="no_usplat")
     parser.add_argument("--dropout-options", default="no_dropout,dropout")
@@ -320,11 +335,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout-lambda-rdr", type=float, default=1.0, help="RDR consistency-loss weight for the enabled dropout ablation option.")
     parser.add_argument("--include-invalid-combinations", action="store_true", help="Do not filter known incompatible ablation combinations.")
 
+    parser.add_argument("--early-init-prune-step", type=int, default=500)
+    parser.add_argument("--early-init-prune-ratio", type=float, default=0.85)
+    parser.add_argument(
+        "--final-prune-fraction",
+        type=float,
+        default=0.85,
+        help="Training fraction for the final_pruning option. Default prunes at 85%% of max iterations.",
+    )
+    parser.add_argument("--final-prune-ratio", type=float, default=0.80)
+
     parser.add_argument("--one-shot-prune-step", type=int, default=5001)
     parser.add_argument("--one-shot-prune-ratio", type=float, default=0.50)
     parser.add_argument("--one-shot-densify-from-iter", type=int, default=500)
     parser.add_argument("--one-shot-densify-until-iter", type=int, default=5000)
     parser.add_argument("--one-shot-densification-interval", type=int, default=100)
+
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=30000,
+        help=(
+            "Target iteration count for every generated ablation config. "
+            "When set, iteration-based schedules are scaled from each input config's "
+            "current iteration count to this value. Defaults to the standard 30k "
+            "ablation run length; use --max-iters 0 to respect each config unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-reference-iters",
+        type=int,
+        default=15000,
+        help=(
+            "Reference iteration count for schedule CLI defaults such as "
+            "--interleaved-prune-until-iter. Defaults to 15k because the bundled "
+            "ablation schedules use 7.5k as the half-training pruning/densify end."
+        ),
+    )
+    parser.add_argument(
+        "--scale-schedule-intervals",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Scale interval-style schedule values when --max-iters or pruning presets are scaled.",
+    )
 
     parser.add_argument("--interleaved-prune-from-iter", type=int, default=2000)
     parser.add_argument("--interleaved-prune-until-iter", type=int, default=7500)
@@ -490,7 +543,7 @@ def parse_args() -> argparse.Namespace:
         "--slurm-tasks",
         type=int,
         default=4,
-        help="Number of worker tasks. Keep equal to --slurm-gpus for one training run per GPU.",
+        help="Number of worker tasks. Keep equal to --slurm-gpus for one GPU worker per GPU; use --ablations-per-gpu for concurrent runs on each GPU.",
     )
     parser.add_argument(
         "--slurm-total-cpus",
@@ -525,6 +578,18 @@ def parse_args() -> argparse.Namespace:
         "--slurm-worker-gres",
         default="",
         help="Exact srun worker GRES string. Empty defaults to gpu:1 for one run per GPU.",
+    )
+    parser.add_argument(
+        "--ablations-per-gpu",
+        "--runs-per-gpu",
+        dest="ablations_per_gpu",
+        type=int,
+        default=3,
+        help=(
+            "Number of ablation runs to launch concurrently inside each GPU worker. "
+            "Defaults to 3 to better fill large GPUs; --laptop-8gb lowers this to 1 "
+            "unless explicitly overridden."
+        ),
     )
     parser.add_argument("--slurm-job-name", default="4dgs-ablations")
     parser.add_argument("--slurm-log-dir", default=None)
@@ -623,6 +688,21 @@ def parse_args() -> argparse.Namespace:
         args.matrix_preset = "cartesian" if matrix_flag_supplied else "paper"
     if args.laptop_8gb:
         apply_laptop_8gb_defaults(args, matrix_flag_supplied)
+    if not _cli_option_supplied("--max-iters"):
+        for item in args.global_overrides:
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            if key.strip() == "iterations":
+                try:
+                    args.max_iters = int(parse_scalar(value.strip()))
+                except Exception:
+                    pass
+                break
+    if args.max_iters is not None and int(args.max_iters) <= 0:
+        args.max_iters = None
+    args.ablations_per_gpu = max(1, int(args.ablations_per_gpu or 1))
+    args.schedule_reference_iters = max(1, int(args.schedule_reference_iters or 1))
     return args
 
 
@@ -659,6 +739,10 @@ def apply_laptop_8gb_defaults(
         args.matrix_preset = "essential"
     if not _cli_option_supplied("--vram-poll-interval"):
         args.vram_poll_interval = 0.5
+    if not _cli_option_supplied("--max-iters"):
+        args.max_iters = 10000
+    if not _cli_option_supplied("--ablations-per-gpu", "--runs-per-gpu"):
+        args.ablations_per_gpu = 1
 
     # Keep laptop mode useful for real ablation evidence: do not disable metrics,
     # Mobile-GS compression, visibility masks, or quality/FPS benchmarks.  Only
@@ -784,60 +868,130 @@ def build_pruning_registry(
     if total_iterations <= 0:
         raise ValueError(f"iterations must be positive, got {total_iterations}")
 
-    one_shot_prune_step = min(
-        max(int(options.one_shot_prune_step), 1), total_iterations
+    one_shot_prune_step = _scale_schedule_option(
+        options.one_shot_prune_step, total_iterations, options, minimum=1
     )
-    one_shot_densify_from_iter = min(
-        max(int(options.one_shot_densify_from_iter), 0), total_iterations
+    one_shot_densify_from_iter = _scale_schedule_option(
+        options.one_shot_densify_from_iter, total_iterations, options, minimum=0
     )
-    one_shot_densify_until_iter = min(
-        max(int(options.one_shot_densify_until_iter), one_shot_densify_from_iter),
+    one_shot_densify_until_iter = max(
+        one_shot_densify_from_iter,
+        _scale_schedule_option(
+            options.one_shot_densify_until_iter, total_iterations, options, minimum=0
+        ),
+    )
+    one_shot_densification_interval = _scale_schedule_option(
+        options.one_shot_densification_interval,
         total_iterations,
+        options,
+        minimum=1,
+        is_interval=True,
+        clamp_to_target=False,
     )
 
-    interleaved_prune_from_iter = min(
-        max(int(options.interleaved_prune_from_iter), 1), total_iterations
+    interleaved_prune_from_iter = _scale_schedule_option(
+        options.interleaved_prune_from_iter, total_iterations, options, minimum=1
     )
-    interleaved_prune_until_iter = min(
-        max(int(options.interleaved_prune_until_iter), interleaved_prune_from_iter),
+    interleaved_prune_until_iter = max(
+        interleaved_prune_from_iter,
+        _scale_schedule_option(
+            options.interleaved_prune_until_iter, total_iterations, options, minimum=1
+        ),
+    )
+    interleaved_prune_interval = _scale_schedule_option(
+        options.interleaved_prune_interval,
         total_iterations,
+        options,
+        minimum=1,
+        is_interval=True,
+        clamp_to_target=False,
     )
-    interleaved_densify_from_iter = min(
-        max(int(options.interleaved_densify_from_iter), 0), total_iterations
+    interleaved_densify_from_iter = _scale_schedule_option(
+        options.interleaved_densify_from_iter, total_iterations, options, minimum=0
     )
-    interleaved_densify_until_iter = min(
-        max(int(options.interleaved_densify_until_iter), interleaved_densify_from_iter),
+    interleaved_densify_until_iter = max(
+        interleaved_densify_from_iter,
+        _scale_schedule_option(
+            options.interleaved_densify_until_iter, total_iterations, options, minimum=0
+        ),
+    )
+    interleaved_densification_interval = _scale_schedule_option(
+        options.interleaved_densification_interval,
         total_iterations,
+        options,
+        minimum=1,
+        is_interval=True,
+        clamp_to_target=False,
     )
+
+    early_init_prune_step = min(
+        max(1, int(options.early_init_prune_step)), max(1, total_iterations - 1)
+    )
+    early_init_prune_ratio = max(0.0, min(float(options.early_init_prune_ratio), 1.0))
+    final_prune_fraction = max(0.0, min(float(options.final_prune_fraction), 1.0))
+    final_prune_step = _clamped_schedule_iter(
+        total_iterations,
+        final_prune_fraction,
+        int(round(total_iterations * 0.85)),
+        minimum=1,
+    )
+    final_prune_ratio = max(0.0, min(float(options.final_prune_ratio), 1.0))
+
+    pruning_disabled = {
+        "enable_spatio_temporal_pruning": False,
+        "spatio_temporal_pruning_ratio": 0.0,
+        "spatio_temporal_pruning_from_iter": -1,
+        "spatio_temporal_pruning_until_iter": -1,
+        "spatio_temporal_pruning_interval": -1,
+        "spatio_temporal_pruning_min_points": 1,
+        "spatio_temporal_pruning_max_total_ratio": 1.0,
+        "spatio_temporal_pruning_random": False,
+        "final_prune_from_iter": -1,
+        "final_prune_ratio": 0.0,
+    }
+    early_init_pruning = {
+        **pruning_disabled,
+        "final_prune_from_iter": early_init_prune_step,
+        "final_prune_ratio": early_init_prune_ratio,
+    }
+    final_pruning = {
+        **pruning_disabled,
+        "final_prune_from_iter": final_prune_step,
+        "final_prune_ratio": final_prune_ratio,
+    }
+    densify_then_prune_once = {
+        **pruning_disabled,
+        "densify_from_iter": one_shot_densify_from_iter,
+        "densify_until_iter": one_shot_densify_until_iter,
+        "densification_interval": one_shot_densification_interval,
+        "final_prune_from_iter": one_shot_prune_step,
+        "final_prune_ratio": options.one_shot_prune_ratio,
+    }
+    interleaved_prune_densify = {
+        "enable_spatio_temporal_pruning": True,
+        "spatio_temporal_pruning_ratio": options.interleaved_prune_ratio,
+        "spatio_temporal_pruning_from_iter": interleaved_prune_from_iter,
+        "spatio_temporal_pruning_until_iter": interleaved_prune_until_iter,
+        "spatio_temporal_pruning_interval": interleaved_prune_interval,
+        "spatio_temporal_pruning_min_points": options.interleaved_prune_min_points,
+        "spatio_temporal_pruning_max_total_ratio": 1.0,
+        "spatio_temporal_pruning_random": False,
+        "densify_from_iter": interleaved_densify_from_iter,
+        "densify_until_iter": interleaved_densify_until_iter,
+        "densification_interval": interleaved_densification_interval,
+        "final_prune_from_iter": -1,
+        "final_prune_ratio": 0.0,
+    }
 
     return {
-        "no_pruning": {
-            "enable_spatio_temporal_pruning": False,
-            "final_prune_from_iter": -1,
-            "final_prune_ratio": 0.0,
-        },
-        "densify_then_prune_once": {
-            "enable_spatio_temporal_pruning": False,
-            "densify_from_iter": one_shot_densify_from_iter,
-            "densify_until_iter": one_shot_densify_until_iter,
-            "densification_interval": options.one_shot_densification_interval,
-            "final_prune_from_iter": one_shot_prune_step,
-            "final_prune_ratio": options.one_shot_prune_ratio,
-        },
-        "interleaved_prune_densify": {
-            "enable_spatio_temporal_pruning": True,
-            "spatio_temporal_pruning_ratio": options.interleaved_prune_ratio,
-            "spatio_temporal_pruning_from_iter": interleaved_prune_from_iter,
-            "spatio_temporal_pruning_until_iter": interleaved_prune_until_iter,
-            "spatio_temporal_pruning_interval": options.interleaved_prune_interval,
-            "spatio_temporal_pruning_min_points": options.interleaved_prune_min_points,
-            "spatio_temporal_pruning_max_total_ratio": 1.0,
-            "densify_from_iter": interleaved_densify_from_iter,
-            "densify_until_iter": interleaved_densify_until_iter,
-            "densification_interval": options.interleaved_densification_interval,
-            "final_prune_from_iter": -1,
-            "final_prune_ratio": 0.0,
-        },
+        "no_pruning": pruning_disabled,
+        "early_init_pruning": early_init_pruning,
+        "early_init_prune": early_init_pruning,
+        "final_pruning": final_pruning,
+        "final_prune": final_pruning,
+        "densify_then_prune_once": densify_then_prune_once,
+        "interleaved_prune_densify": interleaved_prune_densify,
+        "interleaved_densify_prune": interleaved_prune_densify,
     }
 
 
@@ -867,6 +1021,119 @@ def _clamped_schedule_iter(
     proposed = int(round(float(total_iterations) * float(fraction)))
     proposed = max(minimum, proposed)
     return min(proposed, total_iterations - 1)
+
+
+SCALED_SCHEDULE_ITER_KEYS = {
+    "position_lr_max_steps",
+    "densify_from_iter",
+    "densify_until_iter",
+    "opacity_reset_interval",
+    "final_prune_from_iter",
+    "sh_increase_interval",
+    "ess_from_iter",
+    "ess_until_iter",
+    "ess_interval",
+    "spatio_temporal_pruning_from_iter",
+    "spatio_temporal_pruning_until_iter",
+    "spatio_temporal_pruning_interval",
+    "usplat_start_iter",
+}
+
+
+def _scale_iteration_value(
+    value: Any,
+    source_iterations: int,
+    target_iterations: int,
+    *,
+    minimum: int = 1,
+    clamp_to_target: bool = True,
+    keep_disabled: bool = True,
+) -> int:
+    """Scale one iteration-like value while preserving disabled sentinels."""
+    value_int = int(value)
+    if keep_disabled and value_int < 0:
+        return value_int
+    if source_iterations <= 0 or target_iterations <= 0:
+        return value_int
+    if value_int == 0 and minimum == 0:
+        scaled = 0
+    else:
+        scaled = int(round(float(value_int) * float(target_iterations) / float(source_iterations)))
+        scaled = max(minimum, scaled)
+    if clamp_to_target:
+        scaled = min(scaled, target_iterations)
+    return scaled
+
+
+def _scale_schedule_option(
+    value: int,
+    total_iterations: int,
+    options: ScheduleOptions,
+    *,
+    minimum: int = 1,
+    is_interval: bool = False,
+    clamp_to_target: bool = True,
+) -> int:
+    reference = max(1, int(options.schedule_reference_iters or total_iterations or 1))
+    if is_interval and not bool(options.scale_schedule_intervals):
+        return max(minimum, int(value))
+    return _scale_iteration_value(
+        value,
+        reference,
+        total_iterations,
+        minimum=minimum,
+        clamp_to_target=clamp_to_target,
+        keep_disabled=True,
+    )
+
+
+def build_max_iter_schedule_overrides(
+    flat_cfg: Mapping[str, Any],
+    target_iterations: int | None,
+    *,
+    scale_intervals: bool = True,
+) -> Dict[str, Any]:
+    """Return flat overrides that retarget a config to target_iterations.
+
+    The bundled ablation YAMLs currently mix 15k, 20k, and 30k runs.  This
+    helper preserves each config's relative schedule positions while retargeting
+    the generated run to a common max iteration count.
+    """
+    if target_iterations is None:
+        return {}
+    target = int(target_iterations)
+    if target <= 0:
+        return {}
+    source = int(flat_cfg.get("iterations", target) or target)
+    source = max(1, source)
+    overrides: Dict[str, Any] = {"iterations": target}
+
+    for key in sorted(SCALED_SCHEDULE_ITER_KEYS):
+        if key not in flat_cfg:
+            continue
+        if key.endswith("interval") and not scale_intervals:
+            continue
+        value = flat_cfg[key]
+        try:
+            overrides[key] = _scale_iteration_value(
+                value,
+                source,
+                target,
+                minimum=0 if key.endswith("from_iter") else 1,
+                clamp_to_target=True,
+                keep_disabled=True,
+            )
+        except Exception:
+            pass
+
+    # Keep evaluation/checkpoint endpoints aligned with the actual final
+    # iteration.  train.py appends args.iterations to save_iterations, but adding
+    # both here makes dry-run/generated YAML inspection unambiguous.
+    overrides["test_iterations"] = [target]
+    overrides["save_iterations"] = [target]
+    if "position_lr_max_steps" not in overrides:
+        overrides["position_lr_max_steps"] = target
+    return overrides
 
 
 def _with_clean_method_defaults(overrides: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1744,11 +2011,19 @@ def build_run_specs(
         cfg = load_yaml(config_path)
         flat_cfg = flatten_cfg(cfg)
         # Matrix schedules must be derived from the effective base config after
-        # global overrides such as --laptop-8gb or --set iterations=... are
-        # applied. Otherwise ESS/USplat/pruning schedules can be generated past
-        # the final training iteration.
-        effective_base_cfg = normalize_generated_config_types(
+        # global overrides and optional --max-iters retargeting are applied.
+        # Otherwise ESS/USplat/pruning schedules can be generated past the final
+        # training iteration or remain stuck at the 7.5k/15k bundled defaults.
+        base_with_global_overrides = normalize_generated_config_types(
             apply_flat_overrides(cfg, global_overrides)
+        )
+        max_iter_overrides = build_max_iter_schedule_overrides(
+            flatten_cfg(base_with_global_overrides),
+            args.max_iters,
+            scale_intervals=bool(args.scale_schedule_intervals),
+        )
+        effective_base_cfg = normalize_generated_config_types(
+            apply_flat_overrides(base_with_global_overrides, max_iter_overrides)
         )
         effective_flat_cfg = flatten_cfg(effective_base_cfg)
         if str(args.matrix_preset).lower() == "cartesian":
@@ -1784,7 +2059,8 @@ def build_run_specs(
 
         for index, variant in enumerate(variants):
             model_path = build_model_path(output_root, scene_name, variant)
-            run_overrides = dict(variant.overrides)
+            run_overrides = dict(max_iter_overrides)
+            run_overrides.update(variant.overrides)
             run_overrides.update(global_overrides)
             apply_dependent_overrides(run_overrides, global_overrides, flat_cfg, args)
             run_overrides["model_path"] = str(model_path)
@@ -3178,6 +3454,7 @@ def print_slurm_capacity_plan(
     nodes = slurm_node_count(args)
     tasks = max(1, int(args.slurm_tasks))
     gpus = max(1, int(args.slurm_gpus))
+    runs_per_gpu = max(1, int(getattr(args, "ablations_per_gpu", 1) or 1))
     print("[SLURM PLAN]")
     print(
         f"  partition={args.slurm_partition} qos={args.slurm_qos} account={args.slurm_account or '<none>'}"
@@ -3188,7 +3465,9 @@ def print_slurm_capacity_plan(
     print(
         f"  cpus_per_task={slurm_cpus_per_task(args)} mem_per_node={args.slurm_mem} mem_per_worker={slurm_mem_per_worker(args, tasks)} time={args.slurm_time}"
     )
-    print(f"  max_parallel_training_runs={min(gpus, tasks)}")
+    print(
+        f"  ablations_per_gpu={runs_per_gpu} max_parallel_training_runs={min(gpus, tasks) * runs_per_gpu}"
+    )
     print(f"  generated_run_specs={len(run_specs)}")
     print(
         f"  worker_gres={slurm_worker_gres(args)} sbatch_gres={slurm_gres_per_node(args)}"
@@ -3566,6 +3845,41 @@ def dump_assignments(
     return paths
 
 
+def _run_payload_item(
+    item: Mapping[str, Any],
+    args: argparse.Namespace,
+    repo_root: Path,
+    worker_label: str,
+) -> Dict[str, Any]:
+    run_spec = RunSpec(**item["run_spec"])
+    pending = PendingRun(
+        run_spec=run_spec,
+        action=item["action"],
+        estimated_cost=float(item.get("estimated_cost", 0.0)),
+    )
+    try:
+        row = run_one_pending(pending, args, repo_root)
+        print(
+            f"[{worker_label}] Finished {run_spec.variant_name} status={row.get('status')}"
+        )
+        return row
+    except Exception as exc:
+        fallback = {
+            "status": "failed",
+            "scene_name": run_spec.scene_name,
+            "variant_name": run_spec.variant_name,
+            "generated_config_path": run_spec.generated_config_path,
+            "model_path": run_spec.model_path,
+            "action": pending.action,
+            "returncode": -1,
+            "error": str(exc),
+        }
+        metrics_json_path = write_run_metrics_json(Path(run_spec.model_path), fallback)
+        print(f"[{worker_label}] Exception in {run_spec.variant_name}: {exc}")
+        print(f"[{worker_label}] Wrote failure record to {metrics_json_path}")
+        return fallback
+
+
 def run_worker_from_assignment(args: argparse.Namespace, repo_root: Path) -> int:
     if not args.assignment_file:
         raise ValueError("--assignment-file is required in --slurm-worker mode")
@@ -3576,38 +3890,31 @@ def run_worker_from_assignment(args: argparse.Namespace, repo_root: Path) -> int
         f"[WORKER {worker_index}] Loaded {len(runs_payload)} runs from {args.assignment_file}"
     )
 
-    for item in runs_payload:
-        run_spec = RunSpec(**item["run_spec"])
-        pending = PendingRun(
-            run_spec=run_spec,
-            action=item["action"],
-            estimated_cost=float(item.get("estimated_cost", 0.0)),
+    concurrency = min(
+        max(1, int(getattr(args, "ablations_per_gpu", 1) or 1)),
+        max(1, len(runs_payload)),
+    )
+    if concurrency > 1:
+        print(
+            f"[WORKER {worker_index}] Running up to {concurrency} ablations concurrently on this GPU"
         )
-        try:
-            row = run_one_pending(pending, args, repo_root)
-            print(
-                f"[WORKER {worker_index}] Finished {run_spec.variant_name} status={row.get('status')}"
-            )
-        except Exception as exc:
-            fallback = {
-                "status": "failed",
-                "scene_name": run_spec.scene_name,
-                "variant_name": run_spec.variant_name,
-                "generated_config_path": run_spec.generated_config_path,
-                "model_path": run_spec.model_path,
-                "action": pending.action,
-                "returncode": -1,
-                "error": str(exc),
-            }
-            metrics_json_path = write_run_metrics_json(
-                Path(run_spec.model_path), fallback
-            )
-            print(
-                f"[WORKER {worker_index}] Exception in {run_spec.variant_name}: {exc}"
-            )
-            print(
-                f"[WORKER {worker_index}] Wrote failure record to {metrics_json_path}"
-            )
+    if concurrency == 1:
+        for item in runs_payload:
+            _run_payload_item(item, args, repo_root, f"WORKER {worker_index}")
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [
+                executor.submit(
+                    _run_payload_item,
+                    item,
+                    args,
+                    repo_root,
+                    f"WORKER {worker_index}",
+                )
+                for item in runs_payload
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
     return 0
 
 
@@ -3694,6 +4001,8 @@ def run_slurm_driver(
                     str(args.render_fps_warmup),
                     "--vram-poll-interval",
                     str(args.vram_poll_interval),
+                    "--ablations-per-gpu",
+                    str(max(1, int(getattr(args, "ablations_per_gpu", 1) or 1))),
                     *checkpoint_metrics_cli_args(args),
                     "--runner",
                     effective_runner(args),
@@ -3733,6 +4042,44 @@ def local_serial_driver(
     repo_root = repo_root_from_args(args)
     total = len(run_specs)
     already_done = max(0, total - len(pending_runs))
+    concurrency = min(
+        max(1, int(getattr(args, "ablations_per_gpu", 1) or 1)),
+        max(1, len(pending_runs)),
+    )
+    if concurrency > 1:
+        print(
+            f"[LOCAL] Running up to {concurrency} ablations concurrently on the visible GPU(s)."
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_pending: Dict[concurrent.futures.Future[Dict[str, Any]], PendingRun] = {}
+            for offset, pending in enumerate(pending_runs, start=1):
+                run_spec = pending.run_spec
+                current = already_done + offset
+                print(
+                    f"[TOTAL PROGRESS] {current}/{total} "
+                    f"pending={len(pending_runs) - offset + 1} "
+                    f"variant={run_spec.variant_name} action={pending.action}"
+                )
+                payload = {
+                    "run_spec": asdict(run_spec),
+                    "action": pending.action,
+                    "estimated_cost": pending.estimated_cost,
+                }
+                future_to_pending[
+                    executor.submit(_run_payload_item, payload, args, repo_root, "LOCAL")
+                ] = pending
+            for future in concurrent.futures.as_completed(future_to_pending):
+                run_spec = future_to_pending[future].run_spec
+                try:
+                    row = future.result()
+                    print(
+                        f"[TOTAL PROGRESS] finished={run_spec.variant_name} status={row.get('status')}"
+                    )
+                except Exception as exc:
+                    print(f"[LOCAL] Unhandled exception in {run_spec.variant_name}: {exc}")
+        gather_and_write_summaries(args, run_specs, existing_rows)
+        return 0
+
     for offset, pending in enumerate(pending_runs, start=1):
         run_spec = pending.run_spec
         current = already_done + offset
@@ -3895,6 +4242,10 @@ def main(args: argparse.Namespace) -> int:
         return run_worker_from_assignment(args, repo_root_from_args(args))
 
     schedule_options = ScheduleOptions(
+        early_init_prune_step=args.early_init_prune_step,
+        early_init_prune_ratio=args.early_init_prune_ratio,
+        final_prune_fraction=args.final_prune_fraction,
+        final_prune_ratio=args.final_prune_ratio,
         one_shot_prune_step=args.one_shot_prune_step,
         one_shot_prune_ratio=args.one_shot_prune_ratio,
         one_shot_densify_from_iter=args.one_shot_densify_from_iter,
@@ -3908,6 +4259,8 @@ def main(args: argparse.Namespace) -> int:
         interleaved_densify_from_iter=args.interleaved_densify_from_iter,
         interleaved_densify_until_iter=args.interleaved_densify_until_iter,
         interleaved_densification_interval=args.interleaved_densification_interval,
+        schedule_reference_iters=args.schedule_reference_iters,
+        scale_schedule_intervals=args.scale_schedule_intervals,
     )
 
     run_specs = build_run_specs(args, schedule_options)
