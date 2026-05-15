@@ -4,7 +4,7 @@ The following are instructions for running the scripts.
 
 Run all commands from the repository root so that relative paths, configuration files, and project-local modules resolve correctly.
 
-This repository uses `uv` because it provides fast, reproducible Pythonenvironment management with a lockfile-based workflow. Compared with ad-hoc `pip` or manually managed virtual environments, `uv` makes it easier to install the same dependency set across machines and avoid accidentally running scripts with the wrong Python environment.
+This repository uses `uv` because it provides fast, reproducible Python environment management with a lockfile-based workflow. Compared with ad-hoc `pip` or manually managed virtual environments, `uv` makes it easier to install the same dependency set across machines and avoid accidentally running scripts with the wrong Python environment.
 
 Install and synchronize the project dependencies with: `uv sync`. This creates or updates the local `uv` environment using the dependency versions defined by the repository.
 
@@ -200,12 +200,47 @@ Controls:
 
 ## Ablation sweeps
 
-Use `batch_train.py` for reproducible experiment matrices. It generates per-variant configs, launches training, records metrics, and can optionally submit a Slurm job.
+Use `batch_train.py` for reproducible experiment matrices. It generates per-variant YAML configs, launches training, records final metrics, evaluates checkpoint histories, optionally exports Mobile-GS payloads, and can run either locally or through one Slurm allocation with worker tasks.
+
+Run from the repository root so generated configs, dataset paths, and local imports resolve correctly. CUDA is required for training, metrics, rendering, and Mobile-GS benchmarking.
+
+Check the environment before launching a sweep:
+
+```bash
+uv run python batch_train.py --preflight
+```
+
+For a Slurm run, include the Slurm flags in the preflight command so it also checks `sbatch`/`srun` availability and prints the capacity plan:
+
+```bash
+uv run python batch_train.py \
+  --preflight \
+  --submit-slurm \
+  --slurm-partition gpuh200 \
+  --slurm-gpus 4 \
+  --slurm-tasks 4
+```
 
 Always inspect generated commands first:
 
 ```bash
 uv run python batch_train.py configs/dnerf_ablation/*.yaml --dry-run
+```
+
+Write generated YAML configs without training:
+
+```bash
+uv run python batch_train.py configs/dnerf_ablation/*.yaml \
+  --write-configs-only \
+  --output-root output/ablations
+```
+
+Print only the generated output directories:
+
+```bash
+uv run python batch_train.py configs/dnerf_ablation/*.yaml \
+  --print-only-paths \
+  --output-root output/ablations
 ```
 
 Run the default curated paper-style matrix locally:
@@ -224,32 +259,100 @@ uv run python batch_train.py configs/dnerf_ablation/*.yaml \
   --slurm-partition gpuh200 \
   --slurm-gpus 4 \
   --slurm-tasks 4 \
+  --slurm-total-cpus 8 \
+  --slurm-mem 160G \
   --output-root output/ablations
 ```
 
-Recommended matrix presets:
+By default, `--runner auto` prefers `uv run python` when `uv` is available and falls back to the current Python interpreter. Use `--runner python` for a direct Python launch, or `--runner uv --uv-binary /path/to/uv` to force a specific `uv`.
 
-| Preset      | Meaning                                                                  |
-| ----------- | ------------------------------------------------------------------------ |
-| `paper`     | Curated method-style matrix. Default when no explicit axes are supplied. |
-| `essential` | Broader on/off coverage of implemented method families.                  |
-| `compact`   | Smaller curated sweep.                                                   |
-| `full`      | Larger curated sweep with extra controls/hybrids.                        |
-| `cartesian` | Explicit product of `--axes` and the matching `--*-options`.             |
+### Matrix presets
+
+If no explicit axis flags are supplied, the default preset is `paper`. If any `--axes` or `--*-options` flag is supplied without `--matrix-preset`, the script switches to `cartesian`.
+
+| Preset      | Meaning |
+| ----------- | ------- |
+| `paper`     | Curated method-style matrix: native 4DGS, 4DGS-1K-style pruning, DropoutGS RDR, ESS, RDR+ESS, USplat, Instant4D-lite, Mobile-GS sort-free, and selected hybrids. |
+| `essential` | Exhaustive on/off combinations of implemented method families for a single scene. This can be much larger than a smoke test. |
+| `compact`   | Smaller curated subset of key paper-style rows. |
+| `full`      | Paper rows plus extra controls and hybrids. |
+| `cartesian` | Explicit product of `--axes` and the matching `--*-options`. |
 
 Supported Cartesian axes:
 
-| Axis         | Example options                                                      |
-| ------------ | -------------------------------------------------------------------- |
-| `isotropy`   | `anisotropic`, `isotropic`                                           |
-| `appearance` | `rgb`, `sh1`, `sh3`, `sh3_3d`                                        |
-| `sorting`    | `sort`, `sort_free`                                                  |
-| `pruning`    | `no_pruning`, `densify_then_prune_once`, `interleaved_prune_densify` |
-| `usplat`     | `no_usplat`, `use_usplat`                                            |
-| `dropout`    | `no_dropout`, `dropout`                                              |
-| `ess`        | `no_ess`, `ess`                                                      |
+| Axis         | Options |
+| ------------ | ------- |
+| `isotropy`   | `anisotropic`, `isotropic` |
+| `appearance` | `rgb`, `sh1`, `sh3`, `sh3_3d` |
+| `sorting`    | `sort`, `sort_free` |
+| `pruning`    | `no_pruning`, `early_init_pruning`, `final_pruning`, `densify_then_prune_once`, `interleaved_prune_densify` |
+| `usplat`     | `no_usplat`, `use_usplat` |
+| `dropout`    | `no_dropout`, `dropout`, `use_dropout` |
+| `ess`        | `no_ess`, `ess`, `use_ess` |
 
-Example Cartesian smoke test:
+Known invalid combinations are filtered by default. Notably, `sort_free_render` is incompatible with env maps, depth loss, opacity-mask loss, and USplat uncertainty scoring. Use `--include-invalid-combinations` only when deliberately debugging those cases.
+
+### Iteration and schedule defaults
+
+`batch_train.py` retargets generated runs to `--max-iters 30000` by default. It scales iteration-like schedule values such as densification, pruning, ESS, opacity reset, SH increase, and USplat start from the source config to the target iteration count.
+
+Use this to preserve each input config's original iteration count:
+
+```bash
+uv run python batch_train.py configs/dnerf_ablation/*.yaml \
+  --max-iters 0 \
+  --output-root output/ablations
+```
+
+Useful schedule controls:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--max-iters N` | Target iteration count for generated runs. Default `30000`; `0` keeps config iterations unchanged. |
+| `--schedule-reference-iters N` | Reference iteration count for schedule CLI defaults. Default `15000`. |
+| `--scale-schedule-intervals` / `--no-scale-schedule-intervals` | Enable/disable scaling of interval-style values. |
+| `--seed-offset N` | Offset seeds across generated variants. |
+| `--set KEY=VALUE` | Apply a flat override to every generated run. Values are parsed as Python literals when possible. |
+| `--extra-arg '...'` | Append raw CLI args to every `train.py` command. |
+
+Pruning schedule controls:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--early-init-prune-step`, `--early-init-prune-ratio` | Configure `early_init_pruning`. |
+| `--final-prune-fraction`, `--final-prune-ratio` | Configure `final_pruning`. |
+| `--one-shot-prune-step`, `--one-shot-prune-ratio` | Configure `densify_then_prune_once`. |
+| `--one-shot-densify-from-iter`, `--one-shot-densify-until-iter`, `--one-shot-densification-interval` | Densification schedule before one-shot pruning. |
+| `--interleaved-prune-from-iter`, `--interleaved-prune-until-iter`, `--interleaved-prune-ratio`, `--interleaved-prune-interval` | Interleaved spatio-temporal pruning schedule. |
+| `--interleaved-densify-from-iter`, `--interleaved-densify-until-iter`, `--interleaved-densification-interval` | Densification schedule paired with interleaved pruning. |
+
+### Local 8 GB laptop mode
+
+Use `--laptop-8gb` for local low-memory runs:
+
+```bash
+uv run python batch_train.py configs/dnerf_ablation/bouncingballs.yaml \
+  --laptop-8gb \
+  --limit 4 \
+  --output-root output/ablations_laptop
+```
+
+Laptop mode changes defaults unless you explicitly override them:
+
+| Default changed by `--laptop-8gb` | Value |
+| --------------------------------- | ----- |
+| Runner | `python` |
+| Quota reservation | disabled |
+| Matrix preset | `essential` if no matrix flags were supplied |
+| Max iterations | `10000` |
+| Concurrent ablations per GPU | `1` |
+| Batch size | `1` |
+| Initial points | `50000` |
+| Save/test iterations | `[10000]` |
+| Resolution | `4` |
+| Densification cap | `150000` points |
+
+For a tiny command-generation smoke test, override iterations explicitly:
 
 ```bash
 uv run python batch_train.py configs/dnerf_ablation/bouncingballs.yaml \
@@ -263,10 +366,13 @@ uv run python batch_train.py configs/dnerf_ablation/bouncingballs.yaml \
   --output-root output/ablations_smoke \
   --set iterations=1000 \
   --set position_lr_max_steps=1000 \
-  --no-quota-reservation
+  --set 'test_iterations=[1000]' \
+  --set 'save_iterations=[1000]'
 ```
 
-Example fixed sort-free Bouncing Balls sweep:
+### Cartesian examples
+
+Fixed sort-free Bouncing Balls sweep:
 
 ```bash
 uv run python batch_train.py configs/dnerf_ablation/bouncingballs.yaml \
@@ -281,7 +387,7 @@ uv run python batch_train.py configs/dnerf_ablation/bouncingballs.yaml \
   --dropout-options no_dropout \
   --ess-options no_ess \
   --output-root output/ablations_fixed_longer_sortfree \
-  --set 'save_iterations=[]' \
+  --set 'save_iterations=[1000,2000,3000,4000,5000,6000,7000,8000,9000,10000]' \
   --set 'test_iterations=[1000,2000,3000,4000,5000,6000,7000,8000,9000,10000]' \
   --set iterations=10000 \
   --set position_lr_max_steps=10000 \
@@ -290,7 +396,7 @@ uv run python batch_train.py configs/dnerf_ablation/bouncingballs.yaml \
   --no-quota-reservation
 ```
 
-Example TRex sweep with dropout enabled for every variant:
+TRex sweep with dropout enabled globally instead of as an axis:
 
 ```bash
 uv run python batch_train.py configs/dnerf_ablation/trex.yaml \
@@ -300,45 +406,114 @@ uv run python batch_train.py configs/dnerf_ablation/trex.yaml \
   --sorting-options sort,sort_free \
   --output-root output/ablations_no_usplat_dropout_on \
   --set 'save_iterations=[1000,2000,3000,4000,5000,6000,7000,8000,9000,10000]' \
+  --set 'test_iterations=[1000,2000,3000,4000,5000,6000,7000,8000,9000,10000]' \
   --set use_usplat=False \
   --set random_dropout_prob=0.2 \
   --set lambda_rdr=1.0 \
   --no-quota-reservation
 ```
 
-In the second command, dropout is not an axis. It is enabled globally through `random_dropout_prob` and `lambda_rdr`.
+### Metrics, resume behavior, and outputs
 
-Important batch flags:
+The runner auto-detects completed runs. If `run_metrics.json` is already `ok`, the run is skipped. If a checkpoint exists but metrics are missing or failed, it runs metrics-only. Failed existing runs are retried by default; use `--no-retry-failed-existing` to keep old failure records.
 
-| Flag                                             | Meaning                                                                              |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `--dry-run`                                      | Print generated commands without running.                                            |
-| `--write-configs-only`                           | Generate YAML configs only.                                                          |
-| `--print-only-paths`                             | Print generated output paths only.                                                   |
-| `--limit`                                        | Limit variants per input config. Useful for smoke tests.                             |
-| `--set KEY=VALUE`                                | Apply a flat override to every generated run.                                        |
-| `--extra-arg`                                    | Append raw CLI arguments to each training command.                                   |
-| `--output-root`                                  | Root directory for generated model outputs.                                          |
-| `--generated-config-root`                        | Root directory for generated YAML configs.                                           |
-| `--skip-metrics`                                 | Train only; do not run post-training metrics.                                        |
-| `--skip-checkpoint-metrics`                      | Disable per-checkpoint training-curve metrics.                                       |
-| `--mobilegs-report` / `--no-mobilegs-report`     | Enable/disable Mobile-GS export and benchmark after each run.                        |
-| `--mobilegs-report-scope`                        | Run Mobile-GS reporting for `all` rows or only `sort_free` rows.                     |
-| `--submit-slurm`                                 | Submit one Slurm allocation with worker tasks.                                       |
-| `--no-quota-reservation`                         | Disable quota checks, recommended for local machines.                                |
-| `--cleanup-after-run` / `--no-cleanup-after-run` | Delete bulky artifacts after each run while preserving metadata and best checkpoint. |
+Metrics flags:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--skip-metrics` | Train only; skip final metrics and Mobile-GS quality comparisons. |
+| `--eval-split test|train` | Split for final metrics. Default `test`, falling back to train if no test cameras exist. |
+| `--render-fps-warmup N` | Warmup renders before FPS timing. |
+| `--vram-poll-interval SEC` | `nvidia-smi` polling interval for peak training VRAM. |
+| `--summary-filename NAME` | Summary CSV filename. Default `ablation_metrics.csv`. |
+| `--summary-jsonl-filename NAME` | Summary JSONL filename. Default `ablation_metrics.jsonl`. |
+| `--skip-checkpoint-metrics` | Disable per-checkpoint training-curve metrics. |
+| `--checkpoint-eval-split test|train` | Split for checkpoint-history metrics. Default `test`. |
+| `--checkpoint-metrics-filename NAME` | Per-run checkpoint-history CSV filename. |
+| `--checkpoint-metrics-jsonl-filename NAME` | Per-run checkpoint-history JSONL filename. |
 
 Batch output files include:
 
-| File                            | Contents                                         |
-| ------------------------------- | ------------------------------------------------ |
-| `run_metrics.json`              | Per-run final metrics and status.                |
-| `ablation_metrics.csv`          | Summary table across runs.                       |
-| `ablation_metrics.jsonl`        | JSONL version of the summary.                    |
-| `checkpoint_eval_metrics.csv`   | Metrics for evaluated checkpoints over training. |
-| `checkpoint_eval_metrics.jsonl` | JSONL version of per-checkpoint metrics.         |
-| `mobilegs_metrics.json`         | Mobile-GS export/benchmark metrics when enabled. |
-| `mobilegs_quantized.mobile.pt`  | Quantized Mobile-GS payload when enabled.        |
+| File | Contents |
+| ---- | -------- |
+| `run_metrics.json` | Per-run status, final metrics, paths, timing, VRAM, quota, Mobile-GS fields, and diagnostics. |
+| `ablation_metrics.csv` | Summary table across runs. |
+| `ablation_metrics.jsonl` | JSONL version of the summary. |
+| `checkpoint_eval_metrics.csv` | Aggregated checkpoint-history metrics across runs. |
+| `checkpoint_eval_metrics.jsonl` | JSONL version of checkpoint-history metrics. |
+| `<run>/checkpoint_eval_metrics.csv` | Per-run checkpoint-history metrics. |
+| `<run>/checkpoint_eval_metrics.jsonl` | Per-run checkpoint-history metrics in JSONL. |
+| `mobilegs_metrics.json` | Per-run Mobile-GS export/benchmark metrics when enabled. |
+| `mobilegs_quantized.mobile.pt` | Per-run quantized Mobile-GS payload when enabled. |
+
+### Mobile-GS reporting
+
+Mobile-GS export, compression, and benchmark reporting is enabled by default for all rows, not only sort-free rows. It stores compressed payloads and post-quantization speed/quality metrics next to each run.
+
+Common Mobile-GS reporting flags:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--mobilegs-report` / `--no-mobilegs-report` | Enable/disable post-training Mobile-GS reporting. Default enabled. |
+| `--mobilegs-report-scope all|sort_free` | Report all rows or only sort-free rows. Default `all`. |
+| `--require-mobilegs-report` / `--no-require-mobilegs-report` | Fail the run if Mobile-GS reporting fails. Default does not fail the run. |
+| `--mobilegs-benchmark-render-mode match|sort_free|sorted` | Renderer used for compressed-payload benchmarking. Default `match`. |
+| `--mobilegs-force-first-order-sh` | Train/export first-order SH for Mobile-GS reporting when applicable. |
+| `--mobilegs-teacher-checkpoint PATH` | Optional sorted-render teacher checkpoint for Mobile-GS distillation. |
+| `--mobilegs-sh-distill-lambda`, `--mobilegs-depth-distill-lambda` | Teacher RGB/depth distillation weights. |
+| `--mobilegs-codebook-size`, `--mobilegs-block-size`, `--mobilegs-kmeans-iters`, `--mobilegs-uniform-bits` | NVQ/uniform quantization settings. |
+| `--mobilegs-build-visibility-filter` / `--no-mobilegs-build-visibility-filter` | Enable/disable temporal visibility-mask export. Default enabled. |
+| `--mobilegs-temporal-keyframes`, `--mobilegs-temporal-mask-window`, `--mobilegs-temporal-mask-threshold`, `--mobilegs-views-per-keyframe` | Temporal visibility-mask controls. |
+| `--mobilegs-benchmark-split test|train` | Split used for Mobile-GS benchmark. Default `test`. |
+| `--mobilegs-benchmark-warmup`, `--mobilegs-benchmark-repeats`, `--mobilegs-quality-samples` | Benchmark and quality-sampling controls. |
+| `--mobilegs-mobile-filename`, `--mobilegs-metrics-filename` | Per-run output filenames. |
+
+Example: train all rows but only run Mobile-GS reporting for sort-free rows:
+
+```bash
+uv run python batch_train.py configs/dnerf_ablation/*.yaml \
+  --output-root output/ablations \
+  --mobilegs-report-scope sort_free
+```
+
+### Slurm, quota, and cleanup
+
+`--submit-slurm` submits one allocation and launches long-lived `srun` worker steps. Runs are greedily assigned to workers by estimated cost. Each worker can run multiple ablations concurrently with `--ablations-per-gpu`; the default is `3` for large GPUs, while `--laptop-8gb` lowers it to `1`.
+
+Useful Slurm flags:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--submit-slurm` | Submit an `sbatch` allocation. With `--dry-run`, prints the `sbatch` command only. |
+| `--slurm-partition`, `--slurm-account`, `--slurm-qos`, `--slurm-time` | Standard Slurm allocation controls. |
+| `--slurm-gpus`, `--slurm-gpus-per-node`, `--slurm-nodes` | GPU/node allocation controls. |
+| `--slurm-tasks`, `--slurm-tasks-per-node` | Worker task layout. |
+| `--slurm-total-cpus`, `--slurm-mem` | CPU and memory allocation. |
+| `--slurm-gres`, `--slurm-worker-gres` | Exact GRES strings for `sbatch`/worker `srun`. |
+| `--ablations-per-gpu`, `--runs-per-gpu` | Concurrent ablations per worker/GPU. |
+| `--slurm-log-dir`, `--slurm-job-name` | Slurm log and job naming. |
+| `--slurm-export`, `--slurm-chdir` | Batch environment export and working directory. |
+| `--slurm-extra-sbatch-arg`, `--slurm-srun-extra-arg` | Append raw Slurm args. |
+
+Quota reservation is enabled by default for local and Slurm runs. Disable it on local machines or clusters without the expected quota tooling:
+
+```bash
+uv run python batch_train.py configs/dnerf_ablation/*.yaml \
+  --output-root output/ablations \
+  --no-quota-reservation
+```
+
+Quota and cleanup flags:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--quota-reservation` / `--no-quota-reservation` | Reserve quota before active training runs. |
+| `--quota-command` | Quota command. Default `lquota`. |
+| `--quota-fallback-root` | Directory measured with `du` if quota command is unavailable. |
+| `--quota-limit-gb`, `--quota-reserve-gb`, `--train-run-peak-storage-gb` | Quota accounting controls. |
+| `--quota-poll-interval` | Seconds between quota checks while waiting. |
+| `--cleanup-existing-artifacts` / `--no-cleanup-existing-artifacts` | Prune bulky artifacts from existing run dirs before scheduling when safe. |
+| `--cleanup-after-run` / `--no-cleanup-after-run` | Delete bulky artifacts after each run while preserving metadata and the best available checkpoint. |
 
 ---
 
@@ -551,7 +726,6 @@ uv run python scripts/collect_low_psnr_reruns_small.py \
   --dry-run
 ```
 
-```markdown
 ## Gaussian visualizer
 
 Export an interactive 3D Plotly visualization of the Gaussians from a checkpoint:
@@ -603,4 +777,3 @@ This file must stay alongside the HTML when sharing or moving the output.
 | `--leftover-opacity`       | Alias for `--render-opacity`, kept for backwards compatibility.                           |
 | `--camera-center`          | Camera origin used for SH color evaluation, as three floats. Default `0.0 0.0 0.0`.      |
 | `--include-plotlyjs`       | `cdn` for a standalone file with a CDN script tag; `false` for an embeddable snippet.     |
-```
