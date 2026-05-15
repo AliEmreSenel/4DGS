@@ -47,7 +47,7 @@
 
 Gaussian Splatting has been used extensively for scene reconstruction from videos, thanks to its relatively small training requirements. In the 4D setting (4DGS), frames from a video are used to train a model that represents a scene in space and time. This representation can then be rendered from novel camera views as a function of time, position, orientation, and space. \
 
-In a 4DGS model, the scene is represented by many Gaussian primitives, parametrized by a position vector $mu$, which places their center in space, a covariance matrix $Sigma = Sigma^T$ allowing anisotropic deformation, and a rotation matrix $R$, further orienting the distribution in space. Color is treated as a vector field over the surface of each Gaussian, encoded by a fixed number of Spherical Harmonic (SH) coefficients, which approximate view-dependent color. Compared to constant color, SH coefficients allow smoother appearance at the cost of more variables. Both Covariance+Rotation and SH can reduce the number of Gaussians needed by increasing per-primitive expressiveness.
+In a 4DGS model, the scene is represented by many Gaussian primitives, parametrized by a position vector $mu$, which places their center in space, and a covariance matrix $Sigma = Sigma^T$ that allows anisotropic deformation. In practice, this covariance is parameterized through scale and rotation rather than by storing an arbitrary matrix directly. Color is associated with each Gaussian and encoded by basis coefficients such as Spherical Harmonics (SH) or, in Native 4DGS, 4D Spherindrical Harmonics (4DSH), which approximate view-dependent and time-dependent radiance. Compared to constant color, these coefficients allow smoother appearance at the cost of more variables. Both anisotropic covariance and richer color bases can reduce the number of Gaussians needed by increasing per-primitive expressiveness.
 
 Training iteratively reconstructs ground-truth images by rendering the Gaussians and optimizing image-similarity losses. The final output is a list of Gaussians, which can be projected to a camera plane and rasterized to obtain a reconstructed image. During inference, each pixel color is obtained by integrating Gaussian contributions along the view ray, while accounting for opacity, distance, and remaining transmittance. \
 
@@ -57,27 +57,27 @@ Although dynamic scene reconstruction has produced impressive results, many prob
 
 == Gaussian Representation
 
-To understand where these tradeoffs arise, we first describe the Gaussian representation itself. The parametrization of Gaussians in Native 4DGS is a tradeoff between using few variables and being expressive enough that fewer Gaussians are necessary to describe a scene. In 4DGS-Native, each Gaussian is characterized by a position vector $(mu_x, mu_y, mu_z, mu_t) = mu in RR^4$ representing the center of the Gaussian, that is, the mean of the distribution, a covariance matrix $Sigma in RR^(4 times 4)$, which distorts the Gaussian in time and space, a rotation, represented using two quaternions \ $r_1, r_2 in HH$. For color, the Gaussians are equipped with opacity $o in [0,1]$, and a series of SH coefficients, which approximate color fields on a sphere surface: SH(m) uses $(m + 1)^2$ coefficients per color channel, so SH(3) requires 16 coefficients per channel, or 48 RGB scalars per Gaussian. SH(0) corresponds to plain RGB colors.
+To understand where these tradeoffs arise, we first describe the Gaussian representation itself. The parametrization of Gaussians in Native 4DGS is a tradeoff between using few variables and being expressive enough that fewer Gaussians are necessary to describe a scene. In 4DGS-Native, each Gaussian is characterized by a position vector $(mu_x, mu_y, mu_z, mu_t) = mu in RR^4$ representing the center of the Gaussian, that is, the mean of the distribution; scale parameters and a 4D rotation, represented using two quaternions \ $r_1, r_2 in HH$, which together define the covariance $Sigma in RR^(4 times 4)$ and distort the Gaussian in time and space. For color, the native Gaussians are equipped with opacity $o in [0,1]$ and 4D Spherindrical Harmonic (4DSH) coefficients, which approximate view- and time-dependent color. In our ablations, SH(3) denotes the degree-3 spatial SH color setting used in the implementation: SH(m) uses $(m + 1)^2$ coefficients per color channel, so SH(3) requires 16 coefficients per channel, or 48 RGB scalars per Gaussian. SH(0) corresponds to plain RGB colors.
 
 $
-  G_i = (mu_i, Sigma_i, o_i, (r_1, r_2), arrow("SH")_i(3))
+  G_i = (mu_i, S_i, (r_1, r_2), o_i, arrow("4DSH")_i)
 $
 
-Variations of this representation have also been developed to reduce the number of variables, which reduces training time and storage size but also lowers expressiveness. Isotropic Gaussians are spherical, but retain the time covariance, allowing them to shrink or grow in time, but using 8 fewer scalars. This is encoded in a matrix with a $3 times 3$ constant-values submatrix, and a time-varying time vector. Here, $bold(1)$ represents the matrix with $1$ in each entry.
+Variations of this representation have also been developed to reduce the number of variables, which reduces training time and storage size but also lowers expressiveness. Isotropic Gaussians are spherical in the spatial dimensions and keep the temporal dimension independent, allowing them to shrink or grow over time while using fewer scalars. This is encoded with a $3 times 3$ spatial covariance proportional to the identity matrix and a separate temporal variance. Here, $I_(3 times 3)$ represents the $3 times 3$ identity matrix.
 
 $
   Sigma =
   mat(
-    Sigma_"xyz", Sigma_(x y z,t);
-    Sigma_(x y z,t)^T, sigma_t,
-  )               &&   "with"
-                       Sigma_"xyz" = S_"xyz" bold(1)_(3 x 3) \
-  Sigma = Sigma^T && => Sigma_(x y z,t) = Sigma_(t, x y z)^T
+    Sigma_"xyz", 0;
+    0, sigma_t,
+  )               && "with"
+                     Sigma_"xyz" = s_"xyz"^2 I_(3 times 3) \
+  Sigma = Sigma^T &&                => Sigma_(x y z,t) = 0
 $
 
 == Projection and Rendering
 
-Images may be reproduced from 4DGS-Native Gaussians by first conditioning the distributions in time, which produces a 3D normal distribution. This colored "cloud" is mapped to a 2D camera plane using a world-to-camera projection matrix, reproducing a pixel image. During training, the operation enables the calculation of loss, since the reprojected image can be directly compared to one of the reference images. Generalization loss can also be calculated with images the model was not trained on. Image reconstruction is obtained by first fixing camera position and orientation, then evaluating per-pixel color as a function of all visible Gaussians. More precisely, each pixel induces a ray that marches outwards, intersecting all Gaussians on the way between the focal point of the camera and the background, and passes through the pixel point. The color of the pixel is obtained through the integration of each per-Gaussian color contribution. The formula for the final color is traditionally sort-dependent, but we also investigate sort-free rendering, as it was shown to reduce render time in related work @du2026_mobilegs.
+Images may be reproduced from 4DGS-Native Gaussians by first conditioning the distributions in time, which produces a 3D normal distribution. This colored "cloud" is mapped to a 2D camera plane using a world-to-camera projection matrix, reproducing a pixel image. During training, the operation enables the calculation of loss, since the reprojected image can be directly compared to one of the reference images. Generalization loss can also be calculated with images the model was not trained on. Image reconstruction is obtained by first fixing camera position and orientation, projecting the visible Gaussians to screen space, and alpha-blending their projected 2D footprints in depth order. The color of each pixel is obtained by accumulating per-Gaussian color contributions according to opacity and remaining transmittance. The formula for the final color is traditionally sort-dependent, but we also investigate sort-free rendering, as it was shown to reduce render time in related work @du2026_mobilegs.
 
 *Sort-based rendering* consists of filtering the view to only consider relevant Gaussians, and processing them one at a time, integrating their colors in order, to obtain the resulting color of a pixel. For rendering, overall opacity is calculated sequentially to obtain Transmittance $T_i (p, t)$, that is, the "leftover" light level, which modulates the color contribution $c_i (v,t)$ for each successive Gaussian. Remaining light $T_(N+1)$ is attributed to background color $c_("bg")$. In the most general formulation, color is view-direction dependent, as well as time dependent. Moreover, the formula offers limited parallelization, as the sorting operation is a bottleneck.
 
@@ -93,7 +93,7 @@ $
                                       & + T_(N+1)(p, t) c_("bg")
 $
 
-*Sort-free rendering*, first proposed in @Hou2024SortFreeGS, computes color directly through a sum, where the weighting of each color contribution is computed by multiple small Multilayer Perceptrons (MLP). The MLP "compresses" information from the Gaussians, resulting in smaller storage requirements and faster inference. Moreover, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. We used @du2026_mobilegs as our reference paper for its impressive inference speed on mobile devices. However, since it is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, for computing pixel color and Gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
+*Sort-free rendering*, first proposed in @Hou2024SortFreeGS, removes the depth-sorting step by computing color through an unordered weighted sum. We used @du2026_mobilegs as our reference implementation because it combines sort-free rendering with compact, mobile-oriented 3DGS components, including MLP-predicted weights and opacity. In this formulation, transmittance is computed as an unsorted product, while weights $w_i$ depend on viewing angle, camera position and distance. Since @du2026_mobilegs is based on 3DGS, we extended the MLP architecture by adding a time term $t$ to the MLP inputs. For clarity, we provide the original formula from @du2026_mobilegs, for computing pixel color and Gaussian MLP weights. In the formulas, $Delta x_i$ is the screen-space offset between the pixel and the projected Gaussian center; $Sigma_i$ is the projected 2D covariance matrix of the Gaussian footprint; $d_i$ is the Gaussian depth in camera coordinates; $s_"max"$ is the maximum component of the Gaussian scale in camera coordinates; and $s_i$ and $r_i$ are the Gaussian scale and rotation parameters.
 
 $
   C_"pix" = (1 - T)
@@ -131,28 +131,28 @@ $
   )
 $
 
-Other optimizations have also been developed for the rendering (inference) operation: following @du2026_mobilegs, Gaussians with opacity smaller than a threshold are dropped. Visibility masks are also an option for selectively loading Gaussians at render time: @yuan2025_4dgs1k proposes binary labels for the Gaussians every 5 frames, so the rendering step loads only Gaussians that are visible just before or just after. Both of these techniques result in faster inference time, since they drastically reduce memory loading and problem size.
+Other optimizations have also been developed for the rendering (inference) operation: following @du2026_mobilegs, contribution-based pruning removes Gaussians using accumulated importance votes based on opacity and scale statistics. Visibility masks are also an option for selectively loading Gaussians at render time: @yuan2025_4dgs1k proposes key-frame temporal filtering with binary labels at sparse key frames, so the rendering step loads only Gaussians visible in the nearby temporal window. Both of these techniques result in faster inference time, since they drastically reduce memory loading and problem size.
 
 == Training
 
 Backpropagation is used for training, minimizing image-similarity metrics, with additional loss components as they are introduced by the architecture. We use the Adam optimizer and batch training to improve stability @yang2024_4dgs.
 
-As memory usage is proportional to the number of Gaussians, one seeks to minimize this number by pruning less relevant ones. Opacity pruning drops Gaussians with opacity values below a chosen threshold @yang2024_4dgs @du2026_mobilegs. Contribution pruning accumulates a contribution value over training steps and drops Gaussians that remain insufficiently relevant for enough iterations. Spatio-Temporal pruning drops the bottom $~ 90%$ quantile, attributing a higher ranking to more visible and longer-lasting Gaussians @luo2025_instant4d. Finally, Grid pruning de-duplicates Gaussians by position, velocity, temporal scale, and time placement @luo2025_instant4d. However, since most pruning rules tend to be correlated, in trying to achieve the same goal, we only implement Spatio-Temporal pruning, as it accounts for both spatial and temporal contributions, and kept Opacity Pruning from 4DGS-Native. Related to pruning, we apply densification to increase the number of Gaussians where necessary. We also implement Edge-Guided densification, adding Gaussians near image edges @Xu_2025_CVPR, and Gradient-Based densification, splitting Gaussians with high loss gradients @sun2024highfidelityslam.
+As memory usage is proportional to the number of Gaussians, one seeks to minimize this number by pruning less relevant ones. Opacity pruning drops Gaussians with opacity values below a chosen threshold @yang2024_4dgs. Contribution pruning accumulates a contribution value over training steps and drops Gaussians that remain insufficiently relevant for enough iterations @du2026_mobilegs. Spatio-Temporal pruning drops the bottom $~ 90%$ quantile, attributing a higher ranking to more visible and longer-lasting Gaussians @yuan2025_4dgs1k. Finally, Grid pruning de-duplicates Gaussians by position, velocity, temporal scale, and time placement @luo2025_instant4d. However, since most pruning rules tend to be correlated, in trying to achieve the same goal, we only implement Spatio-Temporal pruning, as it accounts for both spatial and temporal contributions, and kept Opacity Pruning from 4DGS-Native. Related to pruning, we apply densification to increase the number of Gaussians where necessary. We also implement Edge-Guided densification, adding Gaussians near image edges @Xu_2025_CVPR, and Gradient-Based densification, splitting Gaussians with high loss gradients @sun2024highfidelityslam.
 
 Rasterization is performed through custom `CUDA` kernels for speed. However, compatibility issues arise because the codebases use different versions. For this reason, we opted for a mixed pruning-densification schedule, aiming to simulate a better-than-random initialization, as opposed to MegaSAM, at the cost of worse initialization @luo2025_instant4d.
 
 == Loss
 
-In its full form, training is driven by four loss terms: a photometric reconstruction loss, an opacity regularizer, and two motion regularizers for dynamic Gaussians. The main objective is photometric fidelity, expressed as a weighted combination of the pixel-wise L1 distance between the original and reconstructed images and an SSIM-based structural term, which accounts for luminance, contrast, and texture:
+The core training objective is photometric fidelity, while additional regularizers are optional and depend on the architecture. The reconstruction loss is expressed as a weighted combination of the pixel-wise L1 distance between the original and reconstructed images and an SSIM-based structural term, which accounts for luminance, contrast, and texture:
 
 $
-  cal(L)_"rgb" = (1 - lambda_"dssim") cal(L)_1 + lambda_"dssim" cal(L)_"SSIM"
+  cal(L)_"rgb" = (1 - lambda_"dssim") cal(L)_1 + lambda_"dssim" (1 - "SSIM")
 $
 
-For dynamic outdoor scenes, photometric supervision alone is not sufficient: transparent background regions may still be filled with opaque Gaussians. To discourage this, an opacity mask loss penalises opacity in sky regions, using the ground-truth alpha channel $m_"gt"$:
+For dynamic outdoor scenes, photometric supervision alone is not sufficient: transparent sky regions may still be filled with foreground Gaussians. To discourage this, Native 4DGS uses a sky mask to penalize inverse depth in sky regions, rather than applying a ground-truth-alpha opacity loss:
 
 $
-  cal(L)_"opa" = -1 / abs(Omega) sum_(p in Omega) (1 - m_"gt"(p)) dot log(1 - alpha(p))
+  cal(L)_"sky" = 1 / abs(Omega) sum_(p in Omega) m_"sky"(p) dot D(p)^(-1)
 $
 
 Dynamic Gaussians also require temporal regularization to avoid physically implausible motion. The rigidity loss encourages nearby Gaussians to move with similar velocities. It is weighted by spatial distance and averaged over
@@ -173,7 +173,7 @@ $
   cal(L)_"motion" = 1 / G sum_(i=1)^G norm(dot(mu)_i)_2
 $
 
-where $dot(mu)_i$ is the temporal velocity estimated by finite difference. These four terms remain active throughout training.
+where $dot(mu)_i$ is the temporal velocity estimated by finite difference. In Native 4DGS, the photometric reconstruction loss is the core objective; opacity and motion regularizers are used only when the corresponding architecture or scene setting requires them.
 
 Reconstruction quality is then reported using three complementary image metrics:
 
@@ -195,7 +195,7 @@ $
   )
 $
 
-with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest-confidence Gaussians over a significant period ($> 5$ frames) become key nodes $V_k$. From the point cloud of key nodes, kNN with $k = 8$ is used to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
+with $phi = 10^6$. The term $bb(I)_(i,t)$ detects gaussian convergence in color, which forces $u = phi$ unless every pixel in the Gaussian footprint has color residual below $eta_c = 0.5$. This mechanism prevents unconverged Gaussians from being attributed high certainty. Next, the top $2%$ highest-confidence Gaussians over a significant period ($>= 5$ frames) become key nodes $V_k$. From the point cloud of key nodes, kNN is used to add edge connections between key nodes. Each non-key Gaussian is assigned to the closest key node over the full sequence.
 
 *Key-node loss* ensures that reliable Gaussians do not drift from their well-trained and certain positions, while their neighbourhoods move consistently. This is enforced by anchoring them to their pretrained positions $bold(mu)^circle$ and applying motion locality constraints:
 
@@ -232,7 +232,7 @@ $
   norm(bold(mu)_(i,t) - bold(mu)^"DQB"_(i,t))^2_(U^(-1)_(w,t,i))
 $
 
-DQB is a soft interpolation for rotations, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USPLAT iterations to protect graph index integrity.
+DQB is a soft interpolation for rotations, where $bold(mu)_(i,t)$ remains free and may deviate when the photometric loss provides a stronger signal, preserving non-rigid deformation. Density control is disabled in the first $10%$ and last $20%$ of USPLAT iterations to maintain optimization stability.
 
 #place(
   top + right,
@@ -292,7 +292,7 @@ Taken together, these results suggest that no component should be evaluated in i
 We did not identify a clear winner among the ablations, beyond individual tendencies: the best combination must be considered on a case-by-case basis. However, in our experiments the best quality-compact configuration improves visual quality over the reported 4DGS-Native @yang2024_4dgs and 4DGS-1K @yuan2025_4dgs1k baselines, while remaining more compact than 4DGS-Native but slower than 4DGS-1K: \ \
 
 #block(breakable: false)[
-  #[*Anisotropic · SH(3) · sort · ESS · interleaved prune*]
+  #[*aniso · SH(3) · sort · ESS · interleaved prune · dropout*]
 
   #v(3pt)
 
@@ -331,6 +331,6 @@ These results highlight the central theme of our study: 4DGS performance is gove
 
 = Conclusion
 
-We presented *OMNI-4DGS*, a unified framework for fast, compact dynamic reconstruction built on Native 4D Gaussian Splatting, combining architectural choices from recent work into a single ablation study. Efficient 4DGS requires increasing expressiveness per Gaussian while controlling primitive growth: anisotropic covariance and SH(3) improve reconstruction quality, interleaved pruning and densification reduce Gaussian count, serialized model size, and VRAM, and a final one-shot prune further improves FPS at deployment. Dropout and the adapted sort-free renderer were not consistently beneficial across scenes. The *anisotropic · SH(3) · sort · ESS · interleaved prune* configuration achieved the best tested quality-compactness tradeoff on both `trex` and `bouncingballs`.
+We presented *OMNI-4DGS*, a unified framework for fast, compact dynamic reconstruction built on Native 4D Gaussian Splatting, combining architectural choices from recent work into a single ablation study. Efficient 4DGS requires increasing expressiveness per Gaussian while controlling primitive growth: anisotropic covariance and SH(3) improve reconstruction quality, interleaved pruning and densification reduce Gaussian count, serialized model size, and VRAM, and a final one-shot prune further improves FPS at deployment. Dropout and the adapted sort-free renderer were not consistently beneficial across scenes. The *aniso · SH(3) · sort · ESS · interleaved prune · dropout* configuration achieved the best tested quality-compactness tradeoff on both `trex` and `bouncingballs`.
 
 #colbreak()

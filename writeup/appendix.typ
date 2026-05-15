@@ -3166,4 +3166,82 @@
       ]
     ],
   )
+
+  = Major Ablations Comparison
+
+  #let result-img-width = 3cm
+
+  #grid(
+    columns: (1fr, 1fr),
+    column-gutter: 1cm,
+    align: top,
+
+    [
+      #align(center)[*Fixed*: No USplat/Prune/ESS/Dropout, Sort, 10k.]
+
+      #grid(
+        columns: (1.2cm, 1fr, 1fr),
+        rows: (auto, auto, auto),
+        column-gutter: 5pt,
+        row-gutter: 5pt,
+        align: center + horizon,
+
+        [], [#strong[Sort]], [#strong[Sort-Free]],
+
+        [#rotate(-90deg, reflow: true)[#box(width: 4em)[#strong[Ellipsoid]]]],
+        [#image(
+          "./img/bouncingballs__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+          width: result-img-width,
+        )],
+        [#image(
+          "./img/bouncingballs__anisotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+          width: result-img-width,
+        )],
+
+        [#rotate(-90deg, reflow: true)[#box(width: 5em)[#strong[Spherical]]]],
+        [#image(
+          "./img/bouncingballs__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__10000.png",
+          width: result-img-width,
+        )],
+        [#image(
+          "./img/bouncingballs__isotropic__use_usplat__sh3__sort_free__no_pruning__no_dropout__no_ess__10000.png",
+          width: result-img-width,
+        )],
+      )
+    ],
+
+    [
+      #align(center)[*Fixed*: No USplat/Prune/ESS/Dropout, Sort, 20k.]
+
+      #grid(
+        columns: (0.5fr, 1fr, 1fr),
+        rows: (auto, auto, auto),
+        column-gutter: 5pt,
+        row-gutter: 5pt,
+        align: center + horizon,
+
+        [], [#strong[SH(3)]], [#strong[RGB]],
+
+        [#rotate(-90deg, reflow: true)[#box(width: 4em)[#strong[Ellipsoid]]]],
+        [#image(
+          "./img/trex__anisotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+          width: result-img-width,
+        )],
+        [#image(
+          "./img/trex__anisotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+          width: result-img-width,
+        )],
+
+        [#rotate(-90deg, reflow: true)[#box(width: 5em)[#strong[Spherical]]]],
+        [#image(
+          "./img/trex__isotropic__no_usplat__sh3__sort__no_pruning__no_dropout__no_ess__20000.png",
+          width: result-img-width,
+        )],
+        [#image(
+          "./img/trex__isotropic__no_usplat__rgb__sort__no_pruning__no_dropout__no_ess__20000.png",
+          width: result-img-width,
+        )],
+      )
+    ],
+  )
 ]
