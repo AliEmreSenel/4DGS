@@ -3167,8 +3167,9 @@
     ],
   )
 
-  = Major Ablations Comparison
+  We also recorded the "MOG" real-world dataset, which consists of 5 videos captured with handheld mobile phones from different angles. The dataset depicts a seated subject, who raises his eyebrows, removes his glasses and puts them back on. We synchronize the videos using clapping as auditory signals to identify beginning and end of the clip. The cameras rotate in swirling motions while fixated on the subject, for all-round imaging with fewer floating artifacts. We use MOG only as a qualitative capture, not for quantitative comparison.
 
+  = General Comparison
   #let result-img-width = 3cm
 
   #grid(
