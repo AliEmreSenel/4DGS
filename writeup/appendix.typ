@@ -2646,7 +2646,54 @@
     pos[-18.4%, moderate, SMD=+0.52; lower is better],
   )
 
-  #pagebreak()
+  #colbreak()
+
+  For completeness, we include the command that we used to generate the ablations: \ \
+
+  ```shell
+  uv run batch_train.py \
+  configs/dnerf_ablation/trex.yaml \
+  configs/dnerf_ablation/bouncingballs.yaml \
+  --matrix-preset cartesian \
+  --axes isotropy,appearance,sorting,pruning,dropout,ess \
+  --output-root output/ablations_fixed_longer_newer \
+  --max-iters 30000 \
+  --set "save_iterations=[10000,20000,30000]" \
+  --set "test_iterations=[1000,2000,3000,4000,5000,6000,7000,8000,9000,10000, \
+                          11000,12000,13000,14000,15000, \
+                          16000,17000,18000,19000,20000, \
+                          21000,22000,23000,24000,25000, \
+                          26000,27000,28000,29000,30000]" \
+  --set use_usplat=False \
+  --set ess_max_splits=500000 \
+  --set ess_from_iter=750 \
+  --set ess_until_iter=22500 \
+  --set densification_interval=750 \
+  --set densify_from_iter=750 \
+  --set densify_until_iter=22500 \
+  --interleaved-prune-from-iter 1500 \
+  --interleaved-prune-until-iter 11250 \
+  --interleaved-prune-interval 750 \
+  --interleaved-densify-from-iter 375 \
+  --interleaved-densify-until-iter 11250 \
+  --interleaved-densification-interval 375 \
+  --no-quota-reservation \
+  --slurm-driver \
+  --repo-root "$PROJECT_ROOT" \
+  --runner uv \
+  --uv-binary uv \
+  --slurm-nodes 2 \
+  --slurm-gpus 4 \
+  --slurm-gpus-per-node 2 \
+  --slurm-tasks 4 \
+  --slurm-tasks-per-node 2 \
+  --slurm-total-cpus 32 \
+  --slurm-mem 300G \
+  --ablations-per-gpu 5
+  ```
+
+  #colbreak()
+
   = *USPLAT Ablations*
   #figure(
     block(width: 100%)[
