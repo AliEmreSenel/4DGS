@@ -31,6 +31,6 @@ eggs/
 /hpc_configs
 *.path
 *.html
-/chkpnt_best.pth
 /plotly_data
 *.html
+*.pth

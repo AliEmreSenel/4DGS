@@ -644,7 +644,8 @@ def print_controls() -> None:
         "  R/T          roll left/right around the current view direction\n"
         "  W/S or ↑/↓   move forward/back along the current look direction\n"
         "  A/D or ←/→   strafe left/right relative to the current look direction\n"
-        "  Space/Ctrl   move camera-local up/down relative to the current look direction\n"
+        "  Space/Ctrl   move up/down using the current vertical movement basis\n"
+        "  U            toggle vertical movement basis: camera-local vs snapped/test-camera up\n"
         "  Q/E          scrub timestamp backward/forward\n"
         "  Shift        speed boost\n"
         "  +/-          change movement speed\n"
@@ -813,11 +814,14 @@ def toggle_fullscreen(pygame, state: ViewerState, live_cam: LiveCamera, app) -> 
 
 def apply_camera_pose(app, cam: SimpleNamespace, split_name: str, index: int) -> None:
     app["eye"] = camera_center_from_rt(cam.R, cam.T)
-    app["orientation"] = orientation_from_rt(cam.R)
+    orientation = orientation_from_rt(cam.R)
+    app["orientation"] = orientation
+    app["active_camera_up"] = orientation[:, 1].copy()
     app["time_value"] = clamp_time(float(cam.timestamp), app["time_start"], app["time_end"])
     app["snap_split"] = split_name
     app["snap_index"] = int(index)
     app["snap_name"] = str(cam.image_name)
+    refresh_locked_vertical_basis(app)
 
 
 def snap_camera(app, cameras: list[SimpleNamespace], split_name: str, direction: int) -> None:
@@ -831,6 +835,49 @@ def snap_camera(app, cameras: list[SimpleNamespace], split_name: str, direction:
     next_index = (current_index + int(direction)) % len(cameras)
     apply_camera_pose(app, cameras[next_index], split_name, next_index)
     print(f"Snapped to {split_name} camera {next_index + 1}/{len(cameras)}: {app['snap_name']} t={app['time_value']:.6f}")
+
+
+def vertical_basis_label(app) -> str:
+    return str(app.get("nav_up_label", "camera-local"))
+
+
+def refresh_locked_vertical_basis(app) -> None:
+    if app.get("nav_up_mode", "camera") != "locked":
+        return
+    up = normalize(app.get("active_camera_up", normalize_orientation(app["orientation"])[:, 1]))
+    if np.linalg.norm(up) < 1e-6:
+        up = normalize_orientation(app["orientation"])[:, 1]
+    app["nav_up_axis"] = up.copy()
+    split = str(app.get("snap_split", "snapped"))
+    app["nav_up_label"] = f"{split} camera-up"
+
+
+def toggle_vertical_basis(app) -> None:
+    current_mode = str(app.get("nav_up_mode", "camera"))
+    if current_mode == "camera":
+        up = normalize(app.get("active_camera_up", normalize_orientation(app["orientation"])[:, 1]))
+        if np.linalg.norm(up) < 1e-6:
+            up = normalize_orientation(app["orientation"])[:, 1]
+        app["nav_up_mode"] = "locked"
+        app["nav_up_axis"] = up.copy()
+        split = str(app.get("snap_split", "snapped"))
+        app["nav_up_label"] = f"{split} camera-up"
+        print(f"Vertical movement now uses {vertical_basis_label(app)}: Space moves +up, Ctrl moves -up.")
+    else:
+        app["nav_up_mode"] = "camera"
+        app["nav_up_axis"] = None
+        app["nav_up_label"] = "camera-local"
+        print("Vertical movement now uses camera-local up/down.")
+
+
+def vertical_direction(app, orientation: np.ndarray) -> np.ndarray:
+    if app.get("nav_up_mode", "camera") == "locked":
+        axis = app.get("nav_up_axis")
+        if axis is not None:
+            axis = normalize(axis)
+            if np.linalg.norm(axis) > 1e-6:
+                return axis
+    return orientation[:, 1]
 
 
 def handle_discrete_key(event_key: int, app, state: ViewerState, live_cam: LiveCamera, mods: int = 0) -> None:
@@ -849,6 +896,8 @@ def handle_discrete_key(event_key: int, app, state: ViewerState, live_cam: LiveC
         app["show_info"] = not app["show_info"]
     elif event_key == pygame.K_f:
         toggle_fullscreen(pygame, state, live_cam, app)
+    elif event_key == pygame.K_u:
+        toggle_vertical_basis(app)
     elif event_key in (pygame.K_EQUALS, getattr(pygame, "K_PLUS", pygame.K_EQUALS), pygame.K_KP_PLUS):
         app["move_speed"] *= 1.25
     elif event_key in (pygame.K_MINUS, getattr(pygame, "K_UNDERSCORE", pygame.K_MINUS), pygame.K_KP_MINUS):
@@ -856,12 +905,14 @@ def handle_discrete_key(event_key: int, app, state: ViewerState, live_cam: LiveC
     elif event_key == pygame.K_HOME:
         app["eye"] = app["initial_eye"].copy()
         app["orientation"] = app["initial_orientation"].copy()
+        app["active_camera_up"] = app["initial_orientation"][:, 1].copy()
         app["time_value"] = float(app["initial_time"])
         app["snap_split"] = "initial"
         app["snap_index"] = int(app.get("initial_snap_index", 0))
         app["snap_name"] = str(app.get("initial_snap_name", "initial"))
+        refresh_locked_vertical_basis(app)
     elif event_key == pygame.K_c:
-        snap_camera(app, state.selected_cameras, "selected", -1 if shift_down else 1)
+        snap_camera(app, state.selected_cameras, str(app.get("selected_split_label", "selected")), -1 if shift_down else 1)
     elif event_key == pygame.K_F1:
         snap_camera(app, state.train_cameras, "train", -1)
     elif event_key == pygame.K_F2:
@@ -881,7 +932,7 @@ def update_motion(keys, app, dt: float) -> None:
     # No Euler pitch/yaw state is used here, so nothing clamps at vertical look.
     orientation = normalize_orientation(app["orientation"])
     right = orientation[:, 0]
-    up = orientation[:, 1]
+    up = vertical_direction(app, orientation)
     forward = orientation[:, 2]
 
     roll_step = float(app["roll_speed"]) * float(dt)
@@ -891,7 +942,7 @@ def update_motion(keys, app, dt: float) -> None:
         orientation = rotate_orientation(orientation, forward, roll_step)
     app["orientation"] = orientation
     right = orientation[:, 0]
-    up = orientation[:, 1]
+    up = vertical_direction(app, orientation)
     forward = orientation[:, 2]
 
     move = np.zeros(3, dtype=np.float32)
@@ -943,7 +994,7 @@ def collect_info_lines(state: ViewerState, app, clock, render_ms_ema: float | No
         f"time {app['time_value']:.6f} / [{app['time_start']:.6f}, {app['time_end']:.6f}] {'paused' if app['paused'] else 'playing'}",
         f"pose {app.get('snap_split', 'free')} #{int(app.get('snap_index', 0)) + 1}: {app.get('snap_name', '')}",
         f"eye [{eye[0]:.3f}, {eye[1]:.3f}, {eye[2]:.3f}] {orientation_debug_text(app['orientation'])}",
-        f"speed {app['move_speed']:.3f} boost x{app['boost']:.1f} roll {math.degrees(app['roll_speed']):.1f} deg/s",
+        f"speed {app['move_speed']:.3f} boost x{app['boost']:.1f} roll {math.degrees(app['roll_speed']):.1f} deg/s | vertical {vertical_basis_label(app)}",
     ]
     if app.get("resize_status"):
         lines.append(str(app["resize_status"]))
@@ -1006,6 +1057,10 @@ def run_viewer(args: argparse.Namespace) -> None:
         "orientation": initial_orientation.copy(),
         "initial_eye": initial_eye.copy(),
         "initial_orientation": initial_orientation.copy(),
+        "active_camera_up": initial_orientation[:, 1].copy(),
+        "nav_up_mode": "camera",
+        "nav_up_axis": None,
+        "nav_up_label": "camera-local",
         "time_value": float(state.time_value),
         "initial_time": float(state.time_value),
         "time_start": float(state.time_start),
@@ -1027,7 +1082,8 @@ def run_viewer(args: argparse.Namespace) -> None:
         "relative_mouse": False,
         "mouse_dx": 0.0,
         "mouse_dy": 0.0,
-        "snap_split": str(args.split),
+        "selected_split_label": str(args.split if args.split != "all" else "selected"),
+        "snap_split": str(args.split if args.split != "all" else "selected"),
         "snap_index": int(args.start_camera if args.start_camera >= 0 else 0),
         "snap_name": str(state.base_camera.image_name),
         "initial_snap_index": int(args.start_camera if args.start_camera >= 0 else 0),
@@ -1151,7 +1207,7 @@ def run_viewer(args: argparse.Namespace) -> None:
                 pygame.display.set_caption(
                     "4DGS Interactive Viewer | "
                     f"{clock.get_fps():5.1f} fps | render {render_ms_ema:5.1f} ms | "
-                    f"t={app['time_value']:.4f} | speed={app['move_speed']:.3f}"
+                    f"t={app['time_value']:.4f} | speed={app['move_speed']:.3f} | vertical={vertical_basis_label(app)}"
                 )
                 last_title_update = now
     finally:
