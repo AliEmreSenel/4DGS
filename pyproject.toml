@@ -9,7 +9,7 @@ description = "4D Gaussian Splatting with JIT-built CUDA extensions"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "torch>=2.10",
+  "torch>=2.12.0",
   "torchvision",
   "plyfile==0.8.1",
   "tqdm==4.66.3",
