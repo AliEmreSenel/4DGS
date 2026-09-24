@@ -2,6 +2,8 @@
 
 Dynamic scene reconstruction converts videos into compact, renderable 4D models. The dominant approach, Native 4D Gaussian Splatting is fast and effective but often suffers from Gaussian overgrowth, high VRAM use, large checkpoints, slow rendering, and fragile pruning or densification choices. OMNI-4DGS studies these quality-efficiency tradeoffs by jointly evaluating representation, rendering, and training decisions. We ablate covariance type, RGB versus 4DSH, rendering strategy, pruning schedules, ESS, dropout, and motion regularization across quality and efficiency metrics. Our best tested quality-compact preset improves visual quality while keeping model size compact, reaching 34.42 PSNR/29k Gaussians on _bouncingballs_ and 31.89 PSNR/81k on _trex_, improving the quality-compactness tradeoff for practical 4DGS deployment.
 
+Writeups: [poster](./writeup/2.%20OMNI-4DGS%20Poster.pdf) and [report](./writeup/3.%20OMNI-4DGS_Report.pdf). Their source files are written in [Typst](https://typst.app/) and are available in [`writeup/`](./writeup/).
+
 ## Bouncing Balls ⚾
 
 **Fixed:** No USplat/Prune/ESS/Dropout, Sort, 10k.
